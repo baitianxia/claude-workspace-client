@@ -1,8 +1,15 @@
-export type SessionStatus = "starting" | "running" | "exited" | "failed";
+export type SessionStatus =
+  | "starting"
+  | "running"
+  | "exited"
+  | "failed"
+  | "interrupted";
 
 export interface ProjectRecord {
   id: string;
   name: string;
+  alias?: string;
+  pinned: boolean;
   rootPath: string;
   createdAt: number;
   lastOpenedAt: number;
@@ -56,6 +63,18 @@ export interface RenameSessionRequest {
   title: string;
 }
 
+export interface UpdateProjectRequest {
+  projectId: string;
+  alias?: string | null;
+  pinned?: boolean;
+}
+
+export interface SessionNotificationRequest {
+  sessionId: string;
+  title: string;
+  body: string;
+}
+
 export interface ResizeTerminalRequest {
   sessionId: string;
   columns: number;
@@ -70,6 +89,7 @@ export interface WriteTerminalRequest {
 export interface DesktopApi {
   getSnapshot(): Promise<AppSnapshot>;
   selectProjectDirectory(): Promise<ProjectRecord | null>;
+  updateProject(request: UpdateProjectRequest): Promise<ProjectRecord>;
   removeProject(projectId: string): Promise<void>;
   selectClaudeExecutable(): Promise<ClaudeExecutableState | null>;
   autoDetectClaudeExecutable(): Promise<ClaudeExecutableState>;
@@ -79,6 +99,7 @@ export interface DesktopApi {
   stopSession(sessionId: string): Promise<void>;
   readClipboardText(): Promise<string>;
   writeClipboardText(text: string): Promise<void>;
+  showSessionNotification(request: SessionNotificationRequest): Promise<void>;
   writeTerminal(request: WriteTerminalRequest): void;
   resizeTerminal(request: ResizeTerminalRequest): void;
   getTerminalSnapshot(sessionId: string): Promise<TerminalSnapshot>;

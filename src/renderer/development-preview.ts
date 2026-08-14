@@ -3,6 +3,7 @@ import type {
   DesktopApi,
   SessionChangedEvent,
   SessionRecord,
+  TerminalDataEvent,
 } from "../shared/contracts";
 
 const now = Date.now();
@@ -12,6 +13,8 @@ const previewSnapshot: AppSnapshot = {
     {
       id: "mall-service",
       name: "mall-service",
+      alias: "商城服务",
+      pinned: true,
       rootPath: "D:\\workspace\\mall-service",
       createdAt: now - 80_000,
       lastOpenedAt: now,
@@ -19,6 +22,7 @@ const previewSnapshot: AppSnapshot = {
     {
       id: "order-center",
       name: "order-center",
+      pinned: false,
       rootPath: "D:\\workspace\\order-center",
       createdAt: now - 70_000,
       lastOpenedAt: now - 1_000,
@@ -26,6 +30,7 @@ const previewSnapshot: AppSnapshot = {
     {
       id: "frontend-console",
       name: "frontend-console",
+      pinned: false,
       rootPath: "D:\\workspace\\frontend-console",
       createdAt: now - 60_000,
       lastOpenedAt: now - 2_000,
@@ -77,6 +82,7 @@ export function installDevelopmentPreview(): void {
   let snapshot = structuredClone(previewSnapshot);
   let clipboardText = "";
   const sessionListeners = new Set<(event: SessionChangedEvent) => void>();
+  const terminalListeners = new Set<(event: TerminalDataEvent) => void>();
 
   if (new URLSearchParams(window.location.search).has("autoConfirm")) {
     window.confirm = () => true;
@@ -88,9 +94,35 @@ export function installDevelopmentPreview(): void {
     }
   };
 
+  if (new URLSearchParams(window.location.search).has("unreadDemo")) {
+    window.setTimeout(() => {
+      for (const listener of terminalListeners) {
+        listener({ sessionId: "ui-upgrade", data: "new output", sequence: 1 });
+      }
+    }, 700);
+  }
+
   const api: DesktopApi = {
     getSnapshot: async () => structuredClone(snapshot),
     selectProjectDirectory: async () => null,
+    updateProject: async ({ projectId, alias, pinned }) => {
+      const project = snapshot.projects.find((item) => item.id === projectId);
+      if (!project) {
+        throw new Error("Preview project does not exist.");
+      }
+      if (alias !== undefined) {
+        const normalizedAlias = alias?.trim();
+        if (normalizedAlias) {
+          project.alias = normalizedAlias;
+        } else {
+          delete project.alias;
+        }
+      }
+      if (pinned !== undefined) {
+        project.pinned = pinned;
+      }
+      return { ...project };
+    },
     removeProject: async (projectId) => {
       snapshot.projects = snapshot.projects.filter(
         (project) => project.id !== projectId,
@@ -144,13 +176,17 @@ export function installDevelopmentPreview(): void {
     writeClipboardText: async (text) => {
       clipboardText = text;
     },
+    showSessionNotification: async () => undefined,
     writeTerminal: () => undefined,
     resizeTerminal: () => undefined,
     getTerminalSnapshot: async (sessionId) => ({
       data: `\u001b[38;2;218;130;96mClaude Code\u001b[0m  ${sessionId}\r\n\r\n  Development interface preview\r\n`,
       lastSequence: 0,
     }),
-    onTerminalData: () => () => undefined,
+    onTerminalData: (listener) => {
+      terminalListeners.add(listener);
+      return () => terminalListeners.delete(listener);
+    },
     onSessionChanged: (listener) => {
       sessionListeners.add(listener);
       return () => sessionListeners.delete(listener);

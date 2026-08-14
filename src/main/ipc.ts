@@ -1,11 +1,19 @@
-import { clipboard, dialog, ipcMain, type BrowserWindow } from "electron";
+import {
+  clipboard,
+  dialog,
+  ipcMain,
+  Notification,
+  type BrowserWindow,
+} from "electron";
 import type {
   AppSnapshot,
   CreateSessionRequest,
   RenameSessionRequest,
   ResizeTerminalRequest,
+  SessionNotificationRequest,
   SessionRecord,
   TerminalDataEvent,
+  UpdateProjectRequest,
   WriteTerminalRequest,
 } from "../shared/contracts";
 import { IPC_CHANNELS } from "../shared/ipc-channels";
@@ -40,6 +48,17 @@ function requireClipboardText(value: unknown): string {
   return value;
 }
 
+function requireShortText(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a string.`);
+  }
+  const text = value.trim();
+  if (!text || [...text].length > maxLength || /\p{Cc}/u.test(text)) {
+    throw new Error(`${label} is invalid.`);
+  }
+  return text;
+}
+
 export function registerIpcHandlers(options: {
   window: BrowserWindow;
   projectStore: ProjectStore;
@@ -67,6 +86,31 @@ export function registerIpcHandlers(options: {
     }
     return projectStore.addProject(selection.filePaths[0]);
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.updateProject,
+    (_event, request: UpdateProjectRequest) => {
+      if (!request || typeof request !== "object") {
+        throw new Error("Project update request is invalid.");
+      }
+      const projectId = requireIdentifier(request.projectId, "Project ID");
+      if (
+        request.alias !== undefined &&
+        request.alias !== null &&
+        typeof request.alias !== "string"
+      ) {
+        throw new Error("Project alias is invalid.");
+      }
+      if (request.pinned !== undefined && typeof request.pinned !== "boolean") {
+        throw new Error("Project pin state is invalid.");
+      }
+      return projectStore.updateProject({
+        projectId,
+        ...(request.alias === undefined ? {} : { alias: request.alias }),
+        ...(request.pinned === undefined ? {} : { pinned: request.pinned }),
+      });
+    },
+  );
 
   ipcMain.handle(
     IPC_CHANNELS.removeProject,
@@ -105,7 +149,7 @@ export function registerIpcHandlers(options: {
 
   ipcMain.handle(
     IPC_CHANNELS.createSession,
-    (_event, request: CreateSessionRequest) => {
+    async (_event, request: CreateSessionRequest) => {
       if (!request || typeof request !== "object") {
         throw new Error("Session request is invalid.");
       }
@@ -117,13 +161,15 @@ export function registerIpcHandlers(options: {
       if (request.title !== undefined && typeof request.title !== "string") {
         throw new Error("Session title is invalid.");
       }
-      return sessionManager.createSession(project, request.title);
+      const session = sessionManager.createSession(project, request.title);
+      await projectStore.replaceSessions(sessionManager.listSessions());
+      return session;
     },
   );
 
   ipcMain.handle(
     IPC_CHANNELS.renameSession,
-    (_event, request: RenameSessionRequest) => {
+    async (_event, request: RenameSessionRequest) => {
       if (!request || typeof request !== "object") {
         throw new Error("Session rename request is invalid.");
       }
@@ -131,14 +177,17 @@ export function registerIpcHandlers(options: {
       if (typeof request.title !== "string") {
         throw new Error("Session title is invalid.");
       }
-      return sessionManager.renameSession(sessionId, request.title);
+      const session = sessionManager.renameSession(sessionId, request.title);
+      await projectStore.replaceSessions(sessionManager.listSessions());
+      return session;
     },
   );
 
   ipcMain.handle(
     IPC_CHANNELS.removeSession,
-    (_event, sessionId: unknown) => {
+    async (_event, sessionId: unknown) => {
       sessionManager.removeSession(requireIdentifier(sessionId, "Session ID"));
+      await projectStore.replaceSessions(sessionManager.listSessions());
     },
   );
 
@@ -157,6 +206,34 @@ export function registerIpcHandlers(options: {
     IPC_CHANNELS.writeClipboardText,
     (_event, text: unknown) => {
       clipboard.writeText(requireClipboardText(text));
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.showSessionNotification,
+    (_event, request: SessionNotificationRequest) => {
+      if (!request || typeof request !== "object") {
+        throw new Error("Notification request is invalid.");
+      }
+      const sessionId = requireIdentifier(request.sessionId, "Session ID");
+      if (!sessionManager.listSessions().some((session) => session.id === sessionId)) {
+        return;
+      }
+      if (!Notification.isSupported()) {
+        return;
+      }
+      const notification = new Notification({
+        title: requireShortText(request.title, "Notification title", 120),
+        body: requireShortText(request.body, "Notification body", 240),
+      });
+      notification.on("click", () => {
+        if (window.isMinimized()) {
+          window.restore();
+        }
+        window.show();
+        window.focus();
+      });
+      notification.show();
     },
   );
 
@@ -212,6 +289,9 @@ export function registerIpcHandlers(options: {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.sessionChanged, { session });
     }
+    void projectStore
+      .replaceSessions(sessionManager.listSessions())
+      .catch((error: unknown) => console.error("Failed to persist sessions", error));
   };
 
   sessionManager.on("data", sendTerminalData);

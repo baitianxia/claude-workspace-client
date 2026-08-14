@@ -12,6 +12,7 @@ type IpcChannelMap = typeof import("../shared/ipc-channels").IPC_CHANNELS;
 const IPC_CHANNELS: IpcChannelMap = {
   getSnapshot: "workspace:get-snapshot",
   selectProjectDirectory: "workspace:select-project-directory",
+  updateProject: "workspace:update-project",
   removeProject: "workspace:remove-project",
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
@@ -21,6 +22,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   stopSession: "workspace:stop-session",
   readClipboardText: "workspace:read-clipboard-text",
   writeClipboardText: "workspace:write-clipboard-text",
+  showSessionNotification: "workspace:show-session-notification",
   writeTerminal: "workspace:write-terminal",
   resizeTerminal: "workspace:resize-terminal",
   getTerminalSnapshot: "workspace:get-terminal-snapshot",
@@ -32,6 +34,8 @@ const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.getSnapshot),
   selectProjectDirectory: () =>
     ipcRenderer.invoke(IPC_CHANNELS.selectProjectDirectory),
+  updateProject: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.updateProject, request),
   removeProject: (projectId) =>
     ipcRenderer.invoke(IPC_CHANNELS.removeProject, projectId),
   selectClaudeExecutable: () =>
@@ -50,6 +54,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.readClipboardText),
   writeClipboardText: (text) =>
     ipcRenderer.invoke(IPC_CHANNELS.writeClipboardText, text),
+  showSessionNotification: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.showSessionNotification, request),
   writeTerminal: (request) =>
     ipcRenderer.send(IPC_CHANNELS.writeTerminal, request),
   resizeTerminal: (request) =>

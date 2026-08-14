@@ -15,7 +15,7 @@ const MAX_TERMINAL_BUFFER_LENGTH = 2_000_000;
 
 interface ManagedSession {
   record: SessionRecord;
-  process: IPty;
+  process: IPty | null;
   terminalBuffer: string;
   sequence: number;
 }
@@ -36,6 +36,18 @@ function stringEnvironment(environment: NodeJS.ProcessEnv): Record<string, strin
     Object.entries(environment).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
+  );
+}
+
+function restoredTerminalMessage(record: SessionRecord): string {
+  const stateMessage =
+    record.status === "interrupted"
+      ? "客户端上次关闭时，这个会话仍在运行。原进程已经结束。"
+      : "这是上次保留的会话标签，终端内容不会写入本地配置。";
+  return (
+    `\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n` +
+    `  ${stateMessage}\r\n` +
+    "  新建 Claude Code 会话后，可使用 /resume 恢复 Claude Code 自身保存的对话。\r\n"
   );
 }
 
@@ -68,8 +80,27 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     private readonly getClaudeExecutable: () => string,
     private readonly ptySpawner: PtySpawner = spawnPty,
     private readonly platform: NodeJS.Platform = process.platform,
+    initialSessions: SessionRecord[] = [],
   ) {
     super();
+    for (const initial of initialSessions) {
+      if (this.sessions.has(initial.id)) {
+        continue;
+      }
+      const record: SessionRecord = {
+        ...initial,
+        status:
+          initial.status === "running" || initial.status === "starting"
+            ? "interrupted"
+            : initial.status,
+      };
+      this.sessions.set(record.id, {
+        record,
+        process: null,
+        terminalBuffer: restoredTerminalMessage(record),
+        sequence: 0,
+      });
+    }
   }
 
   listSessions(): SessionRecord[] {
@@ -124,6 +155,14 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     } catch (error) {
       record.status = "failed";
       record.error = describeClaudeSpawnError(error);
+      const managed: ManagedSession = {
+        record,
+        process: null,
+        terminalBuffer: restoredTerminalMessage(record),
+        sequence: 0,
+      };
+      this.sessions.set(sessionId, managed);
+      this.emitChanged(record);
       throw new Error(`无法启动 Claude Code：${record.error}`);
     }
   }
@@ -160,7 +199,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session || session.record.status !== "running") {
       return;
     }
-    session.process.write(data);
+    session.process?.write(data);
   }
 
   resize(sessionId: string, columns: number, rows: number): void {
@@ -171,7 +210,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session || session.record.status !== "running") {
       return;
     }
-    session.process.resize(
+    session.process?.resize(
       Math.min(Math.max(columns, 20), 500),
       Math.min(Math.max(rows, 5), 200),
     );
@@ -182,7 +221,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session || session.record.status !== "running") {
       return;
     }
-    session.process.kill();
+    session.process?.kill();
   }
 
   removeSession(sessionId: string): void {
@@ -190,8 +229,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session) {
       throw new Error("会话不存在或已经被移除。");
     }
-    if (session.record.status === "running") {
-      session.process.kill();
+    if (
+      session.record.status === "running" ||
+      session.record.status === "starting"
+    ) {
+      session.process?.kill();
     }
     this.sessions.delete(sessionId);
   }
@@ -225,7 +267,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   dispose(): void {
     for (const session of this.sessions.values()) {
       if (session.record.status === "running") {
-        session.process.kill();
+        session.process?.kill();
       }
     }
   }

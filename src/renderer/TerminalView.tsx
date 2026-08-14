@@ -215,7 +215,9 @@ export function TerminalView({ session, active }: TerminalViewProps) {
         <div className="terminal-status-banner">
           {session.status === "failed"
             ? `启动失败：${session.error ?? "未知错误"}`
-            : `会话已退出${session.exitCode === undefined ? "" : `（代码 ${session.exitCode}）`}`}
+            : session.status === "interrupted"
+              ? "客户端上次关闭后，该会话已中断。Claude Code 对话仍可通过 /resume 恢复。"
+              : `会话已退出${session.exitCode === undefined ? "" : `（代码 ${session.exitCode}）`}`}
         </div>
       ) : null}
     </div>

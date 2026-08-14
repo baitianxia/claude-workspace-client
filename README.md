@@ -9,8 +9,12 @@
 - 持久化工程列表和自定义 Claude Code 路径。
 - 一个窗口中创建、切换和停止多个 Claude Code 会话。
 - 会话支持重命名和从列表删除；默认名称包含序号与创建时间。
+- 会话标签会跨应用重启保留；意外关闭前仍在运行的会话会显示为“已中断”。
 - 工程会话列表支持独立折叠/展开，并保存折叠状态。
 - 左侧工程文件夹名称使用加粗显示，切换多个工程时更容易区分。
+- 工程支持自定义别名和置顶，同名目录也能快速区分。
+- 使用 `Ctrl+K` 按工程名、路径或会话名快速搜索和切换。
+- 非当前会话有新输出时显示未读标记，会话完成或失败时发送系统通知。
 - 保留 Claude Code 原生输入、权限确认、斜杠命令和终端输出。
 - 通过系统剪贴板支持终端复制粘贴，不依赖网页剪贴板权限。
 - 自动查找原生安装的 `claude.exe` 和 npm 安装产生的 `claude.cmd`。
@@ -85,12 +89,12 @@ npm run pack:win
 npm run dist:win:zip
 ```
 
-ZIP 输出到 `release/Claude Workspace-0.1.4-x64.zip`。解压后直接运行其中的 `Claude Workspace.exe`。
+ZIP 输出到 `release/Claude Workspace-0.2.0-x64.zip`。解压后直接运行其中的 `Claude Workspace.exe`。
 
 安装文件输出到：
 
 ```text
-release/Claude Workspace-Setup-0.1.4-x64.exe
+release/Claude Workspace-Setup-0.2.0-x64.exe
 ```
 
 当前工程没有配置商业代码签名证书，因此本地生成的安装程序可能触发 Windows SmartScreen 提示。正式分发前应加入 Authenticode 签名。
@@ -104,6 +108,8 @@ release/Claude Workspace-Setup-0.1.4-x64.exe
 5. Claude Code 会直接在该工程目录中启动，并读取该目录的 `CLAUDE.md`、`.claude/`、Git 和源码配置。
 6. 双击会话名称或点击铅笔按钮可以重命名；点击删除按钮只会终止并移除客户端会话，不会删除工程文件或 Claude Code 历史记录。
 7. 点击工程名称左侧箭头可以折叠或展开该工程的会话列表。
+8. 双击工程名称可以设置别名，点击星标可以置顶工程。
+9. 按 `Ctrl+K` 可以搜索工程、目录和会话并直接切换。
 
 终端剪贴板快捷键：
 
@@ -123,7 +129,7 @@ release/Claude Workspace-Setup-0.1.4-x64.exe
 
 ## 当前限制
 
-- 工程列表会持久化，但客户端会话标签不会跨应用重启恢复；Claude Code 自身的历史仍可在新会话中通过 `/resume` 找回。
+- 工程和会话标签会持久化，但终端输出不会写入配置文件；Claude Code 自身的历史可在新会话中通过 `/resume` 找回。
 - 关闭客户端会终止当前 PTY 进程。
 - 多个会话如果指向同一个普通工作目录，仍可能修改相同文件；第一版尚未自动创建 Git worktree。
 - 第一版仅配置 Windows x64 安装目标，尚未配置 Windows ARM64。

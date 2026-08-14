@@ -1,6 +1,7 @@
 export const IPC_CHANNELS = {
   getSnapshot: "workspace:get-snapshot",
   selectProjectDirectory: "workspace:select-project-directory",
+  updateProject: "workspace:update-project",
   removeProject: "workspace:remove-project",
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
@@ -10,6 +11,7 @@ export const IPC_CHANNELS = {
   stopSession: "workspace:stop-session",
   readClipboardText: "workspace:read-clipboard-text",
   writeClipboardText: "workspace:write-clipboard-text",
+  showSessionNotification: "workspace:show-session-notification",
   writeTerminal: "workspace:write-terminal",
   resizeTerminal: "workspace:resize-terminal",
   getTerminalSnapshot: "workspace:get-terminal-snapshot",

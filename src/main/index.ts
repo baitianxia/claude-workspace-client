@@ -108,7 +108,13 @@ async function startApplication(): Promise<void> {
 
   const claudeLocator = new ClaudeLocator(projectStore);
   await claudeLocator.initialize();
-  sessionManager = new SessionManager(() => claudeLocator.requireExecutable());
+  sessionManager = new SessionManager(
+    () => claudeLocator.requireExecutable(),
+    undefined,
+    process.platform,
+    projectStore.listSessions(),
+  );
+  await projectStore.replaceSessions(sessionManager.listSessions());
 
   mainWindow = createWindow();
   removeIpcHandlers = registerIpcHandlers({

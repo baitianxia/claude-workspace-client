@@ -62,6 +62,7 @@ function project(): ProjectRecord {
   return {
     id: "project-one",
     name: "mall",
+    pinned: false,
     rootPath: "C:\\work\\mall",
     createdAt: 1,
     lastOpenedAt: 1,
@@ -202,6 +203,44 @@ describe("SessionManager", () => {
 
     expect(() => manager.createSession(project())).toThrow(
       /Windows 错误 193.*WindowsApps/u,
+    );
+    expect(manager.listSessions()).toEqual([
+      expect.objectContaining({ status: "failed", projectId: "project-one" }),
+    ]);
+  });
+
+  it("restores persisted labels and marks previously running sessions interrupted", () => {
+    const fake = fakePty();
+    const spawner = vi.fn(() => fake.process) as PtySpawner;
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      spawner,
+      "win32",
+      [
+        {
+          id: "persisted-session",
+          projectId: "project-one",
+          title: "历史会话",
+          cwd: "C:\\work\\mall",
+          status: "running",
+          createdAt: 12,
+        },
+      ],
+    );
+
+    expect(spawner).not.toHaveBeenCalled();
+    expect(manager.listSessions()).toEqual([
+      expect.objectContaining({
+        id: "persisted-session",
+        title: "历史会话",
+        status: "interrupted",
+      }),
+    ]);
+    expect(manager.getTerminalSnapshot("persisted-session").data).toContain(
+      "/resume",
+    );
+    expect(manager.renameSession("persisted-session", "继续排查").title).toBe(
+      "继续排查",
     );
   });
 });

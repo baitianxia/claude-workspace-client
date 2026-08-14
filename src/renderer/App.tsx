@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppSnapshot,
   ClaudeExecutableState,
   ProjectRecord,
   SessionRecord,
 } from "../shared/contracts";
+import { BrandMark } from "./BrandMark";
+import { QuickSwitcher } from "./QuickSwitcher";
 import { TerminalView } from "./TerminalView";
+import {
+  projectDisplayName,
+  type WorkspaceSearchItem,
+} from "./workspace-search";
 
 function readableError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -22,6 +28,8 @@ function statusLabel(status: SessionRecord["status"]): string {
       return "已退出";
     case "failed":
       return "失败";
+    case "interrupted":
+      return "已中断";
   }
 }
 
@@ -47,6 +55,42 @@ function upsertSession(
 }
 
 const COLLAPSED_PROJECTS_KEY = "claude-workspace.collapsed-projects.v1";
+const ACTIVE_SELECTION_KEY = "claude-workspace.active-selection.v1";
+
+interface ActiveSelection {
+  projectId?: string;
+  sessionId?: string;
+}
+
+function loadActiveSelection(): ActiveSelection {
+  try {
+    const stored = JSON.parse(
+      window.localStorage.getItem(ACTIVE_SELECTION_KEY) ?? "{}",
+    ) as unknown;
+    if (!stored || typeof stored !== "object") {
+      return {};
+    }
+    const candidate = stored as ActiveSelection;
+    return {
+      ...(typeof candidate.projectId === "string"
+        ? { projectId: candidate.projectId }
+        : {}),
+      ...(typeof candidate.sessionId === "string"
+        ? { sessionId: candidate.sessionId }
+        : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function sortProjects(projects: ProjectRecord[]): ProjectRecord[] {
+  return [...projects].sort(
+    (left, right) =>
+      Number(right.pinned) - Number(left.pinned) ||
+      right.lastOpenedAt - left.lastOpenedAt,
+  );
+}
 
 function loadCollapsedProjectIds(): Set<string> {
   try {
@@ -73,8 +117,27 @@ export function App() {
   );
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [projectAliasDraft, setProjectAliasDraft] = useState("");
+  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const snapshotRef = useRef<AppSnapshot | null>(null);
+  const sessionStatusRef = useRef(
+    new Map<string, SessionRecord["status"]>(),
+  );
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    snapshotRef.current = snapshot;
+  }, [snapshot]);
 
   useEffect(() => {
     try {
@@ -88,16 +151,127 @@ export function App() {
   }, [collapsedProjectIds]);
 
   useEffect(() => {
+    if (!snapshot) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(
+        ACTIVE_SELECTION_KEY,
+        JSON.stringify({
+          projectId: activeProjectId,
+          sessionId: activeSessionId,
+        }),
+      );
+    } catch {
+      // Selection persistence is optional in locked-down renderer profiles.
+    }
+  }, [activeProjectId, activeSessionId, snapshot]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        event.key.toLocaleLowerCase() === "k"
+      ) {
+        event.preventDefault();
+        setQuickSwitcherOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      return;
+    }
+    setUnreadSessionIds((current) => {
+      if (!current.has(activeSessionId)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.delete(activeSessionId);
+      return next;
+    });
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const clearActiveUnread = () => {
+      const sessionId = activeSessionIdRef.current;
+      if (!sessionId) {
+        return;
+      }
+      setUnreadSessionIds((current) => {
+        if (!current.has(sessionId)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+    };
+    window.addEventListener("focus", clearActiveUnread);
+    return () => window.removeEventListener("focus", clearActiveUnread);
+  }, []);
+
+  useEffect(() => {
     let disposed = false;
-    const unsubscribe = window.claudeWorkspace.onSessionChanged(({ session }) => {
+    const flagUnread = (sessionId: string) => {
+      setUnreadSessionIds((current) => {
+        if (current.has(sessionId)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.add(sessionId);
+        return next;
+      });
+    };
+
+    const unsubscribeSession = window.claudeWorkspace.onSessionChanged(({ session }) => {
       if (disposed) {
         return;
       }
+      const previousStatus = sessionStatusRef.current.get(session.id);
+      sessionStatusRef.current.set(session.id, session.status);
       setSnapshot((current) =>
         current
           ? { ...current, sessions: upsertSession(current.sessions, session) }
           : current,
       );
+      const completed =
+        ((previousStatus === "running" || previousStatus === "starting") &&
+          session.status === "exited") ||
+        (previousStatus !== "failed" && session.status === "failed");
+      if (completed) {
+        const needsAttention =
+          activeSessionIdRef.current !== session.id || !document.hasFocus();
+        if (needsAttention) {
+          flagUnread(session.id);
+          const project = snapshotRef.current?.projects.find(
+            (candidate) => candidate.id === session.projectId,
+          );
+          void window.claudeWorkspace
+            .showSessionNotification({
+              sessionId: session.id,
+              title: `${project ? projectDisplayName(project) : "Claude Workspace"} · ${session.title}`,
+              body:
+                session.status === "failed"
+                  ? "Claude Code 会话启动或运行失败。"
+                  : `Claude Code 会话已结束${session.exitCode === undefined ? "。" : `，退出代码 ${session.exitCode}。`}`,
+            })
+            .catch(() => undefined);
+        }
+      }
+    });
+
+    const unsubscribeTerminal = window.claudeWorkspace.onTerminalData((event) => {
+      if (
+        !disposed &&
+        (activeSessionIdRef.current !== event.sessionId || !document.hasFocus())
+      ) {
+        flagUnread(event.sessionId);
+      }
     });
 
     void window.claudeWorkspace
@@ -106,14 +280,34 @@ export function App() {
         if (disposed) {
           return;
         }
-        setSnapshot(initialSnapshot);
-        const firstProject = initialSnapshot.projects[0];
-        if (firstProject) {
-          setActiveProjectId(firstProject.id);
-          const firstSession = initialSnapshot.sessions.find(
-            (session) => session.projectId === firstProject.id,
-          );
-          setActiveSessionId(firstSession?.id ?? null);
+        const orderedSnapshot = {
+          ...initialSnapshot,
+          projects: sortProjects(initialSnapshot.projects),
+        };
+        snapshotRef.current = orderedSnapshot;
+        setSnapshot(orderedSnapshot);
+        sessionStatusRef.current = new Map(
+          initialSnapshot.sessions.map((session) => [session.id, session.status]),
+        );
+
+        const saved = loadActiveSelection();
+        const savedSession = initialSnapshot.sessions.find(
+          (session) => session.id === saved.sessionId,
+        );
+        const selectedProject =
+          orderedSnapshot.projects.find(
+            (project) =>
+              project.id === (savedSession?.projectId ?? saved.projectId),
+          ) ?? orderedSnapshot.projects[0];
+        if (selectedProject) {
+          const selectedSession =
+            savedSession?.projectId === selectedProject.id
+              ? savedSession
+              : initialSnapshot.sessions.find(
+                  (session) => session.projectId === selectedProject.id,
+                );
+          setActiveProjectId(selectedProject.id);
+          setActiveSessionId(selectedSession?.id ?? null);
         }
       })
       .catch((initializationError: unknown) => {
@@ -124,7 +318,8 @@ export function App() {
 
     return () => {
       disposed = true;
-      unsubscribe();
+      unsubscribeSession();
+      unsubscribeTerminal();
     };
   }, []);
 
@@ -168,7 +363,10 @@ export function App() {
         const withoutDuplicate = current.projects.filter(
           (candidate) => candidate.id !== project.id,
         );
-        return { ...current, projects: [project, ...withoutDuplicate] };
+        return {
+          ...current,
+          projects: sortProjects([project, ...withoutDuplicate]),
+        };
       });
       setActiveProjectId(project.id);
       setCollapsedProjectIds((current) => {
@@ -181,6 +379,82 @@ export function App() {
       );
       setActiveSessionId(existingSession?.id ?? null);
     });
+
+  const replaceProject = (replacement: ProjectRecord) => {
+    setSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            projects: sortProjects(
+              current.projects.map((project) =>
+                project.id === replacement.id ? replacement : project,
+              ),
+            ),
+          }
+        : current,
+    );
+  };
+
+  const startRenamingProject = (project: ProjectRecord) => {
+    setActiveProjectId(project.id);
+    const currentSession = sessions.find(
+      (session) => session.id === activeSessionId,
+    );
+    if (currentSession?.projectId !== project.id) {
+      setActiveSessionId(
+        sessions.find((session) => session.projectId === project.id)?.id ?? null,
+      );
+    }
+    setCollapsedProjectIds((current) => {
+      const next = new Set(current);
+      next.delete(project.id);
+      return next;
+    });
+    setProjectAliasDraft(project.alias ?? project.name);
+    setRenamingProjectId(project.id);
+  };
+
+  const commitProjectRename = (project: ProjectRecord) => {
+    const alias = projectAliasDraft.trim();
+    if ([...alias].length > 60) {
+      setError("工程别名不能超过 60 个字符。");
+      return;
+    }
+    setRenamingProjectId(null);
+    if (alias === (project.alias ?? project.name)) {
+      return;
+    }
+    void runAction(async () => {
+      const updated = await window.claudeWorkspace.updateProject({
+        projectId: project.id,
+        alias: alias && alias !== project.name ? alias : null,
+      });
+      replaceProject(updated);
+    });
+  };
+
+  const toggleProjectPin = (project: ProjectRecord) => {
+    void runAction(async () => {
+      const updated = await window.claudeWorkspace.updateProject({
+        projectId: project.id,
+        pinned: !project.pinned,
+      });
+      replaceProject(updated);
+    });
+  };
+
+  const selectWorkspaceItem = (item: WorkspaceSearchItem) => {
+    const projectSessions = sessions.filter(
+      (session) => session.projectId === item.projectId,
+    );
+    setActiveProjectId(item.projectId);
+    setActiveSessionId(item.sessionId ?? projectSessions[0]?.id ?? null);
+    setCollapsedProjectIds((current) => {
+      const next = new Set(current);
+      next.delete(item.projectId);
+      return next;
+    });
+  };
 
   const chooseClaudeExecutable = () =>
     runAction(async () => {
@@ -321,11 +595,12 @@ export function App() {
 
   const removeProject = (project: ProjectRecord) => {
     const projectSessions = sessionsByProject.get(project.id) ?? [];
+    const displayName = projectDisplayName(project);
     const warning = projectSessions.some(
       (session) => session.status === "running" || session.status === "starting",
     )
-      ? `“${project.name}”仍有会话运行。移除工程会终止这些会话，是否继续？`
-      : `从列表中移除“${project.name}”？不会删除磁盘文件。`;
+      ? `“${displayName}”仍有会话运行。移除工程会终止这些会话，是否继续？`
+      : `从列表中移除“${displayName}”？不会删除磁盘文件。`;
     if (!window.confirm(warning)) {
       return;
     }
@@ -361,6 +636,9 @@ export function App() {
           setRenamingSessionId(null);
         }
       }
+      if (renamingProjectId === project.id) {
+        setRenamingProjectId(null);
+      }
       if (activeProjectId === project.id) {
         const nextProject = remainingProjects[0];
         setActiveProjectId(nextProject?.id ?? null);
@@ -380,7 +658,7 @@ export function App() {
   if (!snapshot) {
     return (
       <main className="loading-screen">
-        <div className="brand-mark">C</div>
+        <BrandMark />
         <div>
           <h1>Claude Workspace</h1>
           <p>{error ?? "正在读取本地工作区…"}</p>
@@ -394,7 +672,7 @@ export function App() {
       <aside className="sidebar">
         <header className="sidebar-header">
           <div className="brand-row">
-            <div className="brand-mark brand-mark--small">C</div>
+            <BrandMark small />
             <div>
               <h1>Claude Workspace</h1>
               <p>本地多工程控制台</p>
@@ -430,15 +708,26 @@ export function App() {
 
         <div className="section-heading">
           <span>工程与会话</span>
-          <button
-            className="icon-button"
-            type="button"
-            title="添加工程目录"
-            onClick={addProject}
-            disabled={busy}
-          >
-            ＋
-          </button>
+          <div className="section-heading-actions">
+            <button
+              className="icon-button icon-button--search"
+              type="button"
+              title="快速切换（Ctrl+K）"
+              aria-label="快速切换工程或会话"
+              onClick={() => setQuickSwitcherOpen(true)}
+            >
+              ⌕
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              title="添加工程目录"
+              onClick={addProject}
+              disabled={busy}
+            >
+              ＋
+            </button>
+          </div>
         </div>
 
         <nav className="project-list" aria-label="工程与会话">
@@ -447,9 +736,13 @@ export function App() {
             const selected = activeProjectId === project.id;
             const collapsed = collapsedProjectIds.has(project.id);
             const sessionListId = `project-sessions-${project.id}`;
+            const displayName = projectDisplayName(project);
+            const unreadCount = projectSessions.filter((session) =>
+              unreadSessionIds.has(session.id),
+            ).length;
             return (
               <section
-                className={`project-group ${selected ? "project-group--active" : ""}`}
+                className={`project-group ${selected ? "project-group--active" : ""} ${project.pinned ? "project-group--pinned" : ""}`}
                 key={project.id}
               >
                 <div className="project-row">
@@ -457,7 +750,7 @@ export function App() {
                     className="project-collapse-button"
                     type="button"
                     title={collapsed ? "展开工程会话" : "折叠工程会话"}
-                    aria-label={collapsed ? `展开 ${project.name}` : `折叠 ${project.name}`}
+                    aria-label={collapsed ? `展开 ${displayName}` : `折叠 ${displayName}`}
                     aria-expanded={!collapsed}
                     aria-controls={sessionListId}
                     onClick={() => toggleProject(project.id)}
@@ -469,35 +762,106 @@ export function App() {
                       ›
                     </span>
                   </button>
-                  <button
-                    className="project-select"
-                    type="button"
-                    onClick={() => {
-                      setActiveProjectId(project.id);
-                      setActiveSessionId(projectSessions[0]?.id ?? null);
-                    }}
-                    title={project.rootPath}
-                  >
-                    <span className="folder-icon" aria-hidden="true" />
-                    <span className="project-copy">
-                      <strong>{project.name}</strong>
-                      <span>{project.rootPath}</span>
-                    </span>
-                  </button>
-                  <span
-                    className="project-session-count"
-                    title={`${projectSessions.length} 个会话`}
-                  >
-                    {projectSessions.length}
-                  </span>
-                  <button
-                    className="project-menu-button"
-                    type="button"
-                    title="移除工程"
-                    onClick={() => removeProject(project)}
-                  >
-                    ×
-                  </button>
+                  {renamingProjectId === project.id ? (
+                    <form
+                      className="project-rename-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        commitProjectRename(project);
+                      }}
+                    >
+                      <input
+                        type="text"
+                        value={projectAliasDraft}
+                        maxLength={60}
+                        aria-label="工程别名"
+                        autoFocus
+                        onFocus={(event) => event.currentTarget.select()}
+                        onChange={(event) =>
+                          setProjectAliasDraft(event.currentTarget.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setRenamingProjectId(null);
+                          }
+                        }}
+                      />
+                      <button
+                        type="submit"
+                        title="保存工程别名"
+                        aria-label="保存工程别名"
+                        disabled={busy}
+                      >
+                        ✓
+                      </button>
+                      <button
+                        type="button"
+                        title="取消"
+                        aria-label="取消修改工程别名"
+                        onClick={() => setRenamingProjectId(null)}
+                      >
+                        ×
+                      </button>
+                    </form>
+                  ) : (
+                    <>
+                      <button
+                        className="project-select"
+                        type="button"
+                        onClick={() => {
+                          setActiveProjectId(project.id);
+                          setActiveSessionId(projectSessions[0]?.id ?? null);
+                        }}
+                        onDoubleClick={() => startRenamingProject(project)}
+                        title={`${project.rootPath}（双击修改别名）`}
+                      >
+                        <span className="folder-icon" aria-hidden="true" />
+                        <span className="project-copy">
+                          <strong>{displayName}</strong>
+                          <span>{project.rootPath}</span>
+                        </span>
+                      </button>
+                      <span
+                        className={`project-session-count ${unreadCount ? "project-session-count--unread" : ""}`}
+                        title={
+                          unreadCount
+                            ? `${unreadCount} 个未读会话，共 ${projectSessions.length} 个会话`
+                            : `${projectSessions.length} 个会话`
+                        }
+                      >
+                        {unreadCount || projectSessions.length}
+                      </span>
+                      <button
+                        className={`project-pin-button ${project.pinned ? "project-pin-button--active" : ""}`}
+                        type="button"
+                        title={project.pinned ? "取消置顶" : "置顶工程"}
+                        aria-label={project.pinned ? `取消置顶 ${displayName}` : `置顶 ${displayName}`}
+                        onClick={() => toggleProjectPin(project)}
+                        disabled={busy}
+                      >
+                        {project.pinned ? "★" : "☆"}
+                      </button>
+                      <button
+                        className="project-rename-button"
+                        type="button"
+                        title="修改工程别名"
+                        aria-label={`修改 ${displayName} 的别名`}
+                        onClick={() => startRenamingProject(project)}
+                      >
+                        ✎
+                      </button>
+                      <button
+                        className="project-menu-button"
+                        type="button"
+                        title="移除工程"
+                        aria-label={`移除 ${displayName}`}
+                        onClick={() => removeProject(project)}
+                      >
+                        ×
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 {!collapsed ? (
@@ -550,7 +914,7 @@ export function App() {
                         </form>
                       ) : (
                         <div
-                          className={`session-row ${activeSessionId === session.id ? "session-row--active" : ""}`}
+                          className={`session-row ${activeSessionId === session.id ? "session-row--active" : ""} ${unreadSessionIds.has(session.id) ? "session-row--unread" : ""}`}
                           key={session.id}
                         >
                           <button
@@ -567,6 +931,9 @@ export function App() {
                               className={`session-indicator session-indicator--${session.status}`}
                             />
                             <span>{session.title}</span>
+                            {unreadSessionIds.has(session.id) ? (
+                              <span className="session-unread-dot" title="有新输出" />
+                            ) : null}
                             <small>{statusLabel(session.status)}</small>
                           </button>
                           <button
@@ -622,7 +989,7 @@ export function App() {
             <header className="workspace-toolbar">
               <div className="toolbar-title">
                 <div className="toolbar-breadcrumb">
-                  <span>{activeProject.name}</span>
+                  <span>{projectDisplayName(activeProject)}</span>
                   <span className="breadcrumb-divider">/</span>
                   <strong>{activeSession.title}</strong>
                 </div>
@@ -684,7 +1051,7 @@ export function App() {
         ) : activeProject ? (
           <div className="empty-state">
             <div className="empty-terminal-glyph">›_</div>
-            <h2>在 {activeProject.name} 中启动 Claude Code</h2>
+            <h2>在 {projectDisplayName(activeProject)} 中启动 Claude Code</h2>
             <p>{activeProject.rootPath}</p>
             <p className="empty-state-note">
               新会话会直接以该文件夹作为工作目录，Claude Code 将读取这里的
@@ -745,6 +1112,14 @@ export function App() {
           </div>
         ) : null}
       </section>
+      {quickSwitcherOpen ? (
+        <QuickSwitcher
+          projects={projects}
+          sessions={sessions}
+          onClose={() => setQuickSwitcherOpen(false)}
+          onSelect={selectWorkspaceItem}
+        />
+      ) : null}
     </main>
   );
 }

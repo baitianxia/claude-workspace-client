@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ProjectStore } from "../src/main/project-store";
+import type { SessionRecord } from "../src/shared/contracts";
 
 const temporaryDirectories: string[] = [];
 
@@ -90,5 +91,97 @@ describe("ProjectStore", () => {
     expect(entries.some((entry) => entry.startsWith("workspace.json.corrupt-"))).toBe(
       true,
     );
+  });
+
+  it("updates project aliases and keeps pinned projects first", async () => {
+    const root = await temporaryDirectory();
+    const firstPath = join(root, "first-project");
+    const secondPath = join(root, "second-project");
+    await mkdir(firstPath);
+    await mkdir(secondPath);
+    const storePath = join(root, "workspace.json");
+    const store = new ProjectStore(storePath);
+    await store.initialize();
+    const first = await store.addProject(firstPath);
+    const second = await store.addProject(secondPath);
+
+    const updated = await store.updateProject({
+      projectId: first.id,
+      alias: "商城服务",
+      pinned: true,
+    });
+
+    expect(updated).toMatchObject({ alias: "商城服务", pinned: true });
+    expect(store.listProjects().map((project) => project.id)).toEqual([
+      first.id,
+      second.id,
+    ]);
+
+    const reloaded = new ProjectStore(storePath);
+    await reloaded.initialize();
+    expect(reloaded.getProject(first.id)).toMatchObject({
+      alias: "商城服务",
+      pinned: true,
+    });
+  });
+
+  it("persists session labels and removes them with their project", async () => {
+    const root = await temporaryDirectory();
+    const projectPath = join(root, "sample-project");
+    await mkdir(projectPath);
+    const storePath = join(root, "workspace.json");
+    const store = new ProjectStore(storePath);
+    await store.initialize();
+    const project = await store.addProject(projectPath);
+    const session: SessionRecord = {
+      id: "session-one",
+      projectId: project.id,
+      title: "修复登录问题",
+      cwd: project.rootPath,
+      status: "running",
+      createdAt: 123,
+    };
+
+    await store.replaceSessions([session]);
+    const reloaded = new ProjectStore(storePath);
+    await reloaded.initialize();
+    expect(reloaded.listSessions()).toEqual([session]);
+
+    await reloaded.removeProject(project.id);
+    expect(reloaded.listSessions()).toEqual([]);
+  });
+
+  it("migrates version 1 workspace data without losing projects", async () => {
+    const root = await temporaryDirectory();
+    const storePath = join(root, "workspace.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            id: "legacy-project",
+            name: "legacy",
+            rootPath: "C:\\work\\legacy",
+            createdAt: 1,
+            lastOpenedAt: 2,
+          },
+        ],
+        settings: {},
+      }),
+      "utf8",
+    );
+    const store = new ProjectStore(storePath, "win32");
+
+    await store.initialize();
+
+    expect(store.listProjects()).toEqual([
+      expect.objectContaining({
+        id: "legacy-project",
+        name: "legacy",
+        pinned: false,
+      }),
+    ]);
+    expect(store.listSessions()).toEqual([]);
   });
 });
