@@ -38,6 +38,14 @@ const previewSnapshot: AppSnapshot = {
   ],
   sessions: [
     {
+      id: "scratch-review",
+      projectId: null,
+      title: "临时需求讨论",
+      cwd: "C:\\Users\\developer\\AppData\\Roaming\\Claude Workspace\\temporary-workspaces\\session-preview",
+      status: "running",
+      createdAt: now - 55_000,
+    },
+    {
       id: "login-fix",
       projectId: "mall-service",
       title: "修复登录超时",
@@ -133,16 +141,26 @@ export function installDevelopmentPreview(): void {
     },
     selectClaudeExecutable: async () => snapshot.claudeExecutable,
     autoDetectClaudeExecutable: async () => snapshot.claudeExecutable,
-    createSession: async ({ projectId, title }) => {
-      const project = snapshot.projects.find((item) => item.id === projectId);
-      if (!project) {
+    createSession: async (request) => {
+      const project =
+        request.scope === "project"
+          ? snapshot.projects.find((item) => item.id === request.projectId)
+          : undefined;
+      if (request.scope === "project" && !project) {
         throw new Error("Preview project does not exist.");
       }
+      const projectId = request.scope === "project" ? request.projectId : null;
+      const cwd =
+        request.scope === "temporary"
+          ? `C:\\Users\\developer\\AppData\\Roaming\\Claude Workspace\\temporary-workspaces\\session-${snapshot.sessions.length + 1}`
+          : project!.rootPath;
       const session: SessionRecord = {
         id: crypto.randomUUID(),
         projectId,
-        title: title?.trim() || `会话 ${snapshot.sessions.length + 1} · 16:40`,
-        cwd: project.rootPath,
+        title:
+          request.title?.trim() ||
+          `会话 ${snapshot.sessions.length + 1} · 16:40`,
+        cwd,
         status: "running",
         createdAt: Date.now(),
       };

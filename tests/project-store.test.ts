@@ -151,6 +151,27 @@ describe("ProjectStore", () => {
     expect(reloaded.listSessions()).toEqual([]);
   });
 
+  it("persists temporary sessions without requiring a project", async () => {
+    const root = await temporaryDirectory();
+    const storePath = join(root, "workspace.json");
+    const session: SessionRecord = {
+      id: "temporary-session",
+      projectId: null,
+      title: "临时会话",
+      cwd: join(root, "temporary-workspaces", "session-one"),
+      status: "interrupted",
+      createdAt: 456,
+    };
+    const store = new ProjectStore(storePath);
+    await store.initialize();
+
+    await store.replaceSessions([session]);
+
+    const reloaded = new ProjectStore(storePath);
+    await reloaded.initialize();
+    expect(reloaded.listSessions()).toEqual([session]);
+  });
+
   it("migrates version 1 workspace data without losing projects", async () => {
     const root = await temporaryDirectory();
     const storePath = join(root, "workspace.json");
@@ -183,5 +204,49 @@ describe("ProjectStore", () => {
       }),
     ]);
     expect(store.listSessions()).toEqual([]);
+  });
+
+  it("migrates version 2 project sessions to the current store format", async () => {
+    const root = await temporaryDirectory();
+    const storePath = join(root, "workspace.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        projects: [
+          {
+            id: "legacy-project",
+            name: "legacy",
+            pinned: false,
+            rootPath: "C:\\work\\legacy",
+            createdAt: 1,
+            lastOpenedAt: 2,
+          },
+        ],
+        sessions: [
+          {
+            id: "legacy-session",
+            projectId: "legacy-project",
+            title: "旧会话",
+            cwd: "C:\\work\\legacy",
+            status: "exited",
+            createdAt: 3,
+            exitCode: 0,
+          },
+        ],
+        settings: {},
+      }),
+      "utf8",
+    );
+    const store = new ProjectStore(storePath, "win32");
+
+    await store.initialize();
+
+    expect(store.listSessions()).toEqual([
+      expect.objectContaining({
+        id: "legacy-session",
+        projectId: "legacy-project",
+      }),
+    ]);
   });
 });

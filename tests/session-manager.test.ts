@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { IPty } from "node-pty";
-import type { ProjectRecord } from "../src/shared/contracts";
 import {
   SessionManager,
   type PtySpawner,
+  type SessionWorkspace,
 } from "../src/main/session-manager";
 
 interface FakePtyController {
@@ -58,14 +58,10 @@ function fakePty(): FakePtyController {
   return controller;
 }
 
-function project(): ProjectRecord {
+function project(): SessionWorkspace {
   return {
-    id: "project-one",
-    name: "mall",
-    pinned: false,
-    rootPath: "C:\\work\\mall",
-    createdAt: 1,
-    lastOpenedAt: 1,
+    projectId: "project-one",
+    cwd: "C:\\work\\mall",
   };
 }
 
@@ -87,6 +83,31 @@ describe("SessionManager", () => {
       "C:\\Tools\\claude.exe",
       [],
       expect.objectContaining({ cwd: "C:\\work\\mall" }),
+    );
+  });
+
+  it("starts a temporary session without a project association", () => {
+    const fake = fakePty();
+    const spawner = vi.fn(() => fake.process) as PtySpawner;
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      spawner,
+      "win32",
+    );
+
+    const session = manager.createSession({
+      projectId: null,
+      cwd: "C:\\Users\\dev\\AppData\\Roaming\\Claude Workspace\\temporary-workspaces\\session-one",
+    });
+
+    expect(session).toMatchObject({
+      projectId: null,
+      status: "running",
+    });
+    expect(spawner).toHaveBeenCalledWith(
+      "C:\\Tools\\claude.exe",
+      [],
+      expect.objectContaining({ cwd: session.cwd }),
     );
   });
 

@@ -17,7 +17,7 @@ export interface ProjectRecord {
 
 export interface SessionRecord {
   id: string;
-  projectId: string;
+  projectId: string | null;
   title: string;
   cwd: string;
   status: SessionStatus;
@@ -53,10 +53,16 @@ export interface SessionChangedEvent {
   session: SessionRecord;
 }
 
-export interface CreateSessionRequest {
-  projectId: string;
-  title?: string;
-}
+export type CreateSessionRequest =
+  | {
+      scope: "project";
+      projectId: string;
+      title?: string;
+    }
+  | {
+      scope: "temporary";
+      title?: string;
+    };
 
 export interface RenameSessionRequest {
   sessionId: string;

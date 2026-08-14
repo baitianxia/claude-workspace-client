@@ -219,6 +219,14 @@ button:focus-visible {
   font-size: 15px;
 }
 
+.icon-button--temporary {
+  width: 30px;
+  color: #a8816d;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .project-list {
   min-height: 0;
   flex: 1;
@@ -239,6 +247,12 @@ button:focus-visible {
 .project-group--active {
   border-color: rgba(94, 82, 72, 0.28);
   background: rgba(52, 47, 42, 0.32);
+}
+
+.temporary-group {
+  margin-bottom: 9px;
+  border-color: rgba(121, 93, 77, 0.18);
+  background: rgba(44, 38, 34, 0.24);
 }
 
 .project-group--pinned .folder-icon {
@@ -337,6 +351,21 @@ button:focus-visible {
   border-bottom: 0;
   border-radius: 2px 2px 0 0;
   content: "";
+}
+
+.temporary-icon {
+  display: grid;
+  width: 20px;
+  height: 18px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #7d6455;
+  border-radius: 5px;
+  color: #d28a6b;
+  background: rgba(111, 71, 53, 0.16);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 700;
 }
 
 .project-copy {

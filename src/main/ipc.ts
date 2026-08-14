@@ -20,6 +20,7 @@ import { IPC_CHANNELS } from "../shared/ipc-channels";
 import type { ClaudeLocator } from "./claude-locator";
 import type { ProjectStore } from "./project-store";
 import type { SessionManager } from "./session-manager";
+import type { TemporaryWorkspace } from "./temporary-workspace";
 
 const MAX_CLIPBOARD_PASTE_LENGTH = 100_000;
 const MAX_CLIPBOARD_COPY_LENGTH = 2_000_000;
@@ -64,8 +65,15 @@ export function registerIpcHandlers(options: {
   projectStore: ProjectStore;
   claudeLocator: ClaudeLocator;
   sessionManager: SessionManager;
+  temporaryWorkspace: TemporaryWorkspace;
 }): () => void {
-  const { window, projectStore, claudeLocator, sessionManager } = options;
+  const {
+    window,
+    projectStore,
+    claudeLocator,
+    sessionManager,
+    temporaryWorkspace,
+  } = options;
 
   const getSnapshot = (): AppSnapshot => ({
     projects: projectStore.listProjects(),
@@ -153,15 +161,31 @@ export function registerIpcHandlers(options: {
       if (!request || typeof request !== "object") {
         throw new Error("Session request is invalid.");
       }
-      const projectId = requireIdentifier(request.projectId, "Project ID");
-      const project = projectStore.getProject(projectId);
-      if (!project) {
-        throw new Error("工程不存在，请重新选择目录。");
-      }
       if (request.title !== undefined && typeof request.title !== "string") {
         throw new Error("Session title is invalid.");
       }
-      const session = sessionManager.createSession(project, request.title);
+      let projectId: string | null;
+      let cwd: string;
+      if (request.scope === "project") {
+        projectId = requireIdentifier(request.projectId, "Project ID");
+        const project = projectStore.getProject(projectId);
+        if (!project) {
+          throw new Error("工程不存在，请重新选择目录。");
+        }
+        cwd = project.rootPath;
+      } else if (request.scope === "temporary") {
+        // Validate before creating the directory so a missing executable cannot
+        // leave an orphaned workspace behind.
+        claudeLocator.requireExecutable();
+        projectId = null;
+        cwd = await temporaryWorkspace.createDirectory();
+      } else {
+        throw new Error("Session scope is invalid.");
+      }
+      const session = sessionManager.createSession(
+        { projectId, cwd },
+        request.title,
+      );
       await projectStore.replaceSessions(sessionManager.listSessions());
       return session;
     },
@@ -186,8 +210,16 @@ export function registerIpcHandlers(options: {
   ipcMain.handle(
     IPC_CHANNELS.removeSession,
     async (_event, sessionId: unknown) => {
-      sessionManager.removeSession(requireIdentifier(sessionId, "Session ID"));
+      const removed = sessionManager.removeSession(
+        requireIdentifier(sessionId, "Session ID"),
+      );
       await projectStore.replaceSessions(sessionManager.listSessions());
+      if (removed.projectId === null) {
+        await temporaryWorkspace.removeDirectory(removed.cwd).catch(
+          (error: unknown) =>
+            console.error("Failed to clean temporary workspace", error),
+        );
+      }
     },
   );
 

@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import type { IPty, IPtyForkOptions } from "node-pty";
 import { spawn as spawnPty } from "node-pty";
 import type {
-  ProjectRecord,
   SessionRecord,
   TerminalDataEvent,
   TerminalSnapshot,
@@ -30,6 +29,11 @@ export type PtySpawner = (
   args: string[] | string,
   options: IPtyForkOptions,
 ) => IPty;
+
+export interface SessionWorkspace {
+  projectId: string | null;
+  cwd: string;
+}
 
 function stringEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
@@ -109,18 +113,21 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       .sort((left, right) => left.createdAt - right.createdAt);
   }
 
-  createSession(project: ProjectRecord, requestedTitle?: string): SessionRecord {
+  createSession(
+    workspace: SessionWorkspace,
+    requestedTitle?: string,
+  ): SessionRecord {
     const executablePath = this.getClaudeExecutable();
-    const projectSessions = this.listSessions().filter(
-      (session) => session.projectId === project.id,
+    const workspaceSessions = this.listSessions().filter(
+      (session) => session.projectId === workspace.projectId,
     );
-    const title = requestedTitle?.trim() || nextSessionTitle(projectSessions);
+    const title = requestedTitle?.trim() || nextSessionTitle(workspaceSessions);
     const sessionId = randomUUID();
     const record: SessionRecord = {
       id: sessionId,
-      projectId: project.id,
+      projectId: workspace.projectId,
       title,
-      cwd: project.rootPath,
+      cwd: workspace.cwd,
       status: "starting",
       createdAt: Date.now(),
     };
@@ -135,7 +142,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         name: "xterm-256color",
         cols: 120,
         rows: 36,
-        cwd: project.rootPath,
+        cwd: workspace.cwd,
         env: stringEnvironment(launch.env),
       });
       const managed: ManagedSession = {
@@ -224,7 +231,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.process?.kill();
   }
 
-  removeSession(sessionId: string): void {
+  removeSession(sessionId: string): SessionRecord {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error("会话不存在或已经被移除。");
@@ -236,6 +243,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       session.process?.kill();
     }
     this.sessions.delete(sessionId);
+    return { ...session.record };
   }
 
   removeProjectSessions(projectId: string): void {

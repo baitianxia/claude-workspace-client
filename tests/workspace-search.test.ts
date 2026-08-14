@@ -27,6 +27,14 @@ const projects: ProjectRecord[] = [
 
 const sessions: SessionRecord[] = [
   {
+    id: "scratch",
+    projectId: null,
+    title: "临时方案讨论",
+    cwd: "C:\\Users\\dev\\AppData\\Roaming\\Claude Workspace\\temporary-workspaces\\session-one",
+    status: "running",
+    createdAt: 3,
+  },
+  {
     id: "login-fix",
     projectId: "mall",
     title: "修复登录超时",
@@ -52,6 +60,13 @@ describe("workspace search", () => {
     expect(workspaceSearchItems(projects, sessions, "商城")).toEqual([
       expect.objectContaining({ kind: "project", projectId: "mall" }),
       expect.objectContaining({ kind: "session", sessionId: "login-fix" }),
+    ]);
+    expect(workspaceSearchItems(projects, sessions, "临时")).toEqual([
+      expect.objectContaining({
+        kind: "session",
+        projectId: null,
+        sessionId: "scratch",
+      }),
     ]);
   });
 });

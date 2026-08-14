@@ -5,6 +5,7 @@ import { ClaudeLocator } from "./claude-locator";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
 import { SessionManager } from "./session-manager";
+import { TemporaryWorkspace } from "./temporary-workspace";
 
 let mainWindow: BrowserWindow | null = null;
 let sessionManager: SessionManager | null = null;
@@ -117,11 +118,15 @@ async function startApplication(): Promise<void> {
   await projectStore.replaceSessions(sessionManager.listSessions());
 
   mainWindow = createWindow();
+  const temporaryWorkspace = new TemporaryWorkspace(
+    join(app.getPath("userData"), "temporary-workspaces"),
+  );
   removeIpcHandlers = registerIpcHandlers({
     window: mainWindow,
     projectStore,
     claudeLocator,
     sessionManager,
+    temporaryWorkspace,
   });
 }
 

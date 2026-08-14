@@ -22,14 +22,14 @@ interface AppSettings {
 }
 
 interface StoreData {
-  version: 2;
+  version: 3;
   projects: ProjectRecord[];
   sessions: SessionRecord[];
   settings: AppSettings;
 }
 
 const EMPTY_STORE: StoreData = {
-  version: 2,
+  version: 3,
   projects: [],
   sessions: [],
   settings: {},
@@ -90,7 +90,7 @@ function normalizeSessionRecord(value: unknown): SessionRecord | null {
   const candidate = value as Partial<SessionRecord>;
   if (
     typeof candidate.id !== "string" ||
-    typeof candidate.projectId !== "string" ||
+    (candidate.projectId !== null && typeof candidate.projectId !== "string") ||
     typeof candidate.title !== "string" ||
     typeof candidate.cwd !== "string" ||
     typeof candidate.status !== "string" ||
@@ -122,7 +122,7 @@ function parseStore(raw: string): StoreData {
     settings?: unknown;
   };
   if (
-    (parsed.version !== 1 && parsed.version !== 2) ||
+    (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) ||
     !Array.isArray(parsed.projects) ||
     !parsed.settings ||
     typeof parsed.settings !== "object"
@@ -143,7 +143,9 @@ function parseStore(raw: string): StoreData {
     throw new Error("Workspace settings contain an invalid Claude executable path.");
   }
 
-  const rawSessions = parsed.version === 2 ? parsed.sessions : [];
+  const rawSessions = parsed.version === 2 || parsed.version === 3
+    ? parsed.sessions
+    : [];
   if (!Array.isArray(rawSessions)) {
     throw new Error("Workspace data contains an invalid session list.");
   }
@@ -155,10 +157,10 @@ function parseStore(raw: string): StoreData {
   const normalizedProjects = projects as ProjectRecord[];
   const projectIds = new Set(normalizedProjects.map((project) => project.id));
   return {
-    version: 2,
+    version: 3,
     projects: normalizedProjects,
     sessions: (sessions as SessionRecord[]).filter((session) =>
-      projectIds.has(session.projectId),
+      session.projectId === null || projectIds.has(session.projectId),
     ),
     settings: settings.claudeExecutable
       ? { claudeExecutable: settings.claudeExecutable }
@@ -299,7 +301,10 @@ export class ProjectStore {
     this.assertInitialized();
     const projectIds = new Set(this.data.projects.map((project) => project.id));
     this.data.sessions = sessions
-      .filter((session) => projectIds.has(session.projectId))
+      .filter(
+        (session) =>
+          session.projectId === null || projectIds.has(session.projectId),
+      )
       .map((session) => ({ ...session }));
     await this.persist();
   }

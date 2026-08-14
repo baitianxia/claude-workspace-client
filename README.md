@@ -1,6 +1,6 @@
 # Claude Workspace
 
-面向 Windows 的本地多工程 Claude Code 控制台。客户端不重新实现 Claude Code，而是在每个已选择的工程目录中启动本机 `claude`，并通过嵌入式终端原样呈现其 TUI。
+面向 Windows 的本地多工程 Claude Code 控制台。客户端不重新实现 Claude Code，而是在已选择的工程目录或应用管理的临时工作目录中启动本机 `claude`，并通过嵌入式终端原样呈现其 TUI。
 
 ## 当前功能
 
@@ -8,6 +8,7 @@
 - 将选择的绝对目录作为 Claude Code 进程的 `cwd`。
 - 持久化工程列表和自定义 Claude Code 路径。
 - 一个窗口中创建、切换和停止多个 Claude Code 会话。
+- 支持不选择、不关联工程目录的临时会话；每个会话使用独立的应用隔离目录。
 - 会话支持重命名和从列表删除；默认名称包含序号与创建时间。
 - 会话标签会跨应用重启保留；意外关闭前仍在运行的会话会显示为“已中断”。
 - 工程会话列表支持独立折叠/展开，并保存折叠状态。
@@ -89,27 +90,26 @@ npm run pack:win
 npm run dist:win:zip
 ```
 
-ZIP 输出到 `release/Claude Workspace-0.2.0-x64.zip`。解压后直接运行其中的 `Claude Workspace.exe`。
+ZIP 输出到 `release/Claude Workspace-0.3.0-x64.zip`。解压后直接运行其中的 `Claude Workspace.exe`。
 
 安装文件输出到：
 
 ```text
-release/Claude Workspace-Setup-0.2.0-x64.exe
+release/Claude Workspace-Setup-0.3.0-x64.exe
 ```
 
 当前工程没有配置商业代码签名证书，因此本地生成的安装程序可能触发 Windows SmartScreen 提示。正式分发前应加入 Authenticode 签名。
 
 ## 使用方式
 
-1. 点击“选择工程文件夹”。
-2. 选择实际项目根目录，例如 `D:\workspace\mall-service`。
+1. 已有项目任务时，点击“选择工程文件夹”，选择实际项目根目录，例如 `D:\workspace\mall-service`。
+2. 不需要项目上下文时，直接点击“新建临时会话”，无需选择目录。
 3. 如果没有自动找到 Claude Code，点击“选择文件”，选择本机 `claude.exe` 或 `claude.cmd`。
-4. 在工程下点击“新建会话”。
-5. Claude Code 会直接在该工程目录中启动，并读取该目录的 `CLAUDE.md`、`.claude/`、Git 和源码配置。
-6. 双击会话名称或点击铅笔按钮可以重命名；点击删除按钮只会终止并移除客户端会话，不会删除工程文件或 Claude Code 历史记录。
-7. 点击工程名称左侧箭头可以折叠或展开该工程的会话列表。
-8. 双击工程名称可以设置别名，点击星标可以置顶工程。
-9. 按 `Ctrl+K` 可以搜索工程、目录和会话并直接切换。
+4. 工程会话会读取对应目录的 `CLAUDE.md`、`.claude/`、Git 和源码配置；临时会话则在独立的应用隔离目录中运行。
+5. 双击会话名称或点击铅笔按钮可以重命名。删除工程会话不会删除工程文件；删除临时会话会同时清理其临时工作目录和其中的文件。
+6. 点击工程或“临时会话”左侧箭头可以折叠、展开会话列表。
+7. 双击工程名称可以设置别名，点击星标可以置顶工程。
+8. 按 `Ctrl+K` 可以搜索工程、目录和会话并直接切换。
 
 终端剪贴板快捷键：
 
@@ -117,12 +117,13 @@ release/Claude Workspace-Setup-0.2.0-x64.exe
 - 按 `Ctrl+V` 或 `Ctrl+Shift+V` 粘贴。
 - 没有选中文本时，`Ctrl+C` 仍然发送终端中断信号。
 
-工程配置保存在 Electron 的用户数据目录中；从客户端移除工程只会删除列表记录，不会删除磁盘上的工程文件。
+工程和会话配置保存在 Electron 的用户数据目录中；从客户端移除工程只会删除列表记录，不会删除磁盘上的工程文件。临时工作目录也位于用户数据目录中，会一直保留到用户明确删除对应临时会话。
 
 ## 安全边界
 
-- Renderer 不接收任意进程启动权限，只能通过已保存的工程 ID 创建会话。
+- Renderer 不接收任意进程启动权限，只能通过已保存的工程 ID 或受限的“临时会话”范围创建会话。
 - 工程路径由主进程的原生目录选择器获取并进行 `realpath` 校验。
+- 临时目录只由主进程在应用用户数据目录下生成；清理操作会校验路径边界，不能删除该范围外的目录。
 - Claude Code 可执行文件必须是用户明确选择或在受信安装位置发现的真实文件。
 - 原生 `.exe` 直接启动；Windows 脚本包装器通过固定 PowerShell 调用，并通过环境变量传参，避免拼接用户路径。
 - Electron 启用了 `contextIsolation`、沙箱化 preload、禁用 renderer Node.js，并限制页面导航。

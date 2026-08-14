@@ -56,6 +56,7 @@ function upsertSession(
 
 const COLLAPSED_PROJECTS_KEY = "claude-workspace.collapsed-projects.v1";
 const ACTIVE_SELECTION_KEY = "claude-workspace.active-selection.v1";
+const TEMPORARY_GROUP_KEY = "__temporary-sessions__";
 
 interface ActiveSelection {
   projectId?: string;
@@ -251,10 +252,16 @@ export function App() {
           const project = snapshotRef.current?.projects.find(
             (candidate) => candidate.id === session.projectId,
           );
+          const workspaceName =
+            session.projectId === null
+              ? "临时会话"
+              : project
+                ? projectDisplayName(project)
+                : "Claude Workspace";
           void window.claudeWorkspace
             .showSessionNotification({
               sessionId: session.id,
-              title: `${project ? projectDisplayName(project) : "Claude Workspace"} · ${session.title}`,
+              title: `${workspaceName} · ${session.title}`,
               body:
                 session.status === "failed"
                   ? "Claude Code 会话启动或运行失败。"
@@ -294,20 +301,28 @@ export function App() {
         const savedSession = initialSnapshot.sessions.find(
           (session) => session.id === saved.sessionId,
         );
+        if (savedSession) {
+          setActiveProjectId(savedSession.projectId);
+          setActiveSessionId(savedSession.id);
+          return;
+        }
         const selectedProject =
           orderedSnapshot.projects.find(
-            (project) =>
-              project.id === (savedSession?.projectId ?? saved.projectId),
+            (project) => project.id === saved.projectId,
           ) ?? orderedSnapshot.projects[0];
         if (selectedProject) {
           const selectedSession =
-            savedSession?.projectId === selectedProject.id
-              ? savedSession
-              : initialSnapshot.sessions.find(
-                  (session) => session.projectId === selectedProject.id,
-                );
+            initialSnapshot.sessions.find(
+              (session) => session.projectId === selectedProject.id,
+            );
           setActiveProjectId(selectedProject.id);
           setActiveSessionId(selectedSession?.id ?? null);
+        } else {
+          const temporarySession = initialSnapshot.sessions.find(
+            (session) => session.projectId === null,
+          );
+          setActiveProjectId(null);
+          setActiveSessionId(temporarySession?.id ?? null);
         }
       })
       .catch((initializationError: unknown) => {
@@ -327,10 +342,17 @@ export function App() {
   const sessions = snapshot?.sessions ?? [];
   const activeProject = projects.find((project) => project.id === activeProjectId);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
+  const temporarySessions = useMemo(
+    () => sessions.filter((session) => session.projectId === null),
+    [sessions],
+  );
 
   const sessionsByProject = useMemo(() => {
     const grouped = new Map<string, SessionRecord[]>();
     for (const session of sessions) {
+      if (session.projectId === null) {
+        continue;
+      }
       const projectSessions = grouped.get(session.projectId) ?? [];
       projectSessions.push(session);
       grouped.set(session.projectId, projectSessions);
@@ -444,14 +466,14 @@ export function App() {
   };
 
   const selectWorkspaceItem = (item: WorkspaceSearchItem) => {
-    const projectSessions = sessions.filter(
+    const workspaceSessions = sessions.filter(
       (session) => session.projectId === item.projectId,
     );
     setActiveProjectId(item.projectId);
-    setActiveSessionId(item.sessionId ?? projectSessions[0]?.id ?? null);
+    setActiveSessionId(item.sessionId ?? workspaceSessions[0]?.id ?? null);
     setCollapsedProjectIds((current) => {
       const next = new Set(current);
-      next.delete(item.projectId);
+      next.delete(item.projectId ?? TEMPORARY_GROUP_KEY);
       return next;
     });
   };
@@ -476,9 +498,10 @@ export function App() {
       );
     });
 
-  const createSession = (project: ProjectRecord) =>
+  const createProjectSession = (project: ProjectRecord) =>
     runAction(async () => {
       const session = await window.claudeWorkspace.createSession({
+        scope: "project",
         projectId: project.id,
       });
       setSnapshot((current) =>
@@ -491,6 +514,25 @@ export function App() {
       setCollapsedProjectIds((current) => {
         const next = new Set(current);
         next.delete(project.id);
+        return next;
+      });
+    });
+
+  const createTemporarySession = () =>
+    runAction(async () => {
+      const session = await window.claudeWorkspace.createSession({
+        scope: "temporary",
+      });
+      setSnapshot((current) =>
+        current
+          ? { ...current, sessions: upsertSession(current.sessions, session) }
+          : current,
+      );
+      setActiveProjectId(null);
+      setActiveSessionId(session.id);
+      setCollapsedProjectIds((current) => {
+        const next = new Set(current);
+        next.delete(TEMPORARY_GROUP_KEY);
         return next;
       });
     });
@@ -512,7 +554,7 @@ export function App() {
     setActiveSessionId(session.id);
     setCollapsedProjectIds((current) => {
       const next = new Set(current);
-      next.delete(session.projectId);
+      next.delete(session.projectId ?? TEMPORARY_GROUP_KEY);
       return next;
     });
     setSessionTitleDraft(session.title);
@@ -547,28 +589,36 @@ export function App() {
   const removeSession = (session: SessionRecord) => {
     const isRunning =
       session.status === "running" || session.status === "starting";
-    const warning = isRunning
-      ? `删除“${session.title}”会终止正在运行的 Claude Code 进程，并从列表移除。Claude Code 历史记录不会删除，是否继续？`
-      : `从列表删除“${session.title}”？Claude Code 历史记录不会删除。`;
+    const warning =
+      session.projectId === null
+        ? isRunning
+          ? `删除“${session.title}”会终止正在运行的 Claude Code 进程，并清理临时工作目录及其中的文件，是否继续？`
+          : `删除“${session.title}”并清理临时工作目录及其中的文件？`
+        : isRunning
+          ? `删除“${session.title}”会终止正在运行的 Claude Code 进程，并从列表移除。Claude Code 历史记录不会删除，是否继续？`
+          : `从列表删除“${session.title}”？Claude Code 历史记录不会删除。`;
     if (!window.confirm(warning)) {
       return;
     }
 
     void runAction(async () => {
       await window.claudeWorkspace.removeSession(session.id);
-      const projectSessions = sessionsByProject.get(session.projectId) ?? [];
-      const removedIndex = projectSessions.findIndex(
+      const workspaceSessions =
+        session.projectId === null
+          ? temporarySessions
+          : sessionsByProject.get(session.projectId) ?? [];
+      const removedIndex = workspaceSessions.findIndex(
         (candidate) => candidate.id === session.id,
       );
-      const remainingProjectSessions = projectSessions.filter(
+      const remainingWorkspaceSessions = workspaceSessions.filter(
         (candidate) => candidate.id !== session.id,
       );
       const nextSession =
-        remainingProjectSessions.length > 0
-          ? remainingProjectSessions[
+        remainingWorkspaceSessions.length > 0
+          ? remainingWorkspaceSessions[
               Math.min(
                 Math.max(removedIndex, 0),
-                remainingProjectSessions.length - 1,
+                remainingWorkspaceSessions.length - 1,
               )
             ]
           : undefined;
@@ -667,6 +717,104 @@ export function App() {
     );
   }
 
+  const renderSessionRows = (workspaceSessions: SessionRecord[]) =>
+    workspaceSessions.map((session) =>
+      renamingSessionId === session.id ? (
+        <form
+          className="session-rename-form"
+          key={session.id}
+          onSubmit={(event) => {
+            event.preventDefault();
+            commitSessionRename(session);
+          }}
+        >
+          <input
+            type="text"
+            value={sessionTitleDraft}
+            maxLength={80}
+            aria-label="会话名称"
+            autoFocus
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) =>
+              setSessionTitleDraft(event.currentTarget.value)
+            }
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setRenamingSessionId(null);
+              }
+            }}
+          />
+          <button
+            className="session-edit-action session-edit-action--save"
+            type="submit"
+            title="保存名称"
+            aria-label="保存会话名称"
+            disabled={busy}
+          >
+            ✓
+          </button>
+          <button
+            className="session-edit-action"
+            type="button"
+            title="取消"
+            aria-label="取消重命名"
+            onClick={() => setRenamingSessionId(null)}
+          >
+            ×
+          </button>
+        </form>
+      ) : (
+        <div
+          className={`session-row ${activeSessionId === session.id ? "session-row--active" : ""} ${unreadSessionIds.has(session.id) ? "session-row--unread" : ""}`}
+          key={session.id}
+        >
+          <button
+            className="session-select"
+            type="button"
+            title={`${session.title}（双击重命名）`}
+            onClick={() => {
+              setActiveProjectId(session.projectId);
+              setActiveSessionId(session.id);
+            }}
+            onDoubleClick={() => startRenamingSession(session)}
+          >
+            <span
+              className={`session-indicator session-indicator--${session.status}`}
+            />
+            <span>{session.title}</span>
+            {unreadSessionIds.has(session.id) ? (
+              <span className="session-unread-dot" title="有新输出" />
+            ) : null}
+            <small>{statusLabel(session.status)}</small>
+          </button>
+          <button
+            className="session-rename-button"
+            type="button"
+            title="重命名会话"
+            aria-label={`重命名 ${session.title}`}
+            onClick={() => startRenamingSession(session)}
+          >
+            ✎
+          </button>
+          <button
+            className="session-delete-button"
+            type="button"
+            title="删除会话"
+            aria-label={`删除 ${session.title}`}
+            onClick={() => removeSession(session)}
+          >
+            ×
+          </button>
+        </div>
+      ),
+    );
+  const temporaryCollapsed = collapsedProjectIds.has(TEMPORARY_GROUP_KEY);
+  const temporarySelected = activeSession?.projectId === null;
+  const temporaryUnreadCount = temporarySessions.filter((session) =>
+    unreadSessionIds.has(session.id),
+  ).length;
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -719,6 +867,16 @@ export function App() {
               ⌕
             </button>
             <button
+              className="icon-button icon-button--temporary"
+              type="button"
+              title="新建临时会话"
+              aria-label="新建不关联工程目录的临时会话"
+              onClick={createTemporarySession}
+              disabled={busy || !snapshot.claudeExecutable.path}
+            >
+              ›_
+            </button>
+            <button
               className="icon-button"
               type="button"
               title="添加工程目录"
@@ -731,6 +889,66 @@ export function App() {
         </div>
 
         <nav className="project-list" aria-label="工程与会话">
+          <section
+            className={`project-group temporary-group ${temporarySelected ? "project-group--active" : ""}`}
+          >
+            <div className="project-row">
+              <button
+                className="project-collapse-button"
+                type="button"
+                title={temporaryCollapsed ? "展开临时会话" : "折叠临时会话"}
+                aria-label={temporaryCollapsed ? "展开临时会话" : "折叠临时会话"}
+                aria-expanded={!temporaryCollapsed}
+                aria-controls="temporary-sessions"
+                onClick={() => toggleProject(TEMPORARY_GROUP_KEY)}
+              >
+                <span
+                  className={`project-chevron ${temporaryCollapsed ? "" : "project-chevron--expanded"}`}
+                  aria-hidden="true"
+                >
+                  ›
+                </span>
+              </button>
+              <button
+                className="project-select"
+                type="button"
+                title="不关联工程目录，使用应用隔离的临时工作目录"
+                onClick={() => {
+                  setActiveProjectId(null);
+                  setActiveSessionId(temporarySessions[0]?.id ?? null);
+                }}
+              >
+                <span className="temporary-icon" aria-hidden="true">›_</span>
+                <span className="project-copy">
+                  <strong>临时会话</strong>
+                  <span>不关联工程目录</span>
+                </span>
+              </button>
+              <span
+                className={`project-session-count ${temporaryUnreadCount ? "project-session-count--unread" : ""}`}
+                title={
+                  temporaryUnreadCount
+                    ? `${temporaryUnreadCount} 个未读会话，共 ${temporarySessions.length} 个会话`
+                    : `${temporarySessions.length} 个会话`
+                }
+              >
+                {temporaryUnreadCount || temporarySessions.length}
+              </span>
+            </div>
+            {!temporaryCollapsed ? (
+              <div className="session-list" id="temporary-sessions">
+                {renderSessionRows(temporarySessions)}
+                <button
+                  className="new-session-button"
+                  type="button"
+                  onClick={createTemporarySession}
+                  disabled={busy || !snapshot.claudeExecutable.path}
+                >
+                  <span>＋</span> 新建临时会话
+                </button>
+              </div>
+            ) : null}
+          </section>
           {projects.map((project) => {
             const projectSessions = sessionsByProject.get(project.id) ?? [];
             const selected = activeProjectId === project.id;
@@ -866,101 +1084,11 @@ export function App() {
 
                 {!collapsed ? (
                   <div className="session-list" id={sessionListId}>
-                    {projectSessions.map((session) =>
-                      renamingSessionId === session.id ? (
-                        <form
-                          className="session-rename-form"
-                          key={session.id}
-                          onSubmit={(event) => {
-                            event.preventDefault();
-                            commitSessionRename(session);
-                          }}
-                        >
-                          <input
-                            type="text"
-                            value={sessionTitleDraft}
-                            maxLength={80}
-                            aria-label="会话名称"
-                            autoFocus
-                            onFocus={(event) => event.currentTarget.select()}
-                            onChange={(event) =>
-                              setSessionTitleDraft(event.currentTarget.value)
-                            }
-                            onKeyDown={(event) => {
-                              if (event.key === "Escape") {
-                                event.preventDefault();
-                                setRenamingSessionId(null);
-                              }
-                            }}
-                          />
-                          <button
-                            className="session-edit-action session-edit-action--save"
-                            type="submit"
-                            title="保存名称"
-                            aria-label="保存会话名称"
-                            disabled={busy}
-                          >
-                            ✓
-                          </button>
-                          <button
-                            className="session-edit-action"
-                            type="button"
-                            title="取消"
-                            aria-label="取消重命名"
-                            onClick={() => setRenamingSessionId(null)}
-                          >
-                            ×
-                          </button>
-                        </form>
-                      ) : (
-                        <div
-                          className={`session-row ${activeSessionId === session.id ? "session-row--active" : ""} ${unreadSessionIds.has(session.id) ? "session-row--unread" : ""}`}
-                          key={session.id}
-                        >
-                          <button
-                            className="session-select"
-                            type="button"
-                            title={`${session.title}（双击重命名）`}
-                            onClick={() => {
-                              setActiveProjectId(project.id);
-                              setActiveSessionId(session.id);
-                            }}
-                            onDoubleClick={() => startRenamingSession(session)}
-                          >
-                            <span
-                              className={`session-indicator session-indicator--${session.status}`}
-                            />
-                            <span>{session.title}</span>
-                            {unreadSessionIds.has(session.id) ? (
-                              <span className="session-unread-dot" title="有新输出" />
-                            ) : null}
-                            <small>{statusLabel(session.status)}</small>
-                          </button>
-                          <button
-                            className="session-rename-button"
-                            type="button"
-                            title="重命名会话"
-                            aria-label={`重命名 ${session.title}`}
-                            onClick={() => startRenamingSession(session)}
-                          >
-                            ✎
-                          </button>
-                          <button
-                            className="session-delete-button"
-                            type="button"
-                            title="删除会话"
-                            aria-label={`删除 ${session.title}`}
-                            onClick={() => removeSession(session)}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      ),
-                    )}
+                    {renderSessionRows(projectSessions)}
                     <button
                       className="new-session-button"
                       type="button"
-                      onClick={() => createSession(project)}
+                      onClick={() => createProjectSession(project)}
                       disabled={busy || !snapshot.claudeExecutable.path}
                     >
                       <span>＋</span> 新建会话
@@ -984,16 +1112,26 @@ export function App() {
       </aside>
 
       <section className="workspace-panel">
-        {activeSession && activeProject ? (
+        {activeSession ? (
           <>
             <header className="workspace-toolbar">
               <div className="toolbar-title">
                 <div className="toolbar-breadcrumb">
-                  <span>{projectDisplayName(activeProject)}</span>
+                  <span>
+                    {activeSession.projectId === null
+                      ? "临时会话"
+                      : activeProject
+                        ? projectDisplayName(activeProject)
+                        : "未知工程"}
+                  </span>
                   <span className="breadcrumb-divider">/</span>
                   <strong>{activeSession.title}</strong>
                 </div>
-                <p title={activeSession.cwd}>{activeSession.cwd}</p>
+                <p title={activeSession.cwd}>
+                  {activeSession.projectId === null
+                    ? `临时工作目录 · ${activeSession.cwd}`
+                    : activeSession.cwd}
+                </p>
               </div>
               <div className="toolbar-actions">
                 <button
@@ -1030,8 +1168,18 @@ export function App() {
                   <button
                     className="primary-button primary-button--compact"
                     type="button"
-                    onClick={() => createSession(activeProject)}
-                    disabled={busy || !snapshot.claudeExecutable.path}
+                    onClick={() =>
+                      activeSession.projectId === null
+                        ? createTemporarySession()
+                        : activeProject
+                          ? createProjectSession(activeProject)
+                          : undefined
+                    }
+                    disabled={
+                      busy ||
+                      !snapshot.claudeExecutable.path ||
+                      (activeSession.projectId !== null && !activeProject)
+                    }
                   >
                     新建会话
                   </button>
@@ -1060,7 +1208,7 @@ export function App() {
             <button
               className="primary-button"
               type="button"
-              onClick={() => createSession(activeProject)}
+              onClick={() => createProjectSession(activeProject)}
               disabled={busy || !snapshot.claudeExecutable.path}
             >
               启动 Claude Code
@@ -1086,8 +1234,8 @@ export function App() {
             <p className="eyebrow">WINDOWS DESKTOP WORKSPACE</p>
             <h2>一个窗口，管理所有 Claude Code 会话</h2>
             <p>
-              选择本地工程文件夹。每个会话都会在对应目录运行，无需打开多个
-              IntelliJ IDEA 窗口。
+              可以选择本地工程文件夹，也可以直接新建不关联工程的临时会话，
+              无需打开多个 IntelliJ IDEA 窗口。
             </p>
             <button
               className="primary-button"
@@ -1096,6 +1244,14 @@ export function App() {
               disabled={busy}
             >
               选择第一个工程文件夹
+            </button>
+            <button
+              className="text-button"
+              type="button"
+              onClick={createTemporarySession}
+              disabled={busy || !snapshot.claudeExecutable.path}
+            >
+              不选目录，启动临时会话
             </button>
           </div>
         )}
