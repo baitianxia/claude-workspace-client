@@ -1,0 +1,18 @@
+export const IPC_CHANNELS = {
+  getSnapshot: "workspace:get-snapshot",
+  selectProjectDirectory: "workspace:select-project-directory",
+  removeProject: "workspace:remove-project",
+  selectClaudeExecutable: "workspace:select-claude-executable",
+  autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
+  createSession: "workspace:create-session",
+  renameSession: "workspace:rename-session",
+  removeSession: "workspace:remove-session",
+  stopSession: "workspace:stop-session",
+  readClipboardText: "workspace:read-clipboard-text",
+  writeClipboardText: "workspace:write-clipboard-text",
+  writeTerminal: "workspace:write-terminal",
+  resizeTerminal: "workspace:resize-terminal",
+  getTerminalSnapshot: "workspace:get-terminal-snapshot",
+  terminalData: "workspace:terminal-data",
+  sessionChanged: "workspace:session-changed",
+} as const;
