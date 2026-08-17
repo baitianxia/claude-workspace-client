@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  consumeTerminalShortcut,
   terminalShortcutAction,
   type TerminalShortcutEvent,
 } from "../src/shared/terminal-shortcuts";
@@ -15,6 +16,7 @@ function keyboardEvent(
     metaKey: false,
     altKey: false,
     shiftKey: false,
+    preventDefault: () => undefined,
     ...overrides,
   };
 }
@@ -52,5 +54,30 @@ describe("terminalShortcutAction", () => {
       terminalShortcutAction(keyboardEvent("v", { altKey: true }), false),
     ).toBeNull();
     expect(terminalShortcutAction(keyboardEvent("x"), true)).toBeNull();
+  });
+
+  it("prevents the native clipboard path during consecutive copy-paste cycles", () => {
+    const preventDefault = vi.fn();
+    const actions = [
+      consumeTerminalShortcut(
+        keyboardEvent("c", { preventDefault }),
+        true,
+      ),
+      consumeTerminalShortcut(
+        keyboardEvent("v", { preventDefault }),
+        false,
+      ),
+      consumeTerminalShortcut(
+        keyboardEvent("c", { preventDefault }),
+        true,
+      ),
+      consumeTerminalShortcut(
+        keyboardEvent("v", { preventDefault }),
+        false,
+      ),
+    ];
+
+    expect(actions).toEqual(["copy", "paste", "copy", "paste"]);
+    expect(preventDefault).toHaveBeenCalledTimes(4);
   });
 });

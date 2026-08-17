@@ -90,12 +90,12 @@ npm run pack:win
 npm run dist:win:zip
 ```
 
-ZIP 输出到 `release/Claude Workspace-0.3.0-x64.zip`。解压后直接运行其中的 `Claude Workspace.exe`。
+ZIP 输出到 `release/Claude Workspace-0.3.1-x64.zip`。解压后直接运行其中的 `Claude Workspace.exe`。
 
 安装文件输出到：
 
 ```text
-release/Claude Workspace-Setup-0.3.0-x64.exe
+release/Claude Workspace-Setup-0.3.1-x64.exe
 ```
 
 当前工程没有配置商业代码签名证书，因此本地生成的安装程序可能触发 Windows SmartScreen 提示。正式分发前应加入 Authenticode 签名。

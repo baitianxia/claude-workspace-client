@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import type { SessionRecord, TerminalDataEvent } from "../shared/contracts";
-import { terminalShortcutAction } from "../shared/terminal-shortcuts";
+import { consumeTerminalShortcut } from "../shared/terminal-shortcuts";
 
 interface TerminalViewProps {
   session: SessionRecord;
@@ -128,7 +128,7 @@ export function TerminalView({ session, active }: TerminalViewProps) {
     };
 
     terminal.attachCustomKeyEventHandler((event) => {
-      const action = terminalShortcutAction(event, terminal.hasSelection());
+      const action = consumeTerminalShortcut(event, terminal.hasSelection());
       if (action === "copy") {
         copySelection();
         return false;
