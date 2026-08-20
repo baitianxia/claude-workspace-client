@@ -303,7 +303,7 @@ describe("WeComBridge", () => {
     expect(firstPty.writes).toEqual([]);
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "routed",
-      lastInboundDetail: expect.stringContaining(callbackUserId),
+      lastInboundDetail: expect.stringContaining(secondCode),
     });
 
     client.emit(
@@ -326,23 +326,16 @@ describe("WeComBridge", () => {
       "message",
       incomingMessage("other-user", `${thirdCode} 1`, "lisi"),
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(firstPty.writes).toEqual(["2\r"]);
-    expect(bridge.getState()).toMatchObject({
-      lastInboundStatus: "ignored",
-      lastInboundDetail: expect.stringContaining("未绑定 userid"),
-    });
-
-    client.emit(
-      "message",
-      incomingMessage("bound-user", `${thirdCode} 1`, callbackUserId),
-    );
     await vi.waitFor(() => expect(firstPty.writes).toEqual(["2\r", "1\r"]));
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "routed",
+      lastInboundDetail: expect.stringContaining(thirdCode),
+    });
 
     bridge.dispose();
   });
 
-  it("rejects old launch callbacks and replies from another userid", async () => {
+  it("rejects unknown and stale reply codes without writing to a PTY", async () => {
     const firstPty = fakePty(1);
     const restartedPty = fakePty(2);
     const spawner = vi
@@ -389,8 +382,8 @@ describe("WeComBridge", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(firstPty.writes).toEqual([]);
     expect(bridge.getState()).toMatchObject({
-      lastInboundStatus: "ignored",
-      lastInboundDetail: expect.stringContaining("lisi"),
+      lastInboundStatus: "rejected",
+      lastInboundDetail: expect.stringContaining("不存在、已过期"),
     });
 
     firstPty.emitExit(0);

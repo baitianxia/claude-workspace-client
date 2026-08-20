@@ -20,7 +20,6 @@ import {
   RemoteReplyRouter,
   terminalInputForRemoteReply,
   type PendingRemoteReply,
-  type ResolveRemoteReplyResult,
 } from "./remote-reply-router";
 import type { SessionManager, SessionInputEvent } from "./session-manager";
 
@@ -241,7 +240,6 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
   private readonly processedMessageIds = new Set<string>();
   private authenticatedClient: WeComClient | null = null;
   private supersededClient: WeComClient | null = null;
-  private trustedInboundUserId: string | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -276,7 +274,6 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.client = null;
     this.authenticatedClient = null;
     this.supersededClient = null;
-    this.trustedInboundUserId = null;
     this.clearRetry();
     this.configuration = { ...configuration, secret: undefined };
     this.router.clearAll();
@@ -378,7 +375,6 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.client = null;
     this.authenticatedClient = null;
     this.supersededClient = null;
-    this.trustedInboundUserId = null;
     this.clearRetry();
     this.router.clearAll();
     this.unsentCodes.clear();
@@ -507,11 +503,6 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       this.recordInbound("ignored", "收到群聊消息，已按安全策略忽略。");
       return;
     }
-    const senderUserId = message.from?.userid;
-    if (!senderUserId) {
-      this.recordInbound("ignored", "收到缺少 userid 的消息，已忽略。");
-      return;
-    }
     const messageText = incomingMessageText(message);
     if (!messageText.trim()) {
       const detail = "收到消息，但其中没有可用于路由的文本。";
@@ -520,47 +511,14 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       return;
     }
     const quotedText = quoteText(message);
-    let resolved: ResolveRemoteReplyResult;
-    let newlyBoundInboundUser = false;
-    if (this.trustedInboundUserId) {
-      if (senderUserId !== this.trustedInboundUserId) {
-        this.recordInbound(
-          "ignored",
-          `收到未绑定 userid“${senderUserId}”的回复；当前客户端已绑定另一企业微信用户，已忽略。`,
-        );
-        return;
-      }
-      resolved = this.router.resolve(
-        this.configuration.targetUserId,
-        messageText,
-        quotedText,
-      );
-    } else if (senderUserId === this.configuration.targetUserId) {
-      this.trustedInboundUserId = senderUserId;
-      newlyBoundInboundUser = true;
-      resolved = this.router.resolve(senderUserId, messageText, quotedText);
-    } else {
-      const candidate = this.router.resolve(
-        this.configuration.targetUserId,
-        messageText,
-        quotedText,
-      );
-      if (candidate.status !== "matched") {
-        this.recordInbound(
-          "ignored",
-          `收到尚未绑定的 userid“${senderUserId}”的消息，但未通过当前回复码验证，已忽略。`,
-        );
-        return;
-      }
-      this.trustedInboundUserId = senderUserId;
-      newlyBoundInboundUser = true;
-      resolved = candidate;
-    }
+    const resolved = this.router.resolve(
+      this.configuration.targetUserId,
+      messageText,
+      quotedText,
+    );
     this.recordInbound(
       "received",
-      newlyBoundInboundUser
-        ? `回复码验证成功，已绑定企业微信回调 userid“${senderUserId}”。`
-        : "已收到已绑定企业微信用户的回复，正在匹配 Claude Code 会话。",
+      "已收到企业微信回复，正在按回复码匹配 Claude Code 会话。",
     );
     if (resolved.status === "rejected") {
       this.recordInbound("rejected", resolved.message);
@@ -618,9 +576,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
 
     this.router.complete(pending.code);
     this.unsentCodes.delete(pending.code);
-    const detail = `已将回复码 ${pending.code} 的消息发送到对应 Claude Code 会话。${
-      newlyBoundInboundUser ? ` 已绑定回调 userid“${senderUserId}”。` : ""
-    }`;
+    const detail = `已将回复码 ${pending.code} 的消息发送到对应 Claude Code 会话。`;
     this.recordInbound("routed", detail);
     const confirmed = await this.replyToMessage(
       client,
