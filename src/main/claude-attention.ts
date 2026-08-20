@@ -71,6 +71,7 @@ function toolInputDetails(payload: ClaudeHookPayload): string[] {
 
   const consumed = new Set<string>();
   const details: string[] = [];
+  const isWebFetch = payload.tool_name === "WebFetch";
   const add = (label: string, keys: string[], maxLength: number) => {
     const value = takeInputText(input, consumed, keys);
     if (value) {
@@ -82,9 +83,9 @@ function toolInputDetails(payload: ClaudeHookPayload): string[] {
   add("命令", ["command"], 3_000);
   add("目标文件", ["file_path", "notebook_path", "path"], 2_000);
   add("计划文件", ["planFilePath"], 2_000);
-  add("网址", ["url"], 2_000);
+  add(isWebFetch ? "目标网址" : "网址", ["url"], 2_000);
   add("查询内容", ["query"], 2_000);
-  add("请求内容", ["prompt"], 2_000);
+  add(isWebFetch ? "获取后的处理要求" : "请求内容", ["prompt"], 2_000);
   add("计划内容", ["plan"], 5_000);
   add("替换前", ["old_string"], 1_500);
   add("替换后", ["new_string"], 1_500);
@@ -112,37 +113,120 @@ function permissionSuggestions(payload: ClaudeHookPayload): unknown[] {
     : [];
 }
 
-function permissionSuggestionText(value: unknown, index: number): string {
+interface PermissionCopy {
+  introduction: string;
+  question: string;
+  allowOnce: string;
+  deny: string;
+  allowSimilar: string;
+}
+
+function webFetchHost(payload: ClaudeHookPayload): string | null {
+  const input = asRecord(payload.tool_input);
+  const url = textValue(input?.url);
+  if (!url) {
+    return null;
+  }
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+function permissionCopy(payload: ClaudeHookPayload): PermissionCopy {
+  const toolName = payload.tool_name ?? "未知工具";
+  if (toolName === "WebFetch") {
+    const host = webFetchHost(payload);
+    return {
+      introduction: host
+        ? `权限请求：Claude Code 希望从 ${host} 获取网页内容。`
+        : "权限请求：Claude Code 希望获取网页内容。",
+      question: "是否允许 Claude Code 获取该网页内容？",
+      allowOnce: "允许：仅获取本次网页内容",
+      deny:
+        "拒绝：不获取本次网页内容，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+      allowSimilar: host
+        ? `允许：以后从 ${host} 获取内容时不再询问`
+        : "允许：以后获取此类网页内容时不再询问",
+    };
+  }
+  if (toolName === "Bash") {
+    return {
+      introduction: "权限请求：Claude Code 希望运行下面的命令。",
+      question: "是否允许 Claude Code 运行该命令？",
+      allowOnce: "允许：仅运行本次命令",
+      deny:
+        "拒绝：不运行本次命令，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+      allowSimilar: "允许：以后运行此类命令时不再询问",
+    };
+  }
+  return {
+    introduction: `权限请求：Claude Code 希望使用 ${toolName} 执行下面的操作。`,
+    question: "是否允许 Claude Code 执行该操作？",
+    allowOnce: "允许：仅执行本次操作",
+    deny:
+      "拒绝：不执行本次操作，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+    allowSimilar: "允许：以后执行此类操作时不再询问",
+  };
+}
+
+function permissionRuleScope(ruleValue: unknown): string | null {
+  const rule = asRecord(ruleValue);
+  const toolName = textValue(rule?.toolName);
+  if (!toolName) {
+    return null;
+  }
+  const ruleContent = textValue(rule?.ruleContent);
+  if (toolName === "WebFetch" && ruleContent) {
+    const domain = /^domain:(.+)$/iu.exec(ruleContent)?.[1]?.trim();
+    if (domain) {
+      return `从 ${truncate(domain, 500)} 获取内容`;
+    }
+  }
+  if (toolName === "Bash") {
+    return ruleContent
+      ? `运行符合“${truncate(ruleContent, 500)}”规则的命令`
+      : "运行 Bash 命令";
+  }
+  return ruleContent
+    ? `使用 ${toolName}（范围：${truncate(ruleContent, 500)}）`
+    : `使用 ${toolName}`;
+}
+
+function permissionSuggestionText(
+  payload: ClaudeHookPayload,
+  value: unknown,
+  index: number,
+): string {
   const suggestion = asRecord(value);
   const rules = Array.isArray(suggestion?.rules) ? suggestion.rules : [];
-  const ruleLabels = rules.flatMap((ruleValue) => {
-    const rule = asRecord(ruleValue);
-    const toolName = textValue(rule?.toolName);
-    if (!toolName) {
-      return [];
-    }
-    const ruleContent = textValue(rule?.ruleContent);
-    return [
-      ruleContent
-        ? `${toolName}(${truncate(ruleContent, 500)})`
-        : toolName,
-    ];
+  const scopes = rules.flatMap((ruleValue) => {
+    const scope = permissionRuleScope(ruleValue);
+    return scope ? [scope] : [];
   });
-  return `${index + 2}. 始终允许${
-    ruleLabels.length > 0 ? `：${ruleLabels.join("、")}` : "此类操作"
-  }`;
+  const scopeText =
+    scopes.length > 0
+      ? `允许：以后${scopes.join("，或")}时不再询问`
+      : permissionCopy(payload).allowSimilar;
+  return `${index + 2}. ${scopeText}`;
 }
 
 function permissionBody(payload: ClaudeHookPayload): string {
   const details = toolInputDetails(payload);
   const suggestions = permissionSuggestions(payload);
+  const copy = permissionCopy(payload);
   const choices = [
-    "回复选项：",
-    "1. 允许本次",
-    ...suggestions.map(permissionSuggestionText),
-    `${suggestions.length + 2}. 拒绝`,
+    copy.question,
+    `1. ${copy.allowOnce}`,
+    ...suggestions.map((suggestion, index) =>
+      permissionSuggestionText(payload, suggestion, index),
+    ),
+    `${suggestions.length + 2}. ${copy.deny}`,
   ];
   return [
+    copy.introduction,
+    "",
     `工具：${payload.tool_name ?? "未知工具"}`,
     ...(details.length > 0 ? details : ["参数：Claude Code 未提供操作详情"]),
     "",
@@ -154,11 +238,13 @@ function questionBody(payload: ClaudeHookPayload): {
   body: string;
   supportsMultipleSelection: boolean;
   questionSelectionModes: Array<"single" | "multiple">;
+  questionOptionLabels: string[][];
 } {
   const input = asRecord(payload.tool_input);
   const questions = Array.isArray(input?.questions) ? input.questions : [];
   let supportsMultipleSelection = false;
   const questionSelectionModes: Array<"single" | "multiple"> = [];
+  const questionOptionLabels: string[][] = [];
   const sections = questions.flatMap((questionValue, questionIndex) => {
     const question = asRecord(questionValue);
     const prompt = textValue(question?.question);
@@ -170,17 +256,20 @@ function questionBody(payload: ClaudeHookPayload): {
     supportsMultipleSelection ||= multiSelect;
     questionSelectionModes.push(multiSelect ? "multiple" : "single");
     const options = Array.isArray(question?.options) ? question.options : [];
-    const optionLines = options.flatMap((optionValue, optionIndex) => {
+    const optionLabels: string[] = [];
+    const optionLines = options.flatMap((optionValue) => {
       const option = asRecord(optionValue);
       const label = textValue(option?.label);
       if (!label) {
         return [];
       }
+      optionLabels.push(label);
       const description = textValue(option?.description);
       return [
-        `${optionIndex + 1}. ${label}${description ? ` — ${description}` : ""}`,
+        `${optionLabels.length}. ${label}${description ? ` — ${description}` : ""}`,
       ];
     });
+    questionOptionLabels.push(optionLabels);
     const heading =
       questions.length > 1
         ? `### 问题 ${questionIndex + 1}${header ? ` · ${header}` : ""}`
@@ -190,7 +279,10 @@ function questionBody(payload: ClaudeHookPayload): {
       prompt,
       "",
       ...optionLines,
+      `${optionLabels.length + 1}. 输入其他回答（Type something.）`,
+      `${optionLabels.length + 2}. 与 Claude 讨论这个问题（Chat about this）`,
       ...(multiSelect ? ["（可多选，使用逗号分隔编号）"] : []),
+      "（选择“输入其他回答”或“讨论这个问题”后，企业微信会继续提示你发送具体内容。）",
       "",
     ];
   });
@@ -201,6 +293,7 @@ function questionBody(payload: ClaudeHookPayload): {
         : `Claude Code 正在询问用户：\n${safeJson(payload.tool_input)}`,
     supportsMultipleSelection,
     questionSelectionModes,
+    questionOptionLabels,
   };
 }
 
@@ -297,6 +390,38 @@ export function attentionFromClaudeHook(
         )
       : null;
   }
+  if (
+    ["PreToolUse", "PermissionRequest"].includes(payload.hook_event_name) &&
+    payload.tool_name === "AskUserQuestion"
+  ) {
+    const question = questionBody(payload);
+    return {
+      ...baseAttention(
+        event,
+        "question",
+        "Claude Code 有问题需要回复",
+        question.body,
+        true,
+        question.supportsMultipleSelection,
+        question.questionSelectionModes,
+      ),
+      questionOptionLabels: question.questionOptionLabels,
+    };
+  }
+
+  if (
+    ["PreToolUse", "PermissionRequest"].includes(payload.hook_event_name) &&
+    payload.tool_name === "ExitPlanMode"
+  ) {
+    return baseAttention(
+      event,
+      "plan",
+      "Claude Code 等待计划确认",
+      planBody(payload),
+      true,
+    );
+  }
+
   if (payload.hook_event_name === "PermissionRequest") {
     return {
       ...baseAttention(
@@ -308,35 +433,6 @@ export function attentionFromClaudeHook(
       ),
       permissionSuggestionCount: permissionSuggestions(payload).length,
     };
-  }
-
-  if (
-    payload.hook_event_name === "PreToolUse" &&
-    payload.tool_name === "AskUserQuestion"
-  ) {
-    const question = questionBody(payload);
-    return baseAttention(
-      event,
-      "question",
-      "Claude Code 有问题需要回复",
-      question.body,
-      true,
-      question.supportsMultipleSelection,
-      question.questionSelectionModes,
-    );
-  }
-
-  if (
-    payload.hook_event_name === "PreToolUse" &&
-    payload.tool_name === "ExitPlanMode"
-  ) {
-    return baseAttention(
-      event,
-      "plan",
-      "Claude Code 等待计划确认",
-      planBody(payload),
-      true,
-    );
   }
 
   if (payload.hook_event_name !== "Notification") {

@@ -13,6 +13,11 @@ export type RemoteAttentionKind =
   | "elicitation"
   | "agent";
 
+export type RemoteReplyStage =
+  | "permission-denial-reason"
+  | "question-custom-answer"
+  | "question-chat-message";
+
 export interface RemoteAttention {
   workspaceSessionId: string;
   launchId: string;
@@ -23,6 +28,7 @@ export interface RemoteAttention {
   expectsMenuSelection: boolean;
   supportsMultipleSelection?: boolean;
   questionSelectionModes?: Array<"single" | "multiple">;
+  questionOptionLabels?: string[][];
   permissionSuggestionCount?: number;
 }
 
@@ -31,6 +37,13 @@ export interface PendingRemoteReply extends RemoteAttention {
   userId: string;
   createdAt: number;
   fingerprint: string;
+  replyStage?: RemoteReplyStage;
+}
+
+export interface RemoteReplyAction {
+  input: string;
+  nextStage?: RemoteReplyStage;
+  followUpMessage?: string;
 }
 
 export type RegisterPendingResult =
@@ -66,6 +79,7 @@ function attentionFingerprint(attention: RemoteAttention): string {
     attention.title,
     attention.body,
     JSON.stringify(attention.questionSelectionModes ?? []),
+    JSON.stringify(attention.questionOptionLabels ?? []),
     attention.permissionSuggestionCount ?? 0,
   ].join("\u0000");
 }
@@ -198,6 +212,15 @@ export class RemoteReplyRouter {
     this.remove(code.toUpperCase());
   }
 
+  setReplyStage(code: string, replyStage: RemoteReplyStage): boolean {
+    const pending = this.pendingByCode.get(code.toUpperCase());
+    if (!pending) {
+      return false;
+    }
+    pending.replyStage = replyStage;
+    return true;
+  }
+
   clearWorkspaceSession(workspaceSessionId: string): string | null {
     const code = this.codeByWorkspaceSession.get(workspaceSessionId);
     if (code) {
@@ -264,13 +287,17 @@ export class RemoteReplyRouter {
   }
 }
 
-export function terminalInputForRemoteReply(
+export function terminalActionForRemoteReply(
   pending: PendingRemoteReply,
   reply: string,
-): string {
+): RemoteReplyAction {
   const normalized = normalizedReplyText(reply);
   if (!normalized) {
     throw new Error("回复内容不能为空。");
+  }
+
+  if (pending.replyStage) {
+    return { input: `${normalized}\r` };
   }
 
   const normalizedAlias = normalized.toLocaleLowerCase("en-US");
@@ -281,9 +308,21 @@ export function terminalInputForRemoteReply(
       Math.floor(pending.permissionSuggestionCount ?? 0),
     );
     const denySelection = String(suggestionCount + 2);
-    if (["允许", "同意", "yes", "y"].includes(normalizedAlias)) {
+    if (
+      [
+        "允许",
+        "允许本次",
+        "仅允许本次",
+        "同意",
+        "是",
+        "yes",
+        "y",
+      ].includes(normalizedAlias)
+    ) {
       selection = "1";
-    } else if (["拒绝", "不允许", "no", "n"].includes(normalizedAlias)) {
+    } else if (
+      ["拒绝", "不允许", "否", "no", "n"].includes(normalizedAlias)
+    ) {
       selection = denySelection;
     } else if (normalizedAlias === "始终允许") {
       if (suggestionCount !== 1) {
@@ -304,40 +343,130 @@ export function terminalInputForRemoteReply(
     ) {
       throw new Error("权限回复无效，请回复通知中的选项编号或允许/拒绝。");
     }
-    return `${selection}\r`;
+    if (selection === denySelection) {
+      return {
+        input: `${selection}\r`,
+        nextStage: "permission-denial-reason",
+        followUpMessage:
+          "已选择拒绝。请继续回复拒绝原因，或告诉 Claude Code 应该如何调整。",
+      };
+    }
+    return { input: `${selection}\r` };
   }
 
   const questionModes = pending.questionSelectionModes ?? [];
-  if (questionModes.length > 1) {
-    const answers = selection.split(/\s*[;；]\s*/u);
-    if (answers.length === questionModes.length) {
-      const encoded = answers.map((answer, index) => {
-        if (questionModes[index] === "single" && /^[1-9]$/u.test(answer)) {
-          return `${answer}\r`;
-        }
-        if (
-          questionModes[index] === "multiple" &&
-          /^[1-9](?:\s*[,，]\s*[1-9])*$/u.test(answer)
-        ) {
-          return `${answer.replace(/[^1-9]/gu, "")}\r`;
-        }
-        return null;
-      });
-      if (encoded.every((answer): answer is string => answer !== null)) {
-        return encoded.join("");
+  const questionLabels = pending.questionOptionLabels ?? [];
+  const firstOptionCount = questionLabels[0]?.length ?? 0;
+  if (pending.kind === "question" && questionModes.length > 0) {
+    const numericSelection = Number(selection);
+    if (Number.isInteger(numericSelection)) {
+      if (numericSelection === firstOptionCount + 1) {
+        return {
+          input: `${selection}\r`,
+          nextStage: "question-custom-answer",
+          followUpMessage:
+            "已选择“输入其他回答（Type something.）”。请继续回复你的具体答案。",
+        };
+      }
+      if (numericSelection === firstOptionCount + 2) {
+        return {
+          input: `${selection}\r`,
+          nextStage: "question-chat-message",
+          followUpMessage:
+            "已选择“与 Claude 讨论这个问题（Chat about this）”。请继续回复你想讨论或补充的内容。",
+        };
       }
     }
   }
 
+  if (questionModes.length > 1) {
+    const answers = selection.split(/\s*[;；]\s*/u);
+    if (answers.length === questionModes.length) {
+      const encoded = answers.map((answer, index) => {
+        const labels = questionLabels[index] ?? [];
+        const labelIndex = labels.findIndex(
+          (label) =>
+            label.toLocaleLowerCase("en-US") ===
+            answer.toLocaleLowerCase("en-US"),
+        );
+        const answerSelection =
+          labelIndex >= 0 ? String(labelIndex + 1) : answer;
+        if (
+          questionModes[index] === "single" &&
+          /^[1-9]$/u.test(answerSelection) &&
+          Number(answerSelection) <= labels.length
+        ) {
+          return `${answerSelection}\r`;
+        }
+        if (
+          questionModes[index] === "multiple" &&
+          /^[1-9](?:\s*[,，]\s*[1-9])*$/u.test(answerSelection) &&
+          answerSelection
+            .split(/\s*[,，]\s*/u)
+            .every((value) => Number(value) <= labels.length)
+        ) {
+          return `${answerSelection.replace(/[^1-9]/gu, "")}\r`;
+        }
+        return null;
+      });
+      if (encoded.every((answer): answer is string => answer !== null)) {
+        return { input: encoded.join("") };
+      }
+    }
+    throw new Error(
+      "问题回复无效。多个问题请按通知顺序使用分号分隔答案；单选用一个编号，多选用逗号分隔编号。",
+    );
+  }
+
+  if (pending.kind === "question" && questionModes.length === 1) {
+    const labels = questionLabels[0] ?? [];
+    const labelIndex = labels.findIndex(
+      (label) =>
+        label.toLocaleLowerCase("en-US") === normalizedAlias,
+    );
+    if (labelIndex >= 0) {
+      selection = String(labelIndex + 1);
+    }
+    if (questionModes[0] === "single") {
+      const numericSelection = Number(selection);
+      if (
+        Number.isInteger(numericSelection) &&
+        numericSelection >= 1 &&
+        numericSelection <= labels.length
+      ) {
+        return { input: `${selection}\r` };
+      }
+      throw new Error(
+        `问题回复无效。请回复 1-${labels.length + 2} 的选项编号，或直接回复选项文字。`,
+      );
+    }
+    if (
+      /^[1-9](?:\s*[,，]\s*[1-9])*$/u.test(selection) &&
+      selection
+        .split(/\s*[,，]\s*/u)
+        .every((value) => Number(value) <= labels.length)
+    ) {
+      return { input: `${selection.replace(/[^1-9]/gu, "")}\r` };
+    }
+    throw new Error("多选问题回复无效，请使用逗号分隔通知中的选项编号。");
+  }
+
   if (pending.expectsMenuSelection && /^[1-9]$/u.test(selection)) {
-    return `${selection}\r`;
+    return { input: `${selection}\r` };
   }
   if (
     pending.expectsMenuSelection &&
     pending.supportsMultipleSelection &&
     /^[1-9](?:\s*[,，]\s*[1-9])+$/u.test(selection)
   ) {
-    return `${selection.replace(/[^1-9]/gu, "")}\r`;
+    return { input: `${selection.replace(/[^1-9]/gu, "")}\r` };
   }
-  return `${normalized}\r`;
+  return { input: `${normalized}\r` };
+}
+
+export function terminalInputForRemoteReply(
+  pending: PendingRemoteReply,
+  reply: string,
+): string {
+  return terminalActionForRemoteReply(pending, reply).input;
 }

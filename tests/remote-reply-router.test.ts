@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   RemoteReplyRouter,
+  terminalActionForRemoteReply,
   terminalInputForRemoteReply,
   type RemoteAttention,
 } from "../src/main/remote-reply-router";
@@ -132,6 +133,82 @@ describe("RemoteReplyRouter", () => {
     });
   });
 
+  it("keeps one reply code for duplicate hooks describing the same question", () => {
+    const router = new RemoteReplyRouter(codeGenerator("ASKKK", "OTHER"));
+    const question = attention("session-a", "launch-a", {
+      kind: "question",
+      title: "Claude Code 有问题需要回复",
+      body: "是否收到通知？\n\n1. 收到了\n2. 没收到",
+      expectsMenuSelection: true,
+      questionSelectionModes: ["single"],
+    });
+
+    const first = router.register("zhangsan", question);
+    const duplicate = router.register("zhangsan", { ...question });
+
+    expect(first).toMatchObject({
+      shouldSend: true,
+      pending: { code: "ASKKK" },
+    });
+    expect(duplicate).toMatchObject({
+      shouldSend: false,
+      pending: { code: "ASKKK", kind: "question" },
+    });
+    expect(router.resolve("zhangsan", "ASKKK 1")).toMatchObject({
+      status: "matched",
+      reply: "1",
+    });
+  });
+
+  it("supports question labels and staged Type something / Chat about this replies", () => {
+    const router = new RemoteReplyRouter(codeGenerator("ASKKK", "CHAT2"));
+    const customPending = router.register(
+      "zhangsan",
+      attention("session-a", "launch-a", {
+        kind: "question",
+        expectsMenuSelection: true,
+        questionSelectionModes: ["single"],
+        questionOptionLabels: [["收到了", "没收到"]],
+      }),
+    ).pending;
+
+    expect(terminalInputForRemoteReply(customPending, "收到了")).toBe("1\r");
+    expect(terminalActionForRemoteReply(customPending, "3")).toEqual({
+      input: "3\r",
+      nextStage: "question-custom-answer",
+      followUpMessage: expect.stringContaining("Type something"),
+    });
+    expect(router.setReplyStage(customPending.code, "question-custom-answer")).toBe(
+      true,
+    );
+    const customFollowUp = router.resolve("zhangsan", "ASKKK 我在手机端收到了");
+    expect(customFollowUp).toMatchObject({
+      status: "matched",
+      pending: { replyStage: "question-custom-answer" },
+    });
+    if (customFollowUp.status !== "matched") {
+      throw new Error("Expected a matched custom follow-up.");
+    }
+    expect(
+      terminalActionForRemoteReply(customFollowUp.pending, customFollowUp.reply),
+    ).toEqual({ input: "我在手机端收到了\r" });
+
+    const chatPending = router.register(
+      "zhangsan",
+      attention("session-b", "launch-b", {
+        kind: "question",
+        expectsMenuSelection: true,
+        questionSelectionModes: ["single"],
+        questionOptionLabels: [["收到了", "没收到"]],
+      }),
+    ).pending;
+    expect(terminalActionForRemoteReply(chatPending, "4")).toEqual({
+      input: "4\r",
+      nextStage: "question-chat-message",
+      followUpMessage: expect.stringContaining("Chat about this"),
+    });
+  });
+
   it("does not let a generic idle notification replace a completed response", () => {
     const router = new RemoteReplyRouter(codeGenerator("DONE2", "IDLE3"));
     const completion = router.register(
@@ -203,8 +280,17 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "允许")).toBe(
       "1\r",
     );
+    expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "是")).toBe(
+      "1\r",
+    );
+    expect(
+      terminalInputForRemoteReply(permissionWithoutSuggestion, "允许本次"),
+    ).toBe("1\r");
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "拒绝")).toBe(
       "2\r",
+    );
+    expect(terminalInputForRemoteReply(permissionWithSuggestion, "否")).toBe(
+      "3\r",
     );
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "始终允许")).toBe(
       "2\r",
@@ -212,6 +298,13 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "拒绝")).toBe(
       "3\r",
     );
+    expect(
+      terminalActionForRemoteReply(permissionWithSuggestion, "拒绝"),
+    ).toMatchObject({
+      input: "3\r",
+      nextStage: "permission-denial-reason",
+      followUpMessage: expect.stringContaining("如何调整"),
+    });
     expect(terminalInputForRemoteReply(multiple, "1, 3")).toBe("13\r");
     expect(terminalInputForRemoteReply(single, "2")).toBe("2\r");
     expect(() =>
@@ -237,6 +330,11 @@ describe("RemoteReplyRouter", () => {
         expectsMenuSelection: true,
         supportsMultipleSelection: true,
         questionSelectionModes: ["single", "multiple", "single"],
+        questionOptionLabels: [
+          ["A", "B"],
+          ["C", "D", "E"],
+          ["F", "G", "H", "I"],
+        ],
       }),
     ).pending;
 

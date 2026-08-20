@@ -18,7 +18,7 @@ import { attentionFromClaudeHook } from "./claude-attention";
 import type { ClaudeHookEvent } from "./claude-hook-server";
 import {
   RemoteReplyRouter,
-  terminalInputForRemoteReply,
+  terminalActionForRemoteReply,
   type PendingRemoteReply,
 } from "./remote-reply-router";
 import type { SessionManager, SessionInputEvent } from "./session-manager";
@@ -544,9 +544,9 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       return;
     }
 
-    let input: string;
+    let action: ReturnType<typeof terminalActionForRemoteReply>;
     try {
-      input = terminalInputForRemoteReply(pending, resolved.reply);
+      action = terminalActionForRemoteReply(pending, resolved.reply);
     } catch (error) {
       const detail =
         error instanceof Error ? error.message : "远程回复格式无效。";
@@ -558,9 +558,18 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       );
       return;
     }
+    if (
+      action.nextStage &&
+      !this.router.setReplyStage(pending.code, action.nextStage)
+    ) {
+      const detail = `回复码 ${pending.code} 已失效，未发送任何输入。`;
+      this.recordInbound("rejected", detail);
+      await this.replyToMessage(client, frame, detail);
+      return;
+    }
     const written = this.sessionManager.writeRemoteReply(
       pending.workspaceSessionId,
-      input,
+      action.input,
     );
     if (!written) {
       this.router.complete(pending.code);
@@ -571,6 +580,15 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         frame,
         detail,
       );
+      return;
+    }
+
+    if (action.nextStage) {
+      const detail =
+        `${action.followUpMessage ?? "请继续回复具体内容。"}\n` +
+        `回复码：\`${pending.code}\`。该回复码仍对应当前 Claude Code 会话。`;
+      this.recordInbound("routed", detail);
+      await this.replyToMessage(client, frame, detail);
       return;
     }
 

@@ -47,29 +47,71 @@ describe("attentionFromClaudeHook", () => {
       expectsMenuSelection: true,
       permissionSuggestionCount: 1,
       body: expect.stringMatching(
-        /Bash[\s\S]*运行测试[\s\S]*npm run test[\s\S]*1\. 允许本次[\s\S]*2\. 始终允许[\s\S]*3\. 拒绝/u,
+        /Claude Code 希望运行下面的命令[\s\S]*Bash[\s\S]*运行测试[\s\S]*npm run test[\s\S]*是否允许 Claude Code 运行该命令[\s\S]*1\. 允许：仅运行本次命令[\s\S]*2\. 允许：以后运行符合“npm run test”规则的命令时不再询问[\s\S]*3\. 拒绝：不运行本次命令，并告诉 Claude Code 应如何调整/u,
+      ),
+    });
+  });
+
+  it("matches the meaning of Claude Code's WebFetch permission dialog", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "WebFetch",
+        tool_input: {
+          url: "https://www.anthropic.com/hook-test",
+          prompt: "Hook 生效性测试，返回页面标题即可。",
+        },
+        permission_suggestions: [
+          {
+            type: "addRules",
+            rules: [
+              {
+                toolName: "WebFetch",
+                ruleContent: "domain:www.anthropic.com",
+              },
+            ],
+            behavior: "allow",
+            destination: "localSettings",
+          },
+        ],
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      kind: "permission",
+      permissionSuggestionCount: 1,
+      body: expect.stringMatching(
+        /Claude Code 希望从 www\.anthropic\.com 获取网页内容[\s\S]*目标网址：https:\/\/www\.anthropic\.com\/hook-test[\s\S]*获取后的处理要求：Hook 生效性测试，返回页面标题即可。[\s\S]*是否允许 Claude Code 获取该网页内容[\s\S]*1\. 允许：仅获取本次网页内容[\s\S]*2\. 允许：以后从 www\.anthropic\.com 获取内容时不再询问[\s\S]*3\. 拒绝：不获取本次网页内容，并告诉 Claude Code 应如何调整[\s\S]*选择后还需要回复具体调整要求/u,
       ),
     });
   });
 
   it("formats AskUserQuestion choices and preserves multi-select behavior", () => {
+    const toolInput = {
+      questions: [
+        {
+          header: "监控能力",
+          question: "选择需要启用的功能",
+          options: [
+            { label: "日志", description: "输出详细日志" },
+            { label: "指标", description: "收集运行指标" },
+          ],
+          multiSelect: true,
+        },
+      ],
+    };
     const attention = attentionFromClaudeHook(
       hook({
         hook_event_name: "PreToolUse",
         tool_name: "AskUserQuestion",
-        tool_input: {
-          questions: [
-            {
-              header: "监控能力",
-              question: "选择需要启用的功能",
-              options: [
-                { label: "日志", description: "输出详细日志" },
-                { label: "指标", description: "收集运行指标" },
-              ],
-              multiSelect: true,
-            },
-          ],
-        },
+        tool_input: toolInput,
+      }),
+    );
+    const permissionEventAttention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: toolInput,
       }),
     );
 
@@ -81,6 +123,49 @@ describe("attentionFromClaudeHook", () => {
         /监控能力[\s\S]*选择需要启用的功能[\s\S]*1\. 日志[\s\S]*2\. 指标/u,
       ),
     });
+    expect(permissionEventAttention).toEqual(attention);
+    expect(permissionEventAttention?.body).not.toContain("允许本次");
+    expect(permissionEventAttention?.body).not.toContain('"questions"');
+    expect(permissionEventAttention?.body).toContain(
+      "3. 输入其他回答（Type something.）",
+    );
+    expect(permissionEventAttention?.body).toContain(
+      "4. 与 Claude 讨论这个问题（Chat about this）",
+    );
+  });
+
+  it("renders the reported single-choice PermissionRequest as a question", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "AskUserQuestion",
+        tool_input: {
+          questions: [
+            {
+              question: "这是一条测试消息：你收到确认弹窗/通知了吗？",
+              header: "Hook测试",
+              options: [
+                { label: "收到了", description: "确认弹窗或通知已正常出现" },
+                { label: "没收到", description: "没有看到任何确认提示或通知" },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      kind: "question",
+      title: "Claude Code 有问题需要回复",
+      questionSelectionModes: ["single"],
+      questionOptionLabels: [["收到了", "没收到"]],
+      body: expect.stringMatching(
+        /Hook测试[\s\S]*你收到确认弹窗\/通知了吗[\s\S]*1\. 收到了[\s\S]*2\. 没收到[\s\S]*3\. 输入其他回答（Type something\.）[\s\S]*4\. 与 Claude 讨论这个问题（Chat about this）/u,
+      ),
+    });
+    expect(attention?.body).not.toContain("允许");
+    expect(attention?.body).not.toContain('"questions"');
   });
 
   it("forwards Claude's exact completed response and background status", () => {

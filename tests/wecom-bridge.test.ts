@@ -316,6 +316,27 @@ describe("WeComBridge", () => {
       expect.stringContaining(secondCode),
       expect.stringContaining(firstCode),
     ]);
+    expect(router.listForUser("zhangsan")).toContainEqual(
+      expect.objectContaining({
+        code: firstCode,
+        replyStage: "permission-denial-reason",
+      }),
+    );
+
+    client.emit(
+      "message",
+      incomingMessage(
+        "message-1-reason",
+        `${firstCode} 请改用只读命令`,
+        callbackUserId,
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(firstPty.writes).toEqual(["2\r", "请改用只读命令\r"]),
+    );
+    expect(router.listForUser("zhangsan")).not.toContainEqual(
+      expect.objectContaining({ code: firstCode }),
+    );
 
     bridge.handleClaudeHook(
       hook(first.id, launchIds.get(first.id)!, "npm test -- third"),
@@ -326,7 +347,13 @@ describe("WeComBridge", () => {
       "message",
       incomingMessage("other-user", `${thirdCode} 1`, "lisi"),
     );
-    await vi.waitFor(() => expect(firstPty.writes).toEqual(["2\r", "1\r"]));
+    await vi.waitFor(() =>
+      expect(firstPty.writes).toEqual([
+        "2\r",
+        "请改用只读命令\r",
+        "1\r",
+      ]),
+    );
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "routed",
       lastInboundDetail: expect.stringContaining(thirdCode),
