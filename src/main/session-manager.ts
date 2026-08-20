@@ -23,6 +23,7 @@ interface ManagedSession {
 export interface SessionInputEvent {
   sessionId: string;
   source: "local" | "remote";
+  data: string;
 }
 
 export interface ClaudeSessionLaunchOptions {
@@ -304,7 +305,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return false;
     }
     session.process.write(data);
-    this.emit("input", { sessionId, source });
+    this.emit("input", { sessionId, source, data });
     return true;
   }
 

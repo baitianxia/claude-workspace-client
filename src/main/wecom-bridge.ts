@@ -108,27 +108,36 @@ function truncateUtf8(value: string, maxBytes: number): string {
 }
 
 function quoteText(message: BaseMessage): string {
-  const quote = message.quote;
+  const quote = (message as BaseMessage & { quote?: unknown }).quote;
   if (!quote) {
     return "";
   }
-  if (quote.text?.content) {
-    return quote.text.content;
+  if (typeof quote === "string") {
+    return quote;
   }
-  const markdownContent = (
-    quote as typeof quote & { markdown?: { content?: unknown } }
-  ).markdown?.content;
-  if (typeof markdownContent === "string") {
-    return markdownContent;
+  if (typeof quote !== "object" || Array.isArray(quote)) {
+    return "";
   }
-  if (quote.voice?.content) {
-    return quote.voice.content;
-  }
-  return (
-    quote.mixed?.msg_item
-      .flatMap((item) => (item.text?.content ? [item.text.content] : []))
-      .join("\n") ?? ""
+  const value = quote as {
+    content?: unknown;
+    quote_text?: unknown;
+    text?: { content?: unknown };
+    markdown?: { content?: unknown };
+    voice?: { content?: unknown };
+    mixed?: { msg_item?: Array<{ text?: { content?: unknown } }> };
+  };
+  const candidates = [
+    value.content,
+    value.quote_text,
+    value.text?.content,
+    value.markdown?.content,
+    value.voice?.content,
+    ...(value.mixed?.msg_item?.map((item) => item.text?.content) ?? []),
+  ].filter(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && candidate.trim().length > 0,
   );
+  return [...new Set(candidates)].join("\n");
 }
 
 function incomingMessageText(message: BaseMessage): string {
@@ -196,10 +205,10 @@ function notificationMarkdown(
           };
   const prefix = [
     `# ${pending.title}`,
+    `> 回复码：\`${pending.code}\``,
     `> 工程：${workspace}`,
     `> 会话：${session.title}`,
     `> 工作目录：${session.cwd}`,
-    `> 回复码：\`${pending.code}\``,
     "",
   ].join("\n");
   const suffix = [
@@ -217,6 +226,16 @@ function notificationMarkdown(
       Buffer.byteLength(suffix, "utf8"),
   );
   return `${prefix}${truncateUtf8(pending.body, bodyBudget)}${suffix}`;
+}
+
+function localInputCommitsPendingReply(data: string): boolean {
+  return (
+    data.includes("\r") ||
+    data.includes("\n") ||
+    data === "\x03" ||
+    data === "\x04" ||
+    data === "\x1b"
+  );
 }
 
 export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
@@ -382,7 +401,10 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
   }
 
   private readonly handleSessionInput = (event: SessionInputEvent) => {
-    if (event.source === "local") {
+    if (
+      event.source === "local" &&
+      localInputCommitsPendingReply(event.data)
+    ) {
       const code = this.router.clearWorkspaceSession(event.sessionId);
       if (code) {
         this.unsentCodes.delete(code);

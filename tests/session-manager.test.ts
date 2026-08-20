@@ -169,7 +169,9 @@ describe("SessionManager", () => {
       "darwin",
     );
     const changed = vi.fn();
+    const input = vi.fn();
     manager.on("changed", changed);
+    manager.on("input", input);
     const session = manager.createSession(project());
 
     manager.write(session.id, "hello\r");
@@ -177,6 +179,11 @@ describe("SessionManager", () => {
     fake.emitData("Claude Code\r\n");
 
     expect(fake.writes).toEqual(["hello\r"]);
+    expect(input).toHaveBeenCalledWith({
+      sessionId: session.id,
+      source: "local",
+      data: "hello\r",
+    });
     expect(fake.sizes).toEqual([[20, 200]]);
     expect(manager.getTerminalSnapshot(session.id)).toEqual({
       data: "Claude Code\r\n",

@@ -68,7 +68,7 @@ describe("RemoteReplyRouter", () => {
 
     expect(router.resolve("lisi", "ABCDE approve")).toMatchObject({
       status: "rejected",
-      message: expect.stringContaining("不属于当前用户"),
+      message: expect.stringContaining("不存在或已过期"),
     });
     expect(router.resolve("zhangsan", "ABCDE approve").status).toBe("matched");
   });
@@ -88,6 +88,60 @@ describe("RemoteReplyRouter", () => {
       status: "matched",
       reply: "继续处理",
       pending: { workspaceSessionId: "session-a" },
+    });
+  });
+
+  it("uses a unique quoted notification title when WeCom truncates the reply code", () => {
+    const router = new RemoteReplyRouter(codeGenerator("ABCDE", "QWERT"));
+    router.register(
+      "zhangsan",
+      attention("session-a", "launch-a", {
+        kind: "permission",
+        title: "Claude Code 需要权限确认",
+      }),
+    );
+    router.register(
+      "zhangsan",
+      attention("session-b", "launch-b", {
+        kind: "question",
+        title: "Claude Code 有问题需要回复",
+      }),
+    );
+
+    expect(
+      router.resolve(
+        "zhangsan",
+        "1",
+        "Claude Workspace:\nClaude Code 需要权限确认\n工程：临时会话…",
+      ),
+    ).toMatchObject({
+      status: "matched",
+      pending: { code: "ABCDE", workspaceSessionId: "session-a" },
+      reply: "1",
+    });
+  });
+
+  it("rejects a truncated quote when its title matches multiple processes", () => {
+    const router = new RemoteReplyRouter(codeGenerator("ABCDE", "QWERT"));
+    for (const sessionId of ["session-a", "session-b"]) {
+      router.register(
+        "zhangsan",
+        attention(sessionId, `launch-${sessionId}`, {
+          kind: "permission",
+          title: "Claude Code 需要权限确认",
+        }),
+      );
+    }
+
+    expect(
+      router.resolve(
+        "zhangsan",
+        "1",
+        "Claude Workspace:\nClaude Code 需要权限确认\n工程：临时会话…",
+      ),
+    ).toMatchObject({
+      status: "rejected",
+      message: expect.stringContaining("ABCDE、QWERT"),
     });
   });
 

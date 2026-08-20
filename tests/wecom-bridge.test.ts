@@ -274,6 +274,9 @@ describe("WeComBridge", () => {
     expect(markdownContent(client.sent[0].body)).toContain(
       "> 工作目录：C:\\work\\one",
     );
+    expect(markdownContent(client.sent[0].body).indexOf("> 回复码：")).toBeLessThan(
+      markdownContent(client.sent[0].body).indexOf("> 工程："),
+    );
     expect(markdownContent(client.sent[0].body)).toContain(
       "命令：npm test -- first",
     );
@@ -362,6 +365,133 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
+  it("keeps pending routes through terminal focus, navigation and mouse reports", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => pty.process) as PtySpawner,
+      "win32",
+      [],
+      (_sessionId, currentLaunchId) => {
+        launchId = currentLaunchId;
+        return { args: [] };
+      },
+    );
+    const session = manager.createSession({
+      projectId: null,
+      cwd: "C:\\work\\one",
+    });
+    const client = new FakeWeComClient();
+    const codes = ["ABCDE", "QWERT"];
+    const router = new RemoteReplyRouter(() => codes.shift() ?? "ROUTE");
+    const bridge = new WeComBridge(
+      manager,
+      () => [],
+      router,
+      () => client as unknown as WeComClient,
+    );
+    bridge.configure({
+      enabled: true,
+      botId: "bot-id",
+      targetUserId: "zhangsan",
+      secret: "secret",
+      hasSecret: true,
+    });
+    client.emit("authenticated");
+
+    bridge.handleClaudeHook(hook(session.id, launchId, "npm test -- first"));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const firstCode = routeCode(markdownContent(client.sent[0].body));
+    const controlInput = ["\x1b[O", "\x1b[I", "\x1b[B", "\x1b[<0;10;5M"];
+    for (const data of controlInput) {
+      manager.write(session.id, data);
+    }
+    expect(router.listForUser("zhangsan")).toContainEqual(
+      expect.objectContaining({ code: firstCode }),
+    );
+
+    client.emit(
+      "message",
+      incomingMessage("direct-after-focus", `${firstCode} 1`),
+    );
+    await vi.waitFor(() =>
+      expect(pty.writes).toEqual([...controlInput, "1\r"]),
+    );
+
+    bridge.handleClaudeHook(hook(session.id, launchId, "npm test -- second"));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    const secondCode = routeCode(markdownContent(client.sent[1].body));
+    manager.write(session.id, "\x1b[O");
+    client.emit(
+      "message",
+      incomingMessage(
+        "truncated-quote",
+        "1",
+        "zhangsan",
+        "Claude Workspace:\nClaude Code 需要权限确认\n工程：临时会话…",
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(pty.writes).toEqual([...controlInput, "1\r", "\x1b[O", "1\r"]),
+    );
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "routed",
+      lastInboundDetail: expect.stringContaining(secondCode),
+    });
+
+    bridge.dispose();
+  });
+
+  it("expires a pending route only when local input commits or cancels it", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => pty.process) as PtySpawner,
+      "win32",
+      [],
+      (_sessionId, currentLaunchId) => {
+        launchId = currentLaunchId;
+        return { args: [] };
+      },
+    );
+    const session = manager.createSession({
+      projectId: null,
+      cwd: "C:\\work\\one",
+    });
+    const client = new FakeWeComClient();
+    const router = new RemoteReplyRouter(() => "ABCDE");
+    const bridge = new WeComBridge(
+      manager,
+      () => [],
+      router,
+      () => client as unknown as WeComClient,
+    );
+    bridge.configure({
+      enabled: true,
+      botId: "bot-id",
+      targetUserId: "zhangsan",
+      secret: "secret",
+      hasSecret: true,
+    });
+    client.emit("authenticated");
+    bridge.handleClaudeHook(hook(session.id, launchId, "npm test"));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+
+    manager.write(session.id, "\r");
+    expect(router.listForUser("zhangsan")).toEqual([]);
+    client.emit("message", incomingMessage("after-local-answer", "ABCDE 1"));
+    await vi.waitFor(() =>
+      expect(client.replies).toContainEqual(
+        expect.stringContaining("回复码 ABCDE 不存在或已过期"),
+      ),
+    );
+    expect(pty.writes).toEqual(["\r"]);
+
+    bridge.dispose();
+  });
+
   it("rejects unknown and stale reply codes without writing to a PTY", async () => {
     const firstPty = fakePty(1);
     const restartedPty = fakePty(2);
@@ -410,7 +540,7 @@ describe("WeComBridge", () => {
     expect(firstPty.writes).toEqual([]);
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "rejected",
-      lastInboundDetail: expect.stringContaining("不存在、已过期"),
+      lastInboundDetail: expect.stringContaining("不存在或已过期"),
     });
 
     firstPty.emitExit(0);
@@ -419,7 +549,7 @@ describe("WeComBridge", () => {
     bridge.handleClaudeHook(hook(session.id, launches[0], "stale command"));
     await vi.waitFor(() =>
       expect(client.replies).toContainEqual(
-        expect.stringContaining("不存在、已过期"),
+        expect.stringContaining("不存在或已过期"),
       ),
     );
     expect(client.sent).toHaveLength(1);

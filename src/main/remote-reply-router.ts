@@ -101,7 +101,7 @@ function routeCodeAtStart(value: string): string | null {
 function routeCodesFromQuotedNotification(value: string): string[] {
   return [
     ...value.matchAll(
-      /回复码\s*[：:]\s*(?:#|\[|`)?([A-Z2-9]{5,8})(?=$|[\s\]`：:])/giu,
+      /回复码\s*[：:]?\s*(?:#|\[|`)?([A-Z2-9]{5,8})(?=$|[\s\]`：:])/giu,
     ),
   ].map((match) => match[1].toUpperCase());
 }
@@ -172,7 +172,17 @@ export class RemoteReplyRouter {
         return pending?.userId === userId;
       },
     );
-    const code = codeFromMessage ?? codeFromQuote;
+    const quotedTitleMatches = codeFromQuote
+      ? []
+      : [...this.pendingByCode.values()].filter(
+          (pending) =>
+            pending.userId === userId &&
+            quotedText.trim().length > 0 &&
+            quotedText.includes(pending.title),
+        );
+    const codeFromUniqueQuotedTitle =
+      quotedTitleMatches.length === 1 ? quotedTitleMatches[0].code : null;
+    const code = codeFromMessage ?? codeFromQuote ?? codeFromUniqueQuotedTitle;
 
     if (!code) {
       return {
@@ -187,7 +197,7 @@ export class RemoteReplyRouter {
     if (!pending || pending.userId !== userId) {
       return {
         status: "rejected",
-        message: `回复码 ${code} 不存在、已过期，或不属于当前用户。${this.pendingSummary(userId)}`,
+        message: `回复码 ${code} 不存在或已过期。${this.pendingSummary(userId)}`,
       };
     }
 

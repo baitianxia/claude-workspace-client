@@ -212,7 +212,52 @@ function permissionSuggestionText(
   return `${index + 2}. ${scopeText}`;
 }
 
+function webFetchSuggestionHost(value: unknown): string | null {
+  const suggestion = asRecord(value);
+  const rules = Array.isArray(suggestion?.rules) ? suggestion.rules : [];
+  for (const ruleValue of rules) {
+    const rule = asRecord(ruleValue);
+    if (textValue(rule?.toolName) !== "WebFetch") {
+      continue;
+    }
+    const ruleContent = textValue(rule?.ruleContent);
+    const domain = ruleContent
+      ? /^domain:(.+)$/iu.exec(ruleContent)?.[1]?.trim()
+      : null;
+    if (domain) {
+      return truncate(domain, 500);
+    }
+  }
+  return null;
+}
+
+function webFetchPermissionBody(payload: ClaudeHookPayload): string {
+  const input = asRecord(payload.tool_input);
+  const url = textValue(input?.url);
+  const host = webFetchHost(payload);
+  const suggestions = permissionSuggestions(payload);
+  return [
+    "### Fetch",
+    "",
+    url ?? "（Hook 未提供目标网址）",
+    host ? `Claude 想从 ${host} 获取内容。` : "Claude 想获取网页内容。",
+    "",
+    "是否允许 Claude 获取此内容？",
+    "1. 是",
+    ...suggestions.map((suggestion, index) => {
+      const suggestionHost = webFetchSuggestionHost(suggestion) ?? host;
+      return suggestionHost
+        ? `${index + 2}. 是，并且以后从 ${suggestionHost} 获取内容时不再询问`
+        : `${index + 2}. 是，并且以后获取此类内容时不再询问`;
+    }),
+    `${suggestions.length + 2}. 否，并告诉 Claude 应如何调整（Esc）`,
+  ].join("\n");
+}
+
 function permissionBody(payload: ClaudeHookPayload): string {
+  if (payload.tool_name === "WebFetch") {
+    return webFetchPermissionBody(payload);
+  }
   const details = toolInputDetails(payload);
   const suggestions = permissionSuggestions(payload);
   const copy = permissionCopy(payload);

@@ -52,7 +52,7 @@ describe("attentionFromClaudeHook", () => {
     });
   });
 
-  it("matches the meaning of Claude Code's WebFetch permission dialog", () => {
+  it("matches Claude Code's WebFetch permission dialog line for line", () => {
     const attention = attentionFromClaudeHook(
       hook({
         hook_event_name: "PermissionRequest",
@@ -80,10 +80,20 @@ describe("attentionFromClaudeHook", () => {
     expect(attention).toMatchObject({
       kind: "permission",
       permissionSuggestionCount: 1,
-      body: expect.stringMatching(
-        /Claude Code 希望从 www\.anthropic\.com 获取网页内容[\s\S]*目标网址：https:\/\/www\.anthropic\.com\/hook-test[\s\S]*获取后的处理要求：Hook 生效性测试，返回页面标题即可。[\s\S]*是否允许 Claude Code 获取该网页内容[\s\S]*1\. 允许：仅获取本次网页内容[\s\S]*2\. 允许：以后从 www\.anthropic\.com 获取内容时不再询问[\s\S]*3\. 拒绝：不获取本次网页内容，并告诉 Claude Code 应如何调整[\s\S]*选择后还需要回复具体调整要求/u,
-      ),
+      body: [
+        "### Fetch",
+        "",
+        "https://www.anthropic.com/hook-test",
+        "Claude 想从 www.anthropic.com 获取内容。",
+        "",
+        "是否允许 Claude 获取此内容？",
+        "1. 是",
+        "2. 是，并且以后从 www.anthropic.com 获取内容时不再询问",
+        "3. 否，并告诉 Claude 应如何调整（Esc）",
+      ].join("\n"),
     });
+    expect(attention?.body).not.toContain("Hook 生效性测试");
+    expect(attention?.body).not.toContain("工具：WebFetch");
   });
 
   it("formats AskUserQuestion choices and preserves multi-select behavior", () => {
