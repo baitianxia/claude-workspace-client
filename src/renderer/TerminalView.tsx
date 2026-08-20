@@ -199,7 +199,7 @@ export function TerminalView({ session, active }: TerminalViewProps) {
       terminal.focus();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [active, session.id]);
+  }, [active, session.id, session.status]);
 
   return (
     <div
@@ -214,10 +214,10 @@ export function TerminalView({ session, active }: TerminalViewProps) {
       {session.status !== "running" && session.status !== "starting" ? (
         <div className="terminal-status-banner">
           {session.status === "failed"
-            ? `启动失败：${session.error ?? "未知错误"}`
+            ? `启动失败：${session.error ?? "未知错误"}。可在右上角重启此会话。`
             : session.status === "interrupted"
-              ? "客户端上次关闭后，该会话已中断。Claude Code 对话仍可通过 /resume 恢复。"
-              : `会话已退出${session.exitCode === undefined ? "" : `（代码 ${session.exitCode}）`}`}
+              ? "客户端上次关闭后，该会话已中断。可在右上角重启，并通过 /resume 恢复 Claude Code 对话。"
+              : `会话已退出${session.exitCode === undefined ? "" : `（代码 ${session.exitCode}）`}。可在右上角重启此会话。`}
         </div>
       ) : null}
     </div>

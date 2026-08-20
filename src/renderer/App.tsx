@@ -705,6 +705,19 @@ export function App() {
   const stopSession = (session: SessionRecord) =>
     runAction(() => window.claudeWorkspace.stopSession(session.id));
 
+  const restartSession = (session: SessionRecord) =>
+    runAction(async () => {
+      const restarted = await window.claudeWorkspace.restartSession(session.id);
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              sessions: upsertSession(current.sessions, restarted),
+            }
+          : current,
+      );
+    });
+
   if (!snapshot) {
     return (
       <main className="loading-screen">
@@ -1164,24 +1177,22 @@ export function App() {
                   >
                     停止会话
                   </button>
+                ) : activeSession.status === "starting" ? (
+                  <button
+                    className="primary-button primary-button--compact"
+                    type="button"
+                    disabled
+                  >
+                    正在启动…
+                  </button>
                 ) : (
                   <button
                     className="primary-button primary-button--compact"
                     type="button"
-                    onClick={() =>
-                      activeSession.projectId === null
-                        ? createTemporarySession()
-                        : activeProject
-                          ? createProjectSession(activeProject)
-                          : undefined
-                    }
-                    disabled={
-                      busy ||
-                      !snapshot.claudeExecutable.path ||
-                      (activeSession.projectId !== null && !activeProject)
-                    }
+                    onClick={() => restartSession(activeSession)}
+                    disabled={busy || !snapshot.claudeExecutable.path}
                   >
-                    新建会话
+                    重启会话
                   </button>
                 )}
               </div>

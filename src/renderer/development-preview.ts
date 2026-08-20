@@ -168,6 +168,22 @@ export function installDevelopmentPreview(): void {
       publishSession(session);
       return { ...session };
     },
+    restartSession: async (sessionId) => {
+      const session = snapshot.sessions.find((item) => item.id === sessionId);
+      if (!session) {
+        throw new Error("Preview session does not exist.");
+      }
+      if (session.status === "running" || session.status === "starting") {
+        throw new Error("Preview session is still running.");
+      }
+      session.status = "starting";
+      delete session.exitCode;
+      delete session.error;
+      publishSession(session);
+      session.status = "running";
+      publishSession(session);
+      return { ...session };
+    },
     renameSession: async ({ sessionId, title }) => {
       const session = snapshot.sessions.find((item) => item.id === sessionId);
       if (!session) {

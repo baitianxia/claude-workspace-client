@@ -17,6 +17,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   createSession: "workspace:create-session",
+  restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
   removeSession: "workspace:remove-session",
   stopSession: "workspace:stop-session",
@@ -44,6 +45,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.autoDetectClaudeExecutable),
   createSession: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.createSession, request),
+  restartSession: (sessionId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.restartSession, sessionId),
   renameSession: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.renameSession, request),
   removeSession: (sessionId) =>

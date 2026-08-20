@@ -6,6 +6,7 @@ export const IPC_CHANNELS = {
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   createSession: "workspace:create-session",
+  restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
   removeSession: "workspace:remove-session",
   stopSession: "workspace:stop-session",

@@ -143,6 +143,101 @@ describe("SessionManager", () => {
     expect(fake.writes).toEqual(["hello\r"]);
   });
 
+  it("restarts an exited session in place and ignores stale process events", () => {
+    const first = fakePty();
+    const second = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process) as unknown as PtySpawner;
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      spawner,
+      "darwin",
+    );
+    const changed = vi.fn();
+    manager.on("changed", changed);
+    const created = manager.createSession(project(), "登录排查");
+
+    expect(() => manager.restartSession(created.id)).toThrow("仍在运行");
+    first.emitData("first process\r\n");
+    first.emitExit(7);
+    changed.mockClear();
+
+    const restarted = manager.restartSession(created.id);
+
+    expect(restarted).toMatchObject({
+      id: created.id,
+      projectId: created.projectId,
+      title: "登录排查",
+      cwd: created.cwd,
+      status: "running",
+      createdAt: created.createdAt,
+    });
+    expect(restarted).not.toHaveProperty("exitCode");
+    expect(changed.mock.calls.map(([session]) => session.status)).toEqual([
+      "starting",
+      "running",
+    ]);
+    expect(spawner).toHaveBeenNthCalledWith(
+      2,
+      "/usr/local/bin/claude",
+      [],
+      expect.objectContaining({ cwd: created.cwd }),
+    );
+    expect(manager.getTerminalSnapshot(created.id).data).toContain(
+      "正在原工作目录重新启动 Claude Code",
+    );
+
+    manager.write(created.id, "after restart\r");
+    first.emitData("stale output");
+    first.emitExit(99);
+    second.emitData("second process\r\n");
+
+    expect(first.writes).toEqual([]);
+    expect(second.writes).toEqual(["after restart\r"]);
+    expect(manager.listSessions()[0].status).toBe("running");
+    expect(manager.getTerminalSnapshot(created.id).data).not.toContain(
+      "stale output",
+    );
+    expect(manager.getTerminalSnapshot(created.id).data).toContain(
+      "second process",
+    );
+  });
+
+  it("keeps a session restartable after a restart attempt fails", () => {
+    const first = fakePty();
+    const recovered = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockImplementationOnce(() => {
+        throw new Error("spawn denied");
+      })
+      .mockReturnValueOnce(recovered.process) as unknown as PtySpawner;
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      spawner,
+      "darwin",
+    );
+    const created = manager.createSession(project());
+    first.emitExit(1);
+
+    expect(() => manager.restartSession(created.id)).toThrow(
+      "无法重新启动 Claude Code：spawn denied",
+    );
+    expect(manager.listSessions()[0]).toMatchObject({
+      status: "failed",
+      error: "spawn denied",
+    });
+    expect(manager.listSessions()[0]).not.toHaveProperty("exitCode");
+
+    const restarted = manager.restartSession(created.id);
+
+    expect(restarted.status).toBe("running");
+    expect(restarted).not.toHaveProperty("error");
+  });
+
   it("terminates and removes sessions when a project is removed", () => {
     const fake = fakePty();
     const manager = new SessionManager(

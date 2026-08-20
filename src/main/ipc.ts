@@ -192,6 +192,17 @@ export function registerIpcHandlers(options: {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.restartSession,
+    async (_event, sessionId: unknown) => {
+      const session = sessionManager.restartSession(
+        requireIdentifier(sessionId, "Session ID"),
+      );
+      await projectStore.replaceSessions(sessionManager.listSessions());
+      return session;
+    },
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.renameSession,
     async (_event, request: RenameSessionRequest) => {
       if (!request || typeof request !== "object") {

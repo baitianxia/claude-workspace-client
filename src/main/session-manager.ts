@@ -55,6 +55,14 @@ function restoredTerminalMessage(record: SessionRecord): string {
   );
 }
 
+function restartingTerminalMessage(): string {
+  return (
+    "\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n" +
+    "  正在原工作目录重新启动 Claude Code…\r\n" +
+    "  如需恢复之前的 Claude Code 对话，请使用 /resume。\r\n\r\n"
+  );
+}
+
 export function describeClaudeSpawnError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const errorCode =
@@ -138,13 +146,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     });
 
     try {
-      const processHandle = this.ptySpawner(launch.executable, launch.args, {
-        name: "xterm-256color",
-        cols: 120,
-        rows: 36,
-        cwd: workspace.cwd,
-        env: stringEnvironment(launch.env),
-      });
+      const processHandle = this.spawnProcess(workspace.cwd, launch);
       const managed: ManagedSession = {
         record,
         process: processHandle,
@@ -153,8 +155,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       };
       this.sessions.set(sessionId, managed);
 
-      processHandle.onData((data) => this.handleData(sessionId, data));
-      processHandle.onExit(({ exitCode }) => this.handleExit(sessionId, exitCode));
+      this.attachProcess(sessionId, managed, processHandle);
 
       managed.record.status = "running";
       this.emitChanged(managed.record);
@@ -171,6 +172,45 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       this.sessions.set(sessionId, managed);
       this.emitChanged(record);
       throw new Error(`无法启动 Claude Code：${record.error}`);
+    }
+  }
+
+  restartSession(sessionId: string): SessionRecord {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error("会话不存在或已经被移除。");
+    }
+    if (
+      session.record.status === "running" ||
+      session.record.status === "starting"
+    ) {
+      throw new Error("会话仍在运行，不能重启。");
+    }
+
+    session.process = null;
+    session.record.status = "starting";
+    delete session.record.exitCode;
+    delete session.record.error;
+    this.appendTerminalData(session, restartingTerminalMessage());
+    this.emitChanged(session.record);
+
+    try {
+      const executablePath = this.getClaudeExecutable();
+      const launch = createClaudeLaunchSpec(executablePath, [], {
+        platform: this.platform,
+        env: process.env,
+      });
+      const processHandle = this.spawnProcess(session.record.cwd, launch);
+      this.attachProcess(sessionId, session, processHandle);
+      session.record.status = "running";
+      this.emitChanged(session.record);
+      return { ...session.record };
+    } catch (error) {
+      session.process = null;
+      session.record.status = "failed";
+      session.record.error = describeClaudeSpawnError(error);
+      this.emitChanged(session.record);
+      throw new Error(`无法重新启动 Claude Code：${session.record.error}`);
     }
   }
 
@@ -280,11 +320,46 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
   }
 
-  private handleData(sessionId: string, data: string): void {
+  private spawnProcess(
+    cwd: string,
+    launch: ReturnType<typeof createClaudeLaunchSpec>,
+  ): IPty {
+    return this.ptySpawner(launch.executable, launch.args, {
+      name: "xterm-256color",
+      cols: 120,
+      rows: 36,
+      cwd,
+      env: stringEnvironment(launch.env),
+    });
+  }
+
+  private attachProcess(
+    sessionId: string,
+    session: ManagedSession,
+    processHandle: IPty,
+  ): void {
+    session.process = processHandle;
+    processHandle.onData((data) =>
+      this.handleData(sessionId, processHandle, data),
+    );
+    processHandle.onExit(({ exitCode }) =>
+      this.handleExit(sessionId, processHandle, exitCode),
+    );
+  }
+
+  private handleData(
+    sessionId: string,
+    processHandle: IPty,
+    data: string,
+  ): void {
     const session = this.sessions.get(sessionId);
-    if (!session) {
+    if (!session || session.process !== processHandle) {
       return;
     }
+    this.appendTerminalData(session, data);
+  }
+
+  private appendTerminalData(session: ManagedSession, data: string): void {
     session.sequence += 1;
     session.terminalBuffer = `${session.terminalBuffer}${data}`;
     if (session.terminalBuffer.length > MAX_TERMINAL_BUFFER_LENGTH) {
@@ -293,17 +368,22 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       );
     }
     this.emit("data", {
-      sessionId,
+      sessionId: session.record.id,
       data,
       sequence: session.sequence,
     });
   }
 
-  private handleExit(sessionId: string, exitCode: number): void {
+  private handleExit(
+    sessionId: string,
+    processHandle: IPty,
+    exitCode: number,
+  ): void {
     const session = this.sessions.get(sessionId);
-    if (!session) {
+    if (!session || session.process !== processHandle) {
       return;
     }
+    session.process = null;
     session.record.status = "exited";
     session.record.exitCode = exitCode;
     this.emitChanged(session.record);

@@ -100,6 +100,7 @@ export interface DesktopApi {
   selectClaudeExecutable(): Promise<ClaudeExecutableState | null>;
   autoDetectClaudeExecutable(): Promise<ClaudeExecutableState>;
   createSession(request: CreateSessionRequest): Promise<SessionRecord>;
+  restartSession(sessionId: string): Promise<SessionRecord>;
   renameSession(request: RenameSessionRequest): Promise<SessionRecord>;
   removeSession(sessionId: string): Promise<void>;
   stopSession(sessionId: string): Promise<void>;
