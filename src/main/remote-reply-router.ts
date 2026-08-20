@@ -142,35 +142,99 @@ function multipleMenuSelectionInput(selections: number[]): string {
   return `${input}${TERMINAL_ENTER}`;
 }
 
+type MenuTextMatch =
+  | { status: "matched"; selection: number }
+  | { status: "not-found" }
+  | { status: "ambiguous" };
+
 function normalizedChoiceText(value: string): string {
   return normalizedReplyText(value)
-    .replace(/\s*[（(]\s*esc\s*[）)]\s*$/iu, "")
-    .toLocaleLowerCase("en-US")
-    .replace(/[\s.。!！?？:：;；'"“”‘’（）()\[\]【】]/gu, "");
+    .normalize("NFKC")
+    .replace(/\s*\(\s*esc\s*\)\s*$/iu, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLocaleLowerCase("en-US");
 }
 
-function menuSelectionForText(value: string, labels: string[]): number | null {
+const QUESTION_CUSTOM_CHOICE_ALIASES = new Set(
+  [
+    "输入其他回答",
+    "输入其他回答（Type something.）",
+    "Type something",
+    "Type something.",
+  ].map(normalizedChoiceText),
+);
+
+const QUESTION_CHAT_CHOICE_ALIASES = new Set(
+  [
+    "与 Claude 讨论这个问题",
+    "与 Claude 讨论这个问题（Chat about this）",
+    "Chat about this",
+  ].map(normalizedChoiceText),
+);
+
+function menuTextMatch(value: string, labels: string[]): MenuTextMatch {
   const candidate = normalizedChoiceText(value);
-  const index = labels.findIndex(
-    (label) => normalizedChoiceText(label) === candidate,
+  if (!candidate) {
+    return { status: "not-found" };
+  }
+  const selections = labels.flatMap((label, index) =>
+    normalizedChoiceText(label) === candidate ? [index + 1] : [],
   );
-  return index >= 0 ? index + 1 : null;
+  if (selections.length === 1) {
+    return { status: "matched", selection: selections[0] };
+  }
+  return { status: selections.length > 1 ? "ambiguous" : "not-found" };
+}
+
+function validNumberedSelection(
+  value: string,
+  optionCount: number,
+): number | null {
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    return null;
+  }
+  const selection = Number(value);
+  return selection <= optionCount ? selection : null;
 }
 
 function questionSelections(
   answer: string,
   labels: string[],
 ): number[] | null {
-  const wholeLabelSelection = menuSelectionForText(answer, labels);
-  if (wholeLabelSelection !== null) {
-    return [wholeLabelSelection];
+  const normalizedAnswer = normalizedChoiceText(answer);
+  const wholeNumericSelection = validNumberedSelection(
+    normalizedAnswer,
+    labels.length,
+  );
+  if (wholeNumericSelection !== null) {
+    return [wholeNumericSelection];
+  }
+  if (/^[0-9]+$/u.test(normalizedAnswer)) {
+    return null;
+  }
+  const wholeLabelMatch = menuTextMatch(answer, labels);
+  if (wholeLabelMatch.status === "matched") {
+    return [wholeLabelMatch.selection];
+  }
+  if (wholeLabelMatch.status === "ambiguous") {
+    return null;
   }
   const values = answer.split(/\s*[,，]\s*/u);
   const selections = values.map((value) => {
-    if (/^[1-9][0-9]*$/u.test(value)) {
-      return Number(value);
+    const normalizedValue = normalizedChoiceText(value);
+    const numeric = validNumberedSelection(
+      normalizedValue,
+      labels.length,
+    );
+    if (numeric !== null) {
+      return numeric;
     }
-    return menuSelectionForText(value, labels);
+    if (/^[0-9]+$/u.test(normalizedValue)) {
+      return null;
+    }
+    const match = menuTextMatch(value, labels);
+    return match.status === "matched" ? match.selection : null;
   });
   return selections.every(
     (selection): selection is number =>
@@ -375,7 +439,7 @@ export function terminalActionForRemoteReply(
     return { input: `${normalized}\r` };
   }
 
-  const normalizedAlias = normalized.toLocaleLowerCase("en-US");
+  const normalizedAlias = normalizedChoiceText(normalized);
   let selection = normalized;
   if (pending.kind === "permission") {
     const suggestionCount = Math.max(
@@ -383,12 +447,25 @@ export function terminalActionForRemoteReply(
       Math.floor(pending.permissionSuggestionCount ?? 0),
     );
     const denySelection = String(suggestionCount + 2);
-    const labelSelection = menuSelectionForText(
-      normalized,
-      pending.permissionOptionLabels ?? [],
+    const optionCount = suggestionCount + 2;
+    const directSelection = validNumberedSelection(
+      normalizedAlias,
+      optionCount,
     );
-    if (labelSelection !== null) {
-      selection = String(labelSelection);
+    const looksNumeric = /^[0-9]+$/u.test(normalizedAlias);
+    const labelMatch = looksNumeric
+      ? ({ status: "not-found" } as const)
+      : menuTextMatch(normalized, pending.permissionOptionLabels ?? []);
+    if (directSelection !== null) {
+      selection = String(directSelection);
+    } else if (looksNumeric) {
+      throw new Error(
+        `权限回复无效，请回复 1-${optionCount} 的选项编号。`,
+      );
+    } else if (labelMatch.status === "ambiguous") {
+      throw new Error("权限选项文字存在歧义，请改用通知中的选项编号。");
+    } else if (labelMatch.status === "matched") {
+      selection = String(labelMatch.selection);
     } else if (
       [
         "允许",
@@ -422,7 +499,9 @@ export function terminalActionForRemoteReply(
       numericSelection < 1 ||
       numericSelection > suggestionCount + 2
     ) {
-      throw new Error("权限回复无效，请回复通知中的选项编号或允许/拒绝。");
+      throw new Error(
+        "权限回复无效，请回复通知中的选项编号、允许/拒绝或完整选项文字。",
+      );
     }
     if (selection === denySelection) {
       return {
@@ -440,28 +519,30 @@ export function terminalActionForRemoteReply(
   const firstOptionCount = questionLabels[0]?.length ?? 0;
   if (pending.kind === "question" && questionModes.length > 0) {
     const normalizedQuestionChoice = normalizedChoiceText(normalized);
-    const matchesRegularOption =
-      menuSelectionForText(normalized, questionLabels[0] ?? []) !== null;
+    const regularOptionMatch = /^[1-9][0-9]*$/u.test(
+      normalizedQuestionChoice,
+    )
+      ? ({ status: "not-found" } as const)
+      : menuTextMatch(normalized, questionLabels[0] ?? []);
+    if (regularOptionMatch.status === "ambiguous") {
+      throw new Error("问题选项文字存在歧义，请改用通知中的选项编号。");
+    }
+    const matchesRegularOption = regularOptionMatch.status === "matched";
     if (
       !matchesRegularOption &&
-      [
-        "输入其他回答",
-        "输入其他回答typesomething",
-        "typesomething",
-      ].includes(normalizedQuestionChoice)
+      QUESTION_CUSTOM_CHOICE_ALIASES.has(normalizedQuestionChoice)
     ) {
       selection = String(firstOptionCount + 1);
     } else if (
       !matchesRegularOption &&
-      [
-        "与claude讨论这个问题",
-        "与claude讨论这个问题chataboutthis",
-        "chataboutthis",
-      ].includes(normalizedQuestionChoice)
+      QUESTION_CHAT_CHOICE_ALIASES.has(normalizedQuestionChoice)
     ) {
       selection = String(firstOptionCount + 2);
     }
-    const numericSelection = Number(selection);
+    const normalizedSelection = normalizedChoiceText(selection);
+    const numericSelection = /^[1-9][0-9]*$/u.test(normalizedSelection)
+      ? Number(normalizedSelection)
+      : Number.NaN;
     if (Number.isInteger(numericSelection)) {
       if (numericSelection === firstOptionCount + 1) {
         return {
@@ -508,7 +589,7 @@ export function terminalActionForRemoteReply(
       }
     }
     throw new Error(
-      "问题回复无效。多个问题请按通知顺序使用分号分隔答案；单选用一个编号，多选用逗号分隔编号。",
+      "问题回复无效。多个问题请按通知顺序使用分号分隔答案；每项可用编号或完整选项文字，多选项使用逗号分隔。",
     );
   }
 
@@ -536,17 +617,20 @@ export function terminalActionForRemoteReply(
   // A numeric reply is not proof that Claude is showing a menu. Only Hook
   // events explicitly classified as terminal menus may become navigation keys;
   // text-input prompts must receive the original characters (including "1").
-  if (pending.inputMode === "menu" && /^[1-9]$/u.test(selection)) {
-    return { input: singleMenuSelectionInput(Number(selection)) };
+  const canonicalSelection = normalizedChoiceText(selection);
+  if (pending.inputMode === "menu" && /^[1-9]$/u.test(canonicalSelection)) {
+    return { input: singleMenuSelectionInput(Number(canonicalSelection)) };
   }
   if (
     pending.inputMode === "menu" &&
     pending.supportsMultipleSelection &&
-    /^[1-9](?:\s*[,，]\s*[1-9])+$/u.test(selection)
+    /^[1-9](?:\s*[,，]\s*[1-9])+$/u.test(canonicalSelection)
   ) {
     return {
       input: multipleMenuSelectionInput(
-        selection.split(/\s*[,，]\s*/u).map((value) => Number(value)),
+        canonicalSelection
+          .split(/\s*[,，]\s*/u)
+          .map((value) => Number(value)),
       ),
     };
   }

@@ -241,6 +241,15 @@ describe("RemoteReplyRouter", () => {
       input: `${DOWN}${DOWN}\r`,
       nextStage: "question-custom-answer",
     });
+    expect(
+      terminalActionForRemoteReply(
+        customPending,
+        "输入其他回答（Type something.）",
+      ),
+    ).toMatchObject({
+      input: `${DOWN}${DOWN}\r`,
+      nextStage: "question-custom-answer",
+    });
     expect(router.setReplyStage(customPending.code, "question-custom-answer")).toBe(
       true,
     );
@@ -281,10 +290,94 @@ describe("RemoteReplyRouter", () => {
     });
     expect(
       terminalActionForRemoteReply(
+        chatPending,
+        "与 Claude 讨论这个问题（Chat about this）",
+      ),
+    ).toMatchObject({
+      input: `${DOWN}${DOWN}${DOWN}\r`,
+      nextStage: "question-chat-message",
+    });
+    expect(
+      terminalActionForRemoteReply(
         { ...chatPending, replyStage: "question-chat-message" },
         "1",
       ),
     ).toEqual({ input: "1\r" });
+  });
+
+  it("requires a unique exact option-text match and gives numbers priority", () => {
+    const router = new RemoteReplyRouter(
+      codeGenerator("EXACT", "AMBIG", "NUMBER", "PERM2"),
+    );
+    const exact = router.register(
+      "zhangsan",
+      attention("session-exact", "launch-exact", {
+        kind: "question",
+        inputMode: "menu",
+        questionSelectionModes: ["single"],
+        questionOptionLabels: [["允许", "不允许", "Ａ"]],
+      }),
+    ).pending;
+
+    expect(terminalInputForRemoteReply(exact, "不允许")).toBe(`${DOWN}\r`);
+    expect(terminalInputForRemoteReply(exact, "A")).toBe(
+      `${DOWN}${DOWN}\r`,
+    );
+    expect(() => terminalInputForRemoteReply(exact, "允许。")).toThrow(
+      "问题回复无效",
+    );
+    expect(() => terminalInputForRemoteReply(exact, "允")).toThrow(
+      "问题回复无效",
+    );
+
+    const ambiguous = router.register(
+      "zhangsan",
+      attention("session-ambiguous", "launch-ambiguous", {
+        kind: "question",
+        inputMode: "menu",
+        questionSelectionModes: ["single"],
+        questionOptionLabels: [["Ａ", "A"]],
+      }),
+    ).pending;
+    expect(() => terminalInputForRemoteReply(ambiguous, "A")).toThrow(
+      "存在歧义",
+    );
+
+    const numericLabels = router.register(
+      "zhangsan",
+      attention("session-number", "launch-number", {
+        kind: "question",
+        inputMode: "menu",
+        questionSelectionModes: ["single"],
+        questionOptionLabels: [["1", "１"]],
+      }),
+    ).pending;
+    expect(terminalInputForRemoteReply(numericLabels, "１")).toBe("\r");
+    expect(terminalInputForRemoteReply(numericLabels, "2")).toBe(
+      `${DOWN}\r`,
+    );
+    expect(() => terminalInputForRemoteReply(numericLabels, "01")).toThrow(
+      "问题回复无效",
+    );
+    expect(() => terminalInputForRemoteReply(numericLabels, "5")).toThrow(
+      "问题回复无效",
+    );
+
+    const ambiguousPermission = router.register(
+      "zhangsan",
+      attention("session-permission", "launch-permission", {
+        kind: "permission",
+        inputMode: "menu",
+        permissionSuggestionCount: 1,
+        permissionOptionLabels: ["Ａ", "A", "否"],
+      }),
+    ).pending;
+    expect(() =>
+      terminalInputForRemoteReply(ambiguousPermission, "A"),
+    ).toThrow("权限选项文字存在歧义");
+    expect(terminalInputForRemoteReply(ambiguousPermission, "2")).toBe(
+      `${DOWN}\r`,
+    );
   });
 
   it("does not let a generic idle notification replace a completed response", () => {
@@ -363,6 +456,9 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "1")).toBe(
       "\r",
     );
+    expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "１")).toBe(
+      "\r",
+    );
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "允许")).toBe(
       "\r",
     );
@@ -375,6 +471,12 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "拒绝")).toBe(
       `${DOWN}\r`,
     );
+    expect(
+      terminalInputForRemoteReply(permissionWithoutSuggestion, "不允许"),
+    ).toBe(`${DOWN}\r`);
+    expect(() =>
+      terminalInputForRemoteReply(permissionWithoutSuggestion, "我允许"),
+    ).toThrow("权限回复无效");
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "否")).toBe(
       `${DOWN}${DOWN}\r`,
     );
