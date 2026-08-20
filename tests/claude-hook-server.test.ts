@@ -53,12 +53,14 @@ describe("ClaudeHookServer", () => {
           hooks: Array<{ url: string; headers: { Authorization: string } }>;
         }>;
         PreToolUse: Array<{ matcher: string }>;
+        Stop: Array<{ matcher: string }>;
         Notification: Array<{ matcher: string }>;
       };
     };
     expect(launch.args[0]).toBe("--settings");
     expect(launch.args[1]).toMatch(/settings-[a-f0-9]{32}\.json$/u);
     expect(settings.hooks.PreToolUse[0].matcher).toContain("AskUserQuestion");
+    expect(settings.hooks.Stop).toHaveLength(1);
     expect(settings.hooks.Notification[0].matcher).toContain("idle_prompt");
     expect(settings.hooks.Notification[0].matcher).toContain(
       "agent_needs_input",
@@ -86,6 +88,27 @@ describe("ClaudeHookServer", () => {
         payload: expect.objectContaining({
           session_id: "claude-session",
           tool_name: "Bash",
+        }),
+      }),
+    ]);
+
+    const stopReceived = once(server, "hook") as Promise<[ClaudeHookEvent]>;
+    expect(
+      await postJson(url, `Bearer ${token}`, {
+        session_id: "claude-session",
+        transcript_path: "C:\\Claude\\transcript.jsonl",
+        cwd: "C:\\work\\mall",
+        hook_event_name: "Stop",
+        stop_hook_active: false,
+        last_assistant_message: "修复已完成，测试全部通过。",
+        background_tasks: [],
+      }),
+    ).toBe(200);
+    await expect(stopReceived).resolves.toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          hook_event_name: "Stop",
+          last_assistant_message: "修复已完成，测试全部通过。",
         }),
       }),
     ]);

@@ -105,6 +105,7 @@ function incomingMessage(
   msgid: string,
   content: string,
   userid = "zhangsan",
+  quotedContent?: string,
 ): WsFrame<TextMessage> {
   return {
     headers: { req_id: `request-${msgid}` },
@@ -115,6 +116,14 @@ function incomingMessage(
       from: { userid },
       msgtype: "text" as TextMessage["msgtype"],
       text: { content },
+      ...(quotedContent
+        ? {
+            quote: {
+              msgtype: "text" as const,
+              text: { content: quotedContent },
+            },
+          }
+        : {}),
     },
   };
 }
@@ -212,13 +221,33 @@ describe("WeComBridge", () => {
 
     const firstCode = routeCode(markdownContent(client.sent[0].body));
     const secondCode = routeCode(markdownContent(client.sent[1].body));
+    expect(markdownContent(client.sent[0].body)).toContain(
+      "> 工作目录：C:\\work\\one",
+    );
+    expect(markdownContent(client.sent[0].body)).toContain(
+      "命令：npm test -- first",
+    );
+    expect(markdownContent(client.sent[0].body)).toContain(
+      "引用本消息回复",
+    );
+    expect(markdownContent(client.sent[0].body)).toContain(
+      "无需重复输入回复码",
+    );
     expect(firstCode).not.toBe(secondCode);
     expect(client.sent.map((entry) => entry.chatId)).toEqual([
       "zhangsan",
       "zhangsan",
     ]);
 
-    client.emit("message.text", incomingMessage("message-2", `${secondCode} 1`));
+    client.emit(
+      "message.text",
+      incomingMessage(
+        "message-2",
+        "1",
+        "zhangsan",
+        markdownContent(client.sent[1].body),
+      ),
+    );
     await vi.waitFor(() => expect(secondPty.writes).toEqual(["1\r"]));
     expect(firstPty.writes).toEqual([]);
 

@@ -109,6 +109,12 @@ function quoteText(message: TextMessage): string {
   if (quote.text?.content) {
     return quote.text.content;
   }
+  const markdownContent = (
+    quote as typeof quote & { markdown?: { content?: unknown } }
+  ).markdown?.content;
+  if (typeof markdownContent === "string") {
+    return markdownContent;
+  }
   if (quote.voice?.content) {
     return quote.voice.content;
   }
@@ -130,27 +136,42 @@ function notificationMarkdown(
 ): string {
   const workspace =
     session.projectId === null ? "临时会话" : projectDisplayName(project);
-  const menuHint =
+  const replyGuidance =
     (pending.questionSelectionModes?.length ?? 0) > 1
-      ? `回复示例：\`${pending.code} 1;2,3\`（问题间用分号，多选项用逗号）`
+      ? {
+          quoted: "发送 `1;2,3`（问题间用分号，多选项用逗号）",
+          directExample: "1;2,3",
+        }
       : pending.kind === "permission"
-        ? `回复示例：\`${pending.code} 允许\` 或 \`${pending.code} 拒绝\`（也可回复上方编号）`
+        ? {
+            quoted: "发送 `允许`、`拒绝`或上方选项编号",
+            directExample: "允许",
+          }
       : pending.expectsMenuSelection
         ? pending.supportsMultipleSelection
-          ? `回复示例：\`${pending.code} 1,3\``
-          : `回复示例：\`${pending.code} 1\`（按终端选项编号）`
-        : `回复示例：\`${pending.code} 继续处理并运行测试\``;
+          ? { quoted: "发送 `1,3`", directExample: "1,3" }
+          : {
+              quoted: "发送上方选项编号，例如 `1`",
+              directExample: "1",
+            }
+        : {
+            quoted: "直接发送回复内容",
+            directExample: "继续处理并运行测试",
+          };
   const prefix = [
     `# ${pending.title}`,
     `> 工程：${workspace}`,
     `> 会话：${session.title}`,
+    `> 工作目录：${session.cwd}`,
     `> 回复码：\`${pending.code}\``,
     "",
   ].join("\n");
   const suffix = [
     "",
-    menuHint,
-    `为防止多个 Claude Code 进程串线，回复时必须带回复码 \`${pending.code}\`。`,
+    "## 如何回复",
+    `- 引用本消息回复：${replyGuidance.quoted}，无需重复输入回复码。`,
+    `- 不引用消息：发送 \`${pending.code} ${replyGuidance.directExample}\`。`,
+    `回复码 \`${pending.code}\` 只对应当前 Claude Code 进程，不能用于其他会话。`,
   ].join("\n");
   const maxMarkdownBytes = 18_000;
   const bodyBudget = Math.max(

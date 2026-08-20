@@ -20,6 +20,10 @@ export interface ClaudeHookPayload {
   tool_name?: string;
   tool_input?: unknown;
   permission_suggestions?: unknown;
+  stop_hook_active?: boolean;
+  last_assistant_message?: string;
+  background_tasks?: unknown;
+  session_crons?: unknown;
 }
 
 export interface ClaudeHookEvent {
@@ -59,7 +63,11 @@ function normalizeHookPayload(value: unknown): ClaudeHookPayload | null {
     (candidate.notification_type !== undefined &&
       typeof candidate.notification_type !== "string") ||
     (candidate.tool_name !== undefined &&
-      typeof candidate.tool_name !== "string")
+      typeof candidate.tool_name !== "string") ||
+    (candidate.stop_hook_active !== undefined &&
+      typeof candidate.stop_hook_active !== "boolean") ||
+    (candidate.last_assistant_message !== undefined &&
+      typeof candidate.last_assistant_message !== "string")
   ) {
     return null;
   }
@@ -182,6 +190,12 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
         PreToolUse: [
           {
             matcher: "AskUserQuestion|ExitPlanMode",
+            hooks: [handler],
+          },
+        ],
+        Stop: [
+          {
+            matcher: "",
             hooks: [handler],
           },
         ],

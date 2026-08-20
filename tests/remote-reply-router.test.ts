@@ -123,6 +123,35 @@ describe("RemoteReplyRouter", () => {
     });
   });
 
+  it("does not let a generic idle notification replace a completed response", () => {
+    const router = new RemoteReplyRouter(codeGenerator("DONE2", "IDLE3"));
+    const completion = router.register(
+      "zhangsan",
+      attention("session-a", "launch-a", {
+        kind: "completion",
+        title: "本轮已完成",
+        body: "修复完成，测试全部通过。",
+      }),
+    );
+    const delayedIdle = router.register(
+      "zhangsan",
+      attention("session-a", "launch-a", {
+        kind: "idle",
+        title: "等待回复",
+        body: "Claude Code is waiting for your input",
+      }),
+    );
+
+    expect(completion).toMatchObject({
+      shouldSend: true,
+      pending: { code: "DONE2" },
+    });
+    expect(delayedIdle).toMatchObject({
+      shouldSend: false,
+      pending: { code: "DONE2", kind: "completion" },
+    });
+  });
+
   it("encodes menu selections without leaking extra control characters", () => {
     const router = new RemoteReplyRouter(
       codeGenerator("MENUA", "MENUB", "MENUC", "MENUD", "MENUE"),

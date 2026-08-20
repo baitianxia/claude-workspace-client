@@ -7,6 +7,7 @@ export type RemoteAttentionKind =
   | "permission"
   | "question"
   | "plan"
+  | "completion"
   | "idle"
   | "elicitation"
   | "agent";

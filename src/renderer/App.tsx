@@ -1460,8 +1460,9 @@ export function App() {
             </label>
             <div className="settings-note">
               Secret 使用操作系统安全存储加密。每条待回复消息都有独立回复码，
-              多个 Claude Code 进程同时等待时也会按回复码精确路由。启用后请新建或
-              重启需要远程回复的 Claude Code 会话。
+              多个 Claude Code 进程同时等待时也会精确路由；引用机器人消息回复时
+              无需重复输入回复码。启用后请新建或重启需要远程回复的 Claude Code
+              会话。
             </div>
             <footer>
               <button

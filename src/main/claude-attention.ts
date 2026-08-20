@@ -8,6 +8,8 @@ import type {
 } from "./remote-reply-router";
 
 const MAX_ATTENTION_BODY_LENGTH = 8_000;
+const SENSITIVE_PARAMETER_KEY =
+  /(?:password|passwd|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key)/iu;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -25,10 +27,83 @@ function truncate(value: string, length: number): string {
 
 function safeJson(value: unknown): string {
   try {
-    return truncate(JSON.stringify(value, null, 2), 4_000);
+    return truncate(
+      JSON.stringify(
+        value,
+        (key, nestedValue) =>
+          key && SENSITIVE_PARAMETER_KEY.test(key)
+            ? "（敏感值已隐藏）"
+            : nestedValue,
+        2,
+      ),
+      4_000,
+    );
   } catch {
     return "（无法展示详细参数）";
   }
+}
+
+function takeInputText(
+  input: Record<string, unknown>,
+  consumed: Set<string>,
+  keys: string[],
+): string | null {
+  let firstValue: string | null = null;
+  for (const key of keys) {
+    if (Object.hasOwn(input, key)) {
+      consumed.add(key);
+    }
+    const value = textValue(input[key]);
+    if (!firstValue && value) {
+      firstValue = value;
+    }
+  }
+  return firstValue;
+}
+
+function toolInputDetails(payload: ClaudeHookPayload): string[] {
+  const input = asRecord(payload.tool_input);
+  if (!input) {
+    return payload.tool_input === undefined
+      ? []
+      : [`参数：\n${safeJson(payload.tool_input)}`];
+  }
+
+  const consumed = new Set<string>();
+  const details: string[] = [];
+  const add = (label: string, keys: string[], maxLength: number) => {
+    const value = takeInputText(input, consumed, keys);
+    if (value) {
+      details.push(`${label}：${truncate(value, maxLength)}`);
+    }
+  };
+
+  add("说明", ["description"], 1_500);
+  add("命令", ["command"], 3_000);
+  add("目标文件", ["file_path", "notebook_path", "path"], 2_000);
+  add("计划文件", ["planFilePath"], 2_000);
+  add("网址", ["url"], 2_000);
+  add("查询内容", ["query"], 2_000);
+  add("请求内容", ["prompt"], 2_000);
+  add("计划内容", ["plan"], 5_000);
+  add("替换前", ["old_string"], 1_500);
+  add("替换后", ["new_string"], 1_500);
+  add("写入内容预览", ["content", "new_source"], 2_000);
+
+  if (input.allowedPrompts !== undefined) {
+    consumed.add("allowedPrompts");
+    details.push(`计划申请的权限：\n${safeJson(input.allowedPrompts)}`);
+  }
+
+  const remaining = Object.fromEntries(
+    Object.entries(input).filter(([key]) => !consumed.has(key)),
+  );
+  if (Object.keys(remaining).length > 0) {
+    details.push(
+      `${details.length > 0 ? "其他参数" : "参数"}：\n${safeJson(remaining)}`,
+    );
+  }
+  return details;
 }
 
 function permissionSuggestions(payload: ClaudeHookPayload): unknown[] {
@@ -59,19 +134,7 @@ function permissionSuggestionText(value: unknown, index: number): string {
 }
 
 function permissionBody(payload: ClaudeHookPayload): string {
-  const input = asRecord(payload.tool_input);
-  const description = textValue(input?.description);
-  const command = textValue(input?.command);
-  const filePath =
-    textValue(input?.file_path) ?? textValue(input?.path) ?? textValue(input?.url);
-  const details = [
-    description ? `说明：${description}` : null,
-    command ? `命令：${truncate(command, 3_000)}` : null,
-    filePath ? `目标：${truncate(filePath, 2_000)}` : null,
-  ].filter((value): value is string => Boolean(value));
-  if (details.length === 0 && payload.tool_input !== undefined) {
-    details.push(`参数：\n${safeJson(payload.tool_input)}`);
-  }
+  const details = toolInputDetails(payload);
   const suggestions = permissionSuggestions(payload);
   const choices = [
     "回复选项：",
@@ -81,7 +144,7 @@ function permissionBody(payload: ClaudeHookPayload): string {
   ];
   return [
     `工具：${payload.tool_name ?? "未知工具"}`,
-    ...details,
+    ...(details.length > 0 ? details : ["参数：Claude Code 未提供操作详情"]),
     "",
     ...choices,
   ].join("\n");
@@ -102,6 +165,7 @@ function questionBody(payload: ClaudeHookPayload): {
     if (!prompt) {
       return [];
     }
+    const header = textValue(question?.header);
     const multiSelect = question?.multiSelect === true;
     supportsMultipleSelection ||= multiSelect;
     questionSelectionModes.push(multiSelect ? "multiple" : "single");
@@ -117,16 +181,23 @@ function questionBody(payload: ClaudeHookPayload): {
         `${optionIndex + 1}. ${label}${description ? ` — ${description}` : ""}`,
       ];
     });
+    const heading =
+      questions.length > 1
+        ? `### 问题 ${questionIndex + 1}${header ? ` · ${header}` : ""}`
+        : `### ${header || "需要你的选择"}`;
     return [
-      `${questions.length > 1 ? `问题 ${questionIndex + 1}：` : ""}${prompt}`,
+      heading,
+      prompt,
+      "",
       ...optionLines,
       ...(multiSelect ? ["（可多选，使用逗号分隔编号）"] : []),
+      "",
     ];
   });
   return {
     body:
       sections.length > 0
-        ? sections.join("\n")
+        ? sections.join("\n").trim()
         : `Claude Code 正在询问用户：\n${safeJson(payload.tool_input)}`,
     supportsMultipleSelection,
     questionSelectionModes,
@@ -136,9 +207,54 @@ function questionBody(payload: ClaudeHookPayload): {
 function planBody(payload: ClaudeHookPayload): string {
   const input = asRecord(payload.tool_input);
   const plan = textValue(input?.plan);
-  return plan
-    ? `Claude Code 请求确认以下计划：\n${truncate(plan, 6_000)}`
-    : "Claude Code 已完成计划，正在等待是否进入实施。";
+  const planFilePath = textValue(input?.planFilePath);
+  const allowedPrompts = Array.isArray(input?.allowedPrompts)
+    ? input.allowedPrompts
+    : [];
+  const sections = [
+    plan ? `## 实施计划\n${truncate(plan, 6_000)}` : null,
+    planFilePath ? `计划文件：${truncate(planFilePath, 1_000)}` : null,
+    allowedPrompts.length > 0
+      ? `## 实施阶段申请的权限\n${safeJson(allowedPrompts)}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  return sections.length > 0
+    ? sections.join("\n\n")
+    : `Claude Code 已完成计划，但 Hook 未提供计划正文。\n参数：\n${safeJson(payload.tool_input)}`;
+}
+
+function backgroundTaskSummary(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((taskValue, index) => {
+    const task = asRecord(taskValue);
+    if (!task) {
+      return [];
+    }
+    const status = textValue(task.status) ?? "状态未知";
+    const description =
+      textValue(task.description) ??
+      textValue(task.command) ??
+      textValue(task.name) ??
+      textValue(task.type) ??
+      `任务 ${index + 1}`;
+    return [`- ${status}：${truncate(description, 1_000)}`];
+  });
+}
+
+function completionBody(payload: ClaudeHookPayload): string | null {
+  const message = textValue(payload.last_assistant_message);
+  if (!message) {
+    return null;
+  }
+  const tasks = backgroundTaskSummary(payload.background_tasks);
+  return [
+    `## Claude Code 的回复\n${truncate(message, 7_000)}`,
+    ...(tasks.length > 0
+      ? [`## 仍在运行的后台任务\n${tasks.join("\n")}`]
+      : []),
+  ].join("\n\n");
 }
 
 function baseAttention(
@@ -169,6 +285,18 @@ export function attentionFromClaudeHook(
   event: ClaudeHookEvent,
 ): RemoteAttention | null {
   const payload = event.payload;
+  if (payload.hook_event_name === "Stop") {
+    const body = completionBody(payload);
+    return body
+      ? baseAttention(
+          event,
+          "completion",
+          "Claude Code 已完成本轮，等待你的下一步",
+          body,
+          false,
+        )
+      : null;
+  }
   if (payload.hook_event_name === "PermissionRequest") {
     return {
       ...baseAttention(

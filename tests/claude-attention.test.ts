@@ -60,6 +60,7 @@ describe("attentionFromClaudeHook", () => {
         tool_input: {
           questions: [
             {
+              header: "监控能力",
               question: "选择需要启用的功能",
               options: [
                 { label: "日志", description: "输出详细日志" },
@@ -76,8 +77,76 @@ describe("attentionFromClaudeHook", () => {
       kind: "question",
       expectsMenuSelection: true,
       supportsMultipleSelection: true,
-      body: expect.stringMatching(/选择需要启用的功能[\s\S]*1\. 日志[\s\S]*2\. 指标/u),
+      body: expect.stringMatching(
+        /监控能力[\s\S]*选择需要启用的功能[\s\S]*1\. 日志[\s\S]*2\. 指标/u,
+      ),
     });
+  });
+
+  it("forwards Claude's exact completed response and background status", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "Stop",
+        last_assistant_message:
+          "订单接口已经修复，3 个回归测试全部通过。是否继续发布？",
+        background_tasks: [
+          {
+            type: "shell",
+            status: "running",
+            description: "持续观察生产日志",
+          },
+        ],
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      kind: "completion",
+      title: "Claude Code 已完成本轮，等待你的下一步",
+      expectsMenuSelection: false,
+      body: expect.stringMatching(
+        /订单接口已经修复[\s\S]*3 个回归测试全部通过[\s\S]*持续观察生产日志/u,
+      ),
+    });
+  });
+
+  it("includes the injected plan and requested implementation permissions", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PreToolUse",
+        tool_name: "ExitPlanMode",
+        tool_input: {
+          plan: "1. 修改路由\n2. 运行回归测试",
+          planFilePath: "C:\\Claude\\plans\\router.md",
+          allowedPrompts: [{ tool: "Bash", prompt: "运行测试" }],
+        },
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      kind: "plan",
+      body: expect.stringMatching(
+        /修改路由[\s\S]*运行回归测试[\s\S]*router\.md[\s\S]*Bash[\s\S]*运行测试/u,
+      ),
+    });
+  });
+
+  it("shows remaining tool parameters but redacts sensitive keyed values", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "mcp__deploy__release",
+        tool_input: {
+          environment: "production",
+          release: "2026.08.20",
+          access_token: "do-not-forward",
+        },
+      }),
+    );
+
+    expect(attention?.body).toContain("production");
+    expect(attention?.body).toContain("2026.08.20");
+    expect(attention?.body).toContain("敏感值已隐藏");
+    expect(attention?.body).not.toContain("do-not-forward");
   });
 
   it("forwards background-agent input notifications as freeform replies", () => {
