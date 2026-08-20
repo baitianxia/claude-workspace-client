@@ -32,10 +32,27 @@ export interface ClaudeExecutableState {
   error?: string;
 }
 
+export type WeComConnectionStatus =
+  | "disabled"
+  | "connecting"
+  | "connected"
+  | "error";
+
+export interface WeComState {
+  enabled: boolean;
+  configured: boolean;
+  hasSecret: boolean;
+  botId: string;
+  targetUserId: string;
+  status: WeComConnectionStatus;
+  error?: string;
+}
+
 export interface AppSnapshot {
   projects: ProjectRecord[];
   sessions: SessionRecord[];
   claudeExecutable: ClaudeExecutableState;
+  wecom: WeComState;
 }
 
 export interface TerminalDataEvent {
@@ -51,6 +68,10 @@ export interface TerminalSnapshot {
 
 export interface SessionChangedEvent {
   session: SessionRecord;
+}
+
+export interface WeComStateChangedEvent {
+  state: WeComState;
 }
 
 export type CreateSessionRequest =
@@ -81,6 +102,14 @@ export interface SessionNotificationRequest {
   body: string;
 }
 
+export interface UpdateWeComConfigRequest {
+  enabled: boolean;
+  botId: string;
+  targetUserId: string;
+  /** Empty or omitted keeps the previously saved Secret. */
+  secret?: string;
+}
+
 export interface ResizeTerminalRequest {
   sessionId: string;
   columns: number;
@@ -99,6 +128,7 @@ export interface DesktopApi {
   removeProject(projectId: string): Promise<void>;
   selectClaudeExecutable(): Promise<ClaudeExecutableState | null>;
   autoDetectClaudeExecutable(): Promise<ClaudeExecutableState>;
+  updateWeComConfig(request: UpdateWeComConfigRequest): Promise<WeComState>;
   createSession(request: CreateSessionRequest): Promise<SessionRecord>;
   restartSession(sessionId: string): Promise<SessionRecord>;
   renameSession(request: RenameSessionRequest): Promise<SessionRecord>;
@@ -112,4 +142,7 @@ export interface DesktopApi {
   getTerminalSnapshot(sessionId: string): Promise<TerminalSnapshot>;
   onTerminalData(listener: (event: TerminalDataEvent) => void): () => void;
   onSessionChanged(listener: (event: SessionChangedEvent) => void): () => void;
+  onWeComStateChanged(
+    listener: (event: WeComStateChangedEvent) => void,
+  ): () => void;
 }

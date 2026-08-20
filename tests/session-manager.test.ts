@@ -111,6 +111,56 @@ describe("SessionManager", () => {
     );
   });
 
+  it("applies per-launch Claude arguments and environment on restart", () => {
+    const first = fakePty();
+    const second = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process) as unknown as PtySpawner;
+    const launchIds: string[] = [];
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      spawner,
+      "win32",
+      [],
+      (_sessionId, launchId) => {
+        launchIds.push(launchId);
+        return {
+          args: ["--settings", launchId],
+          env: { CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchId}` },
+        };
+      },
+    );
+
+    const created = manager.createSession(project());
+    first.emitExit(0);
+    manager.restartSession(created.id);
+
+    expect(launchIds).toHaveLength(2);
+    expect(launchIds[0]).not.toBe(launchIds[1]);
+    expect(spawner).toHaveBeenNthCalledWith(
+      1,
+      "C:\\Tools\\claude.exe",
+      ["--settings", launchIds[0]],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[0]}`,
+        }),
+      }),
+    );
+    expect(spawner).toHaveBeenNthCalledWith(
+      2,
+      "C:\\Tools\\claude.exe",
+      ["--settings", launchIds[1]],
+      expect.objectContaining({
+        env: expect.objectContaining({
+          CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[1]}`,
+        }),
+      }),
+    );
+  });
+
   it("forwards terminal input, output, resize and exit state", () => {
     const fake = fakePty();
     const manager = new SessionManager(

@@ -5,6 +5,7 @@ export const IPC_CHANNELS = {
   removeProject: "workspace:remove-project",
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
+  updateWeComConfig: "workspace:update-wecom-config",
   createSession: "workspace:create-session",
   restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
@@ -18,4 +19,5 @@ export const IPC_CHANNELS = {
   getTerminalSnapshot: "workspace:get-terminal-snapshot",
   terminalData: "workspace:terminal-data",
   sessionChanged: "workspace:session-changed",
+  wecomStateChanged: "workspace:wecom-state-changed",
 } as const;

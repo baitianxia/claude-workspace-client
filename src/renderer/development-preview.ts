@@ -4,6 +4,7 @@ import type {
   SessionChangedEvent,
   SessionRecord,
   TerminalDataEvent,
+  WeComStateChangedEvent,
 } from "../shared/contracts";
 
 const now = Date.now();
@@ -84,6 +85,14 @@ const previewSnapshot: AppSnapshot = {
     path: "C:\\Users\\developer\\.local\\bin\\claude.exe",
     source: "detected",
   },
+  wecom: {
+    enabled: false,
+    configured: false,
+    hasSecret: false,
+    botId: "",
+    targetUserId: "",
+    status: "disabled",
+  },
 };
 
 export function installDevelopmentPreview(): void {
@@ -91,6 +100,7 @@ export function installDevelopmentPreview(): void {
   let clipboardText = "";
   const sessionListeners = new Set<(event: SessionChangedEvent) => void>();
   const terminalListeners = new Set<(event: TerminalDataEvent) => void>();
+  const wecomListeners = new Set<(event: WeComStateChangedEvent) => void>();
 
   if (new URLSearchParams(window.location.search).has("autoConfirm")) {
     window.confirm = () => true;
@@ -99,6 +109,12 @@ export function installDevelopmentPreview(): void {
   const publishSession = (session: SessionRecord) => {
     for (const listener of sessionListeners) {
       listener({ session: { ...session } });
+    }
+  };
+
+  const publishWeCom = () => {
+    for (const listener of wecomListeners) {
+      listener({ state: { ...snapshot.wecom } });
     }
   };
 
@@ -141,6 +157,22 @@ export function installDevelopmentPreview(): void {
     },
     selectClaudeExecutable: async () => snapshot.claudeExecutable,
     autoDetectClaudeExecutable: async () => snapshot.claudeExecutable,
+    updateWeComConfig: async (request) => {
+      snapshot.wecom = {
+        enabled: request.enabled,
+        configured: Boolean(
+          request.botId.trim() &&
+            request.targetUserId.trim() &&
+            (request.secret?.trim() || snapshot.wecom.hasSecret),
+        ),
+        hasSecret: Boolean(request.secret?.trim() || snapshot.wecom.hasSecret),
+        botId: request.botId.trim(),
+        targetUserId: request.targetUserId.trim(),
+        status: request.enabled ? "connected" : "disabled",
+      };
+      publishWeCom();
+      return { ...snapshot.wecom };
+    },
     createSession: async (request) => {
       const project =
         request.scope === "project"
@@ -224,6 +256,10 @@ export function installDevelopmentPreview(): void {
     onSessionChanged: (listener) => {
       sessionListeners.add(listener);
       return () => sessionListeners.delete(listener);
+    },
+    onWeComStateChanged: (listener) => {
+      wecomListeners.add(listener);
+      return () => wecomListeners.delete(listener);
     },
   };
 

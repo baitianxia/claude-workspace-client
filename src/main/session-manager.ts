@@ -15,13 +15,30 @@ const MAX_TERMINAL_BUFFER_LENGTH = 2_000_000;
 interface ManagedSession {
   record: SessionRecord;
   process: IPty | null;
+  launchId: string | null;
   terminalBuffer: string;
   sequence: number;
 }
 
+export interface SessionInputEvent {
+  sessionId: string;
+  source: "local" | "remote";
+}
+
+export interface ClaudeSessionLaunchOptions {
+  args: string[];
+  env?: NodeJS.ProcessEnv;
+}
+
+export type ClaudeSessionLaunchOptionsProvider = (
+  sessionId: string,
+  launchId: string,
+) => ClaudeSessionLaunchOptions;
+
 export interface SessionManagerEvents {
   data: [event: TerminalDataEvent];
   changed: [session: SessionRecord];
+  input: [event: SessionInputEvent];
 }
 
 export type PtySpawner = (
@@ -93,6 +110,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     private readonly ptySpawner: PtySpawner = spawnPty,
     private readonly platform: NodeJS.Platform = process.platform,
     initialSessions: SessionRecord[] = [],
+    private readonly getLaunchOptions?: ClaudeSessionLaunchOptionsProvider,
   ) {
     super();
     for (const initial of initialSessions) {
@@ -109,6 +127,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       this.sessions.set(record.id, {
         record,
         process: null,
+        launchId: null,
         terminalBuffer: restoredTerminalMessage(record),
         sequence: 0,
       });
@@ -140,16 +159,22 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       createdAt: Date.now(),
     };
 
-    const launch = createClaudeLaunchSpec(executablePath, [], {
-      platform: this.platform,
-      env: process.env,
-    });
-
+    const launchId = randomUUID();
     try {
+      const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
+      const launch = createClaudeLaunchSpec(
+        executablePath,
+        launchOptions?.args ?? [],
+        {
+          platform: this.platform,
+          env: { ...process.env, ...launchOptions?.env },
+        },
+      );
       const processHandle = this.spawnProcess(workspace.cwd, launch);
       const managed: ManagedSession = {
         record,
         process: processHandle,
+        launchId,
         terminalBuffer: "",
         sequence: 0,
       };
@@ -166,6 +191,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const managed: ManagedSession = {
         record,
         process: null,
+        launchId: null,
         terminalBuffer: restoredTerminalMessage(record),
         sequence: 0,
       };
@@ -188,6 +214,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
 
     session.process = null;
+    session.launchId = null;
     session.record.status = "starting";
     delete session.record.exitCode;
     delete session.record.error;
@@ -196,17 +223,25 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
     try {
       const executablePath = this.getClaudeExecutable();
-      const launch = createClaudeLaunchSpec(executablePath, [], {
-        platform: this.platform,
-        env: process.env,
-      });
+      const launchId = randomUUID();
+      const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
+      const launch = createClaudeLaunchSpec(
+        executablePath,
+        launchOptions?.args ?? [],
+        {
+          platform: this.platform,
+          env: { ...process.env, ...launchOptions?.env },
+        },
+      );
       const processHandle = this.spawnProcess(session.record.cwd, launch);
+      session.launchId = launchId;
       this.attachProcess(sessionId, session, processHandle);
       session.record.status = "running";
       this.emitChanged(session.record);
       return { ...session.record };
     } catch (error) {
       session.process = null;
+      session.launchId = null;
       session.record.status = "failed";
       session.record.error = describeClaudeSpawnError(error);
       this.emitChanged(session.record);
@@ -239,14 +274,38 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   }
 
   write(sessionId: string, data: string): void {
+    this.writeInput(sessionId, data, "local");
+  }
+
+  writeRemoteReply(sessionId: string, data: string): boolean {
+    return this.writeInput(sessionId, data, "remote");
+  }
+
+  isCurrentLaunch(sessionId: string, launchId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    return (
+      session?.record.status === "running" && session.launchId === launchId
+    );
+  }
+
+  private writeInput(
+    sessionId: string,
+    data: string,
+    source: SessionInputEvent["source"],
+  ): boolean {
     if (data.length > 100_000) {
       throw new Error("Terminal input is too large.");
     }
     const session = this.sessions.get(sessionId);
     if (!session || session.record.status !== "running") {
-      return;
+      return false;
     }
-    session.process?.write(data);
+    if (!session.process) {
+      return false;
+    }
+    session.process.write(data);
+    this.emit("input", { sessionId, source });
+    return true;
   }
 
   resize(sessionId: string, columns: number, rows: number): void {
@@ -384,6 +443,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     session.process = null;
+    session.launchId = null;
     session.record.status = "exited";
     session.record.exitCode = exitCode;
     this.emitChanged(session.record);

@@ -13,6 +13,7 @@ import type {
   SessionNotificationRequest,
   SessionRecord,
   TerminalDataEvent,
+  UpdateWeComConfigRequest,
   UpdateProjectRequest,
   WriteTerminalRequest,
 } from "../shared/contracts";
@@ -21,6 +22,8 @@ import type { ClaudeLocator } from "./claude-locator";
 import type { ProjectStore } from "./project-store";
 import type { SessionManager } from "./session-manager";
 import type { TemporaryWorkspace } from "./temporary-workspace";
+import type { WeComBridge } from "./wecom-bridge";
+import type { WeComSettingsService } from "./wecom-settings";
 
 const MAX_CLIPBOARD_PASTE_LENGTH = 100_000;
 const MAX_CLIPBOARD_COPY_LENGTH = 2_000_000;
@@ -66,6 +69,8 @@ export function registerIpcHandlers(options: {
   claudeLocator: ClaudeLocator;
   sessionManager: SessionManager;
   temporaryWorkspace: TemporaryWorkspace;
+  wecomBridge: WeComBridge;
+  wecomSettingsService: WeComSettingsService;
 }): () => void {
   const {
     window,
@@ -73,12 +78,15 @@ export function registerIpcHandlers(options: {
     claudeLocator,
     sessionManager,
     temporaryWorkspace,
+    wecomBridge,
+    wecomSettingsService,
   } = options;
 
   const getSnapshot = (): AppSnapshot => ({
     projects: projectStore.listProjects(),
     sessions: sessionManager.listSessions(),
     claudeExecutable: claudeLocator.getState(),
+    wecom: wecomBridge.getState(),
   });
 
   ipcMain.handle(IPC_CHANNELS.getSnapshot, getSnapshot);
@@ -153,6 +161,12 @@ export function registerIpcHandlers(options: {
 
   ipcMain.handle(IPC_CHANNELS.autoDetectClaudeExecutable, () =>
     claudeLocator.autoDetect(),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.updateWeComConfig,
+    (_event, request: UpdateWeComConfigRequest) =>
+      wecomSettingsService.update(request),
   );
 
   ipcMain.handle(
@@ -336,13 +350,22 @@ export function registerIpcHandlers(options: {
       .replaceSessions(sessionManager.listSessions())
       .catch((error: unknown) => console.error("Failed to persist sessions", error));
   };
+  const sendWeComStateChanged = () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.wecomStateChanged, {
+        state: wecomBridge.getState(),
+      });
+    }
+  };
 
   sessionManager.on("data", sendTerminalData);
   sessionManager.on("changed", sendSessionChanged);
+  wecomBridge.on("stateChanged", sendWeComStateChanged);
 
   return () => {
     sessionManager.off("data", sendTerminalData);
     sessionManager.off("changed", sendSessionChanged);
+    wecomBridge.off("stateChanged", sendWeComStateChanged);
     for (const channel of Object.values(IPC_CHANNELS)) {
       ipcMain.removeHandler(channel);
       ipcMain.removeAllListeners(channel);

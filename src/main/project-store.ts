@@ -17,19 +17,27 @@ import type {
   UpdateProjectRequest,
 } from "../shared/contracts";
 
+export interface StoredWeComSettings {
+  enabled: boolean;
+  botId: string;
+  targetUserId: string;
+  encryptedSecret: string;
+}
+
 interface AppSettings {
   claudeExecutable?: string;
+  wecom?: StoredWeComSettings;
 }
 
 interface StoreData {
-  version: 3;
+  version: 4;
   projects: ProjectRecord[];
   sessions: SessionRecord[];
   settings: AppSettings;
 }
 
 const EMPTY_STORE: StoreData = {
-  version: 3,
+  version: 4,
   projects: [],
   sessions: [],
   settings: {},
@@ -122,7 +130,10 @@ function parseStore(raw: string): StoreData {
     settings?: unknown;
   };
   if (
-    (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) ||
+    (parsed.version !== 1 &&
+      parsed.version !== 2 &&
+      parsed.version !== 3 &&
+      parsed.version !== 4) ||
     !Array.isArray(parsed.projects) ||
     !parsed.settings ||
     typeof parsed.settings !== "object"
@@ -143,9 +154,28 @@ function parseStore(raw: string): StoreData {
     throw new Error("Workspace settings contain an invalid Claude executable path.");
   }
 
-  const rawSessions = parsed.version === 2 || parsed.version === 3
-    ? parsed.sessions
-    : [];
+  let wecom: StoredWeComSettings | undefined;
+  if (settings.wecom !== undefined) {
+    const candidate = settings.wecom as Partial<StoredWeComSettings>;
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      typeof candidate.enabled !== "boolean" ||
+      typeof candidate.botId !== "string" ||
+      typeof candidate.targetUserId !== "string" ||
+      typeof candidate.encryptedSecret !== "string"
+    ) {
+      throw new Error("Workspace settings contain invalid WeCom settings.");
+    }
+    wecom = {
+      enabled: candidate.enabled,
+      botId: candidate.botId,
+      targetUserId: candidate.targetUserId,
+      encryptedSecret: candidate.encryptedSecret,
+    };
+  }
+
+  const rawSessions = parsed.version === 1 ? [] : parsed.sessions;
   if (!Array.isArray(rawSessions)) {
     throw new Error("Workspace data contains an invalid session list.");
   }
@@ -157,14 +187,17 @@ function parseStore(raw: string): StoreData {
   const normalizedProjects = projects as ProjectRecord[];
   const projectIds = new Set(normalizedProjects.map((project) => project.id));
   return {
-    version: 3,
+    version: 4,
     projects: normalizedProjects,
     sessions: (sessions as SessionRecord[]).filter((session) =>
       session.projectId === null || projectIds.has(session.projectId),
     ),
-    settings: settings.claudeExecutable
-      ? { claudeExecutable: settings.claudeExecutable }
-      : {},
+    settings: {
+      ...(settings.claudeExecutable
+        ? { claudeExecutable: settings.claudeExecutable }
+        : {}),
+      ...(wecom ? { wecom } : {}),
+    },
   };
 }
 
@@ -316,7 +349,27 @@ export class ProjectStore {
 
   async setClaudeExecutable(executablePath?: string): Promise<void> {
     this.assertInitialized();
-    this.data.settings = executablePath ? { claudeExecutable: executablePath } : {};
+    if (executablePath) {
+      this.data.settings.claudeExecutable = executablePath;
+    } else {
+      delete this.data.settings.claudeExecutable;
+    }
+    await this.persist();
+  }
+
+  getWeComSettings(): StoredWeComSettings | undefined {
+    this.assertInitialized();
+    const settings = this.data.settings.wecom;
+    return settings ? { ...settings } : undefined;
+  }
+
+  async setWeComSettings(settings?: StoredWeComSettings): Promise<void> {
+    this.assertInitialized();
+    if (settings) {
+      this.data.settings.wecom = { ...settings };
+    } else {
+      delete this.data.settings.wecom;
+    }
     await this.persist();
   }
 

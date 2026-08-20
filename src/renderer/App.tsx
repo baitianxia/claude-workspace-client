@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import type {
   AppSnapshot,
   ClaudeExecutableState,
@@ -39,6 +45,22 @@ function executableName(state: ClaudeExecutableState): string {
   }
   const parts = state.path.split(/[\\/]/u);
   return parts.at(-1) ?? state.path;
+}
+
+function wecomStatusLabel(state: AppSnapshot["wecom"]): string {
+  if (!state.enabled) {
+    return state.configured ? "已停用" : "未配置";
+  }
+  switch (state.status) {
+    case "connected":
+      return `已连接 · ${state.targetUserId}`;
+    case "connecting":
+      return "正在连接";
+    case "error":
+      return state.error ?? "连接失败";
+    case "disabled":
+      return "已停用";
+  }
 }
 
 function upsertSession(
@@ -124,6 +146,11 @@ export function App() {
     () => new Set(),
   );
   const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
+  const [wecomSettingsOpen, setWeComSettingsOpen] = useState(false);
+  const [wecomEnabledDraft, setWeComEnabledDraft] = useState(false);
+  const [wecomBotIdDraft, setWeComBotIdDraft] = useState("");
+  const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
+  const [wecomSecretDraft, setWeComSecretDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
@@ -281,6 +308,17 @@ export function App() {
       }
     });
 
+    const unsubscribeWeCom = window.claudeWorkspace.onWeComStateChanged(
+      ({ state }) => {
+        if (disposed) {
+          return;
+        }
+        setSnapshot((current) =>
+          current ? { ...current, wecom: state } : current,
+        );
+      },
+    );
+
     void window.claudeWorkspace
       .getSnapshot()
       .then((initialSnapshot) => {
@@ -335,6 +373,7 @@ export function App() {
       disposed = true;
       unsubscribeSession();
       unsubscribeTerminal();
+      unsubscribeWeCom();
     };
   }, []);
 
@@ -718,6 +757,31 @@ export function App() {
       );
     });
 
+  const openWeComSettings = () => {
+    setWeComEnabledDraft(snapshot?.wecom.enabled ?? false);
+    setWeComBotIdDraft(snapshot?.wecom.botId ?? "");
+    setWeComUserIdDraft(snapshot?.wecom.targetUserId ?? "");
+    setWeComSecretDraft("");
+    setWeComSettingsOpen(true);
+  };
+
+  const saveWeComSettings = (event: FormEvent) => {
+    event.preventDefault();
+    void runAction(async () => {
+      const state = await window.claudeWorkspace.updateWeComConfig({
+        enabled: wecomEnabledDraft,
+        botId: wecomBotIdDraft,
+        targetUserId: wecomUserIdDraft,
+        ...(wecomSecretDraft ? { secret: wecomSecretDraft } : {}),
+      });
+      setSnapshot((current) =>
+        current ? { ...current, wecom: state } : current,
+      );
+      setWeComSecretDraft("");
+      setWeComSettingsOpen(false);
+    });
+  };
+
   if (!snapshot) {
     return (
       <main className="loading-screen">
@@ -863,6 +927,31 @@ export function App() {
             </button>
             <button type="button" onClick={chooseClaudeExecutable} disabled={busy}>
               选择文件
+            </button>
+          </div>
+        </section>
+
+        <section className="claude-runtime-card wecom-runtime-card">
+          <div className="runtime-heading">
+            <span
+              className={`status-dot ${
+                snapshot.wecom.status === "connected"
+                  ? "status-dot--online"
+                  : snapshot.wecom.status === "connecting"
+                    ? "status-dot--pending"
+                    : "status-dot--offline"
+              }`}
+            />
+            <div>
+              <strong>企业微信远程回复</strong>
+              <span title={snapshot.wecom.error}>
+                {wecomStatusLabel(snapshot.wecom)}
+              </span>
+            </div>
+          </div>
+          <div className="runtime-actions">
+            <button type="button" onClick={openWeComSettings} disabled={busy}>
+              {snapshot.wecom.configured ? "修改配置" : "开始配置"}
             </button>
           </div>
         </section>
@@ -1286,6 +1375,113 @@ export function App() {
           onClose={() => setQuickSwitcherOpen(false)}
           onSelect={selectWorkspaceItem}
         />
+      ) : null}
+      {wecomSettingsOpen ? (
+        <div className="settings-backdrop" role="presentation">
+          <form
+            className="settings-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="wecom-settings-title"
+            onSubmit={saveWeComSettings}
+          >
+            <header>
+              <div>
+                <h2 id="wecom-settings-title">企业微信智能机器人</h2>
+                <p>使用 API 模式的 WebSocket 长连接收发消息。</p>
+              </div>
+              <button
+                type="button"
+                aria-label="关闭企业微信设置"
+                onClick={() => setWeComSettingsOpen(false)}
+                disabled={busy}
+              >
+                ×
+              </button>
+            </header>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={wecomEnabledDraft}
+                onChange={(event) =>
+                  setWeComEnabledDraft(event.currentTarget.checked)
+                }
+              />
+              <span>
+                <strong>启用远程通知与回复</strong>
+                <small>Claude Code 等待输入时推送到指定企业微信用户</small>
+              </span>
+            </label>
+            <label className="settings-field">
+              <span>Bot ID</span>
+              <input
+                type="text"
+                value={wecomBotIdDraft}
+                maxLength={200}
+                autoComplete="off"
+                placeholder="企业微信智能机器人 Bot ID"
+                onChange={(event) =>
+                  setWeComBotIdDraft(event.currentTarget.value)
+                }
+                required={wecomEnabledDraft}
+              />
+            </label>
+            <label className="settings-field">
+              <span>Secret</span>
+              <input
+                type="password"
+                value={wecomSecretDraft}
+                maxLength={1000}
+                autoComplete="new-password"
+                placeholder={
+                  snapshot.wecom.hasSecret
+                    ? "已安全保存；留空表示不修改"
+                    : "企业微信智能机器人 Secret"
+                }
+                onChange={(event) =>
+                  setWeComSecretDraft(event.currentTarget.value)
+                }
+                required={wecomEnabledDraft && !snapshot.wecom.hasSecret}
+              />
+            </label>
+            <label className="settings-field">
+              <span>接收用户 userid</span>
+              <input
+                type="text"
+                value={wecomUserIdDraft}
+                maxLength={200}
+                autoComplete="off"
+                placeholder="例如：zhangsan"
+                onChange={(event) =>
+                  setWeComUserIdDraft(event.currentTarget.value)
+                }
+                required={wecomEnabledDraft}
+              />
+            </label>
+            <div className="settings-note">
+              Secret 使用操作系统安全存储加密。每条待回复消息都有独立回复码，
+              多个 Claude Code 进程同时等待时也会按回复码精确路由。启用后请新建或
+              重启需要远程回复的 Claude Code 会话。
+            </div>
+            <footer>
+              <button
+                className="settings-secondary-button"
+                type="button"
+                onClick={() => setWeComSettingsOpen(false)}
+                disabled={busy}
+              >
+                取消
+              </button>
+              <button
+                className="primary-button primary-button--compact"
+                type="submit"
+                disabled={busy}
+              >
+                {busy ? "正在保存…" : "保存并连接"}
+              </button>
+            </footer>
+          </form>
+        </div>
       ) : null}
     </main>
   );

@@ -3,6 +3,7 @@ import type {
   DesktopApi,
   SessionChangedEvent,
   TerminalDataEvent,
+  WeComStateChangedEvent,
 } from "../shared/contracts";
 
 type IpcChannelMap = typeof import("../shared/ipc-channels").IPC_CHANNELS;
@@ -16,6 +17,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   removeProject: "workspace:remove-project",
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
+  updateWeComConfig: "workspace:update-wecom-config",
   createSession: "workspace:create-session",
   restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
@@ -29,6 +31,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   getTerminalSnapshot: "workspace:get-terminal-snapshot",
   terminalData: "workspace:terminal-data",
   sessionChanged: "workspace:session-changed",
+  wecomStateChanged: "workspace:wecom-state-changed",
 };
 
 const api: DesktopApi = {
@@ -43,6 +46,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.selectClaudeExecutable),
   autoDetectClaudeExecutable: () =>
     ipcRenderer.invoke(IPC_CHANNELS.autoDetectClaudeExecutable),
+  updateWeComConfig: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.updateWeComConfig, request),
   createSession: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.createSession, request),
   restartSession: (sessionId) =>
@@ -78,6 +83,14 @@ const api: DesktopApi = {
     ) => listener(payload);
     ipcRenderer.on(IPC_CHANNELS.sessionChanged, handler);
     return () => ipcRenderer.off(IPC_CHANNELS.sessionChanged, handler);
+  },
+  onWeComStateChanged: (listener) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: WeComStateChangedEvent,
+    ) => listener(payload);
+    ipcRenderer.on(IPC_CHANNELS.wecomStateChanged, handler);
+    return () => ipcRenderer.off(IPC_CHANNELS.wecomStateChanged, handler);
   },
 };
 

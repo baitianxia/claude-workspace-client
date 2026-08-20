@@ -1,15 +1,20 @@
-import { app, BrowserWindow, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, safeStorage, shell } from "electron";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ClaudeLocator } from "./claude-locator";
+import { ClaudeHookServer } from "./claude-hook-server";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
 import { SessionManager } from "./session-manager";
 import { TemporaryWorkspace } from "./temporary-workspace";
+import { WeComBridge } from "./wecom-bridge";
+import { WeComSettingsService } from "./wecom-settings";
 
 let mainWindow: BrowserWindow | null = null;
 let sessionManager: SessionManager | null = null;
 let removeIpcHandlers: (() => void) | null = null;
+let claudeHookServer: ClaudeHookServer | null = null;
+let wecomBridge: WeComBridge | null = null;
 let allowClose = false;
 
 function createWindow(): BrowserWindow {
@@ -109,13 +114,45 @@ async function startApplication(): Promise<void> {
 
   const claudeLocator = new ClaudeLocator(projectStore);
   await claudeLocator.initialize();
+  const hookServer = new ClaudeHookServer();
+  let hookAvailabilityError: string | undefined;
+  try {
+    await hookServer.start();
+    claudeHookServer = hookServer;
+  } catch (error) {
+    hookAvailabilityError = `无法启动本机 Claude Code Hook 服务：${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    console.error(hookAvailabilityError);
+  }
   sessionManager = new SessionManager(
     () => claudeLocator.requireExecutable(),
     undefined,
     process.platform,
     projectStore.listSessions(),
+    (sessionId, launchId) =>
+      claudeHookServer && wecomBridge?.shouldInjectClaudeHooks()
+        ? claudeHookServer.hookLaunchOptions(sessionId, launchId)
+        : { args: [] },
   );
   await projectStore.replaceSessions(sessionManager.listSessions());
+
+  wecomBridge = new WeComBridge(
+    sessionManager,
+    () => projectStore.listProjects(),
+    undefined,
+    undefined,
+    hookAvailabilityError,
+  );
+  const wecomSettingsService = new WeComSettingsService(
+    projectStore,
+    wecomBridge,
+    safeStorage,
+  );
+  wecomSettingsService.initialize();
+  claudeHookServer?.on("hook", (event) =>
+    wecomBridge?.handleClaudeHook(event),
+  );
 
   mainWindow = createWindow();
   const temporaryWorkspace = new TemporaryWorkspace(
@@ -127,6 +164,8 @@ async function startApplication(): Promise<void> {
     claudeLocator,
     sessionManager,
     temporaryWorkspace,
+    wecomBridge,
+    wecomSettingsService,
   });
 }
 
@@ -159,6 +198,8 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   allowClose = true;
+  wecomBridge?.dispose();
   sessionManager?.dispose();
+  void claudeHookServer?.stop();
   removeIpcHandlers?.();
 });

@@ -58,6 +58,7 @@
     }
   },
   "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.7",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
