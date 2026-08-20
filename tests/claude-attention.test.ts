@@ -130,7 +130,7 @@ describe("attentionFromClaudeHook", () => {
       expectsMenuSelection: true,
       supportsMultipleSelection: true,
       body: expect.stringMatching(
-        /监控能力[\s\S]*选择需要启用的功能[\s\S]*1\. 日志[\s\S]*2\. 指标/u,
+        /### 问题主题：监控能力\n\n> 选择需要启用的功能\n\n#### 回复选项\n\n1\. 日志[\s\S]*2\. 指标/u,
       ),
     });
     expect(permissionEventAttention).toEqual(attention);
@@ -171,7 +171,7 @@ describe("attentionFromClaudeHook", () => {
       questionSelectionModes: ["single"],
       questionOptionLabels: [["收到了", "没收到"]],
       body: expect.stringMatching(
-        /Hook测试[\s\S]*你收到确认弹窗\/通知了吗[\s\S]*1\. 收到了[\s\S]*2\. 没收到[\s\S]*3\. 输入其他回答（Type something\.）[\s\S]*4\. 与 Claude 讨论这个问题（Chat about this）/u,
+        /### 问题主题：Hook测试\n\n> 这是一条测试消息：你收到确认弹窗\/通知了吗？\n\n#### 回复选项\n\n1\. 收到了[\s\S]*2\. 没收到[\s\S]*3\. 输入其他回答（Type something\.）[\s\S]*4\. 与 Claude 讨论这个问题（Chat about this）/u,
       ),
     });
     expect(attention?.body).not.toContain("允许");

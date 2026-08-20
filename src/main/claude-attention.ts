@@ -317,11 +317,18 @@ function questionBody(payload: ClaudeHookPayload): {
     questionOptionLabels.push(optionLabels);
     const heading =
       questions.length > 1
-        ? `### 问题 ${questionIndex + 1}${header ? ` · ${header}` : ""}`
-        : `### ${header || "需要你的选择"}`;
+        ? `### ${questionIndex + 1}. ${header ? `问题主题：${header}` : "需要你的选择"}`
+        : `### ${header ? `问题主题：${header}` : "需要你的选择"}`;
+    const quotedPrompt = prompt
+      .split(/\r?\n/gu)
+      .map((line) => `> ${line}`)
+      .join("\n");
     return [
       heading,
-      prompt,
+      "",
+      quotedPrompt,
+      "",
+      "#### 回复选项",
       "",
       ...optionLines,
       `${optionLabels.length + 1}. 输入其他回答（Type something.）`,
