@@ -192,7 +192,7 @@ function notificationMarkdown(
             quoted: "发送 `允许`、`拒绝`或上方选项编号",
             directExample: "允许",
           }
-      : pending.expectsMenuSelection
+      : pending.inputMode === "menu"
         ? pending.supportsMultipleSelection
           ? { quoted: "发送 `1,3`", directExample: "1,3" }
           : {
@@ -618,8 +618,12 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
 
     this.router.complete(pending.code);
     this.unsentCodes.delete(pending.code);
+    const inputDescription =
+      pending.replyStage || pending.inputMode === "text"
+        ? "回复文字"
+        : "菜单操作";
     const detail =
-      `已将回复码 ${pending.code} 对应的按键写入 Claude Code 终端，` +
+      `已将回复码 ${pending.code} 对应的${inputDescription}写入 Claude Code 终端，` +
       "正在等待 Claude Code 处理。";
     this.recordInbound("routed", detail);
     const confirmed = await this.replyToMessage(

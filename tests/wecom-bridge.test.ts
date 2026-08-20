@@ -225,8 +225,8 @@ describe("WeComBridge", () => {
     const client = new FakeWeComClient();
     const router = new RemoteReplyRouter(
       (() => {
-        const codes = ["AAAAA", "BBBBB"];
-        return () => codes.shift() ?? "CCCCC";
+        const codes = ["AAAAA", "BBBBB", "CCCCC", "DDDDD"];
+        return () => codes.shift() ?? "EEEEE";
       })(),
     );
     const bridge = new WeComBridge(
@@ -309,7 +309,7 @@ describe("WeComBridge", () => {
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "routed",
       lastInboundDetail: expect.stringMatching(
-        new RegExp(`${secondCode}.*按键写入.*等待 Claude Code 处理`, "u"),
+        new RegExp(`${secondCode}.*菜单操作写入.*等待 Claude Code 处理`, "u"),
       ),
     });
 
@@ -364,6 +364,39 @@ describe("WeComBridge", () => {
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "routed",
       lastInboundDetail: expect.stringContaining(thirdCode),
+    });
+
+    bridge.handleClaudeHook({
+      workspaceSessionId: first.id,
+      launchId: launchIds.get(first.id)!,
+      payload: {
+        session_id: `claude-${first.id}`,
+        transcript_path: `C:\\transcripts\\${first.id}.jsonl`,
+        cwd: "C:\\work\\one",
+        hook_event_name: "Stop",
+        last_assistant_message: "修复已经完成。请输入 1 继续发布。",
+      },
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(4));
+    const textCode = routeCode(markdownContent(client.sent[3].body));
+    expect(markdownContent(client.sent[3].body)).toContain("直接发送回复内容");
+    client.emit(
+      "message",
+      incomingMessage("text-input", `${textCode} 1`, callbackUserId),
+    );
+    await vi.waitFor(() =>
+      expect(firstPty.writes).toEqual([
+        `${DOWN}\r`,
+        "请改用只读命令\r",
+        "\r",
+        "1\r",
+      ]),
+    );
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "routed",
+      lastInboundDetail: expect.stringMatching(
+        new RegExp(`${textCode}.*回复文字写入.*等待 Claude Code 处理`, "u"),
+      ),
     });
 
     bridge.dispose();

@@ -44,7 +44,7 @@ describe("attentionFromClaudeHook", () => {
       workspaceSessionId: "workspace-session",
       launchId: "launch-id",
       claudeSessionId: "claude-session",
-      expectsMenuSelection: true,
+      inputMode: "menu",
       permissionSuggestionCount: 1,
       body: expect.stringMatching(
         /Claude Code 希望运行下面的命令[\s\S]*Bash[\s\S]*运行测试[\s\S]*npm run test[\s\S]*是否允许 Claude Code 运行该命令[\s\S]*1\. 允许：仅运行本次命令[\s\S]*2\. 允许：以后运行符合“npm run test”规则的命令时不再询问[\s\S]*3\. 拒绝：不运行本次命令，并告诉 Claude Code 应如何调整/u,
@@ -127,7 +127,7 @@ describe("attentionFromClaudeHook", () => {
 
     expect(attention).toMatchObject({
       kind: "question",
-      expectsMenuSelection: true,
+      inputMode: "menu",
       supportsMultipleSelection: true,
       body: expect.stringMatching(
         /### 问题主题：监控能力\n\n> 选择需要启用的功能\n\n#### 回复选项\n\n1\. 日志[\s\S]*2\. 指标/u,
@@ -197,7 +197,7 @@ describe("attentionFromClaudeHook", () => {
     expect(attention).toMatchObject({
       kind: "completion",
       title: "Claude Code 已完成本轮，等待你的下一步",
-      expectsMenuSelection: false,
+      inputMode: "text",
       body: expect.stringMatching(
         /订单接口已经修复[\s\S]*3 个回归测试全部通过[\s\S]*持续观察生产日志/u,
       ),
@@ -257,7 +257,30 @@ describe("attentionFromClaudeHook", () => {
       kind: "agent",
       title: "后台测试任务需要输入",
       body: "是否继续等待集成测试？",
-      expectsMenuSelection: false,
+      inputMode: "text",
+    });
+  });
+
+  it("does not mistake input dialogs or normal prompts for numbered menus", () => {
+    const idle = attentionFromClaudeHook(
+      hook({
+        notification_type: "idle_prompt",
+        message: "请输入下一步要求",
+      }),
+    );
+    const elicitation = attentionFromClaudeHook(
+      hook({
+        notification_type: "elicitation_dialog",
+        title: "MCP 需要输入",
+        message: "请输入重试次数",
+      }),
+    );
+
+    expect(idle).toMatchObject({ kind: "idle", inputMode: "text" });
+    expect(elicitation).toMatchObject({
+      kind: "elicitation",
+      inputMode: "text",
+      body: "请输入重试次数",
     });
   });
 

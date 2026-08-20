@@ -16,6 +16,8 @@ export type RemoteAttentionKind =
   | "elicitation"
   | "agent";
 
+export type RemoteInputMode = "menu" | "text";
+
 export type RemoteReplyStage =
   | "permission-denial-reason"
   | "question-custom-answer"
@@ -28,7 +30,7 @@ export interface RemoteAttention {
   kind: RemoteAttentionKind;
   title: string;
   body: string;
-  expectsMenuSelection: boolean;
+  inputMode: RemoteInputMode;
   supportsMultipleSelection?: boolean;
   questionSelectionModes?: Array<"single" | "multiple">;
   questionOptionLabels?: string[][];
@@ -81,6 +83,8 @@ function attentionFingerprint(attention: RemoteAttention): string {
     attention.kind,
     attention.title,
     attention.body,
+    attention.inputMode,
+    attention.supportsMultipleSelection ? "multiple" : "single",
     JSON.stringify(attention.questionSelectionModes ?? []),
     JSON.stringify(attention.questionOptionLabels ?? []),
     attention.permissionSuggestionCount ?? 0,
@@ -490,11 +494,14 @@ export function terminalActionForRemoteReply(
     throw new Error("多选问题回复无效，请使用逗号分隔通知中的选项编号。");
   }
 
-  if (pending.expectsMenuSelection && /^[1-9]$/u.test(selection)) {
+  // A numeric reply is not proof that Claude is showing a menu. Only Hook
+  // events explicitly classified as terminal menus may become navigation keys;
+  // text-input prompts must receive the original characters (including "1").
+  if (pending.inputMode === "menu" && /^[1-9]$/u.test(selection)) {
     return { input: singleMenuSelectionInput(Number(selection)) };
   }
   if (
-    pending.expectsMenuSelection &&
+    pending.inputMode === "menu" &&
     pending.supportsMultipleSelection &&
     /^[1-9](?:\s*[,，]\s*[1-9])+$/u.test(selection)
   ) {

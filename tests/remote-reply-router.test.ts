@@ -20,7 +20,7 @@ function attention(
     kind: "idle",
     title: "等待回复",
     body: `message for ${workspaceSessionId}`,
-    expectsMenuSelection: false,
+    inputMode: "text",
     ...overrides,
   };
 }
@@ -156,7 +156,7 @@ describe("RemoteReplyRouter", () => {
         kind: "permission",
         title: "权限确认",
         body: "run tests",
-        expectsMenuSelection: true,
+        inputMode: "menu",
       }),
     );
 
@@ -171,7 +171,7 @@ describe("RemoteReplyRouter", () => {
       attention("session-a", "launch-a", {
         kind: "question",
         title: "请选择",
-        expectsMenuSelection: true,
+        inputMode: "menu",
       }),
     );
     const duplicate = router.register(
@@ -195,7 +195,7 @@ describe("RemoteReplyRouter", () => {
       kind: "question",
       title: "Claude Code 有问题需要回复",
       body: "是否收到通知？\n\n1. 收到了\n2. 没收到",
-      expectsMenuSelection: true,
+      inputMode: "menu",
       questionSelectionModes: ["single"],
     });
 
@@ -222,7 +222,7 @@ describe("RemoteReplyRouter", () => {
       "zhangsan",
       attention("session-a", "launch-a", {
         kind: "question",
-        expectsMenuSelection: true,
+        inputMode: "menu",
         questionSelectionModes: ["single"],
         questionOptionLabels: [["收到了", "没收到"]],
       }),
@@ -248,12 +248,15 @@ describe("RemoteReplyRouter", () => {
     expect(
       terminalActionForRemoteReply(customFollowUp.pending, customFollowUp.reply),
     ).toEqual({ input: "我在手机端收到了\r" });
+    expect(
+      terminalActionForRemoteReply(customFollowUp.pending, "1"),
+    ).toEqual({ input: "1\r" });
 
     const chatPending = router.register(
       "zhangsan",
       attention("session-b", "launch-b", {
         kind: "question",
-        expectsMenuSelection: true,
+        inputMode: "menu",
         questionSelectionModes: ["single"],
         questionOptionLabels: [["收到了", "没收到"]],
       }),
@@ -263,6 +266,12 @@ describe("RemoteReplyRouter", () => {
       nextStage: "question-chat-message",
       followUpMessage: expect.stringContaining("Chat about this"),
     });
+    expect(
+      terminalActionForRemoteReply(
+        { ...chatPending, replyStage: "question-chat-message" },
+        "1",
+      ),
+    ).toEqual({ input: "1\r" });
   });
 
   it("does not let a generic idle notification replace a completed response", () => {
@@ -302,14 +311,14 @@ describe("RemoteReplyRouter", () => {
       "zhangsan",
       attention("session-a", "launch-a", {
         kind: "permission",
-        expectsMenuSelection: true,
+        inputMode: "menu",
       }),
     ).pending;
     const permissionWithSuggestion = router.register(
       "zhangsan",
       attention("session-c", "launch-c", {
         kind: "permission",
-        expectsMenuSelection: true,
+        inputMode: "menu",
         permissionSuggestionCount: 1,
       }),
     ).pending;
@@ -317,7 +326,7 @@ describe("RemoteReplyRouter", () => {
       "zhangsan",
       attention("session-b", "launch-b", {
         kind: "question",
-        expectsMenuSelection: true,
+        inputMode: "menu",
         supportsMultipleSelection: true,
       }),
     ).pending;
@@ -329,7 +338,7 @@ describe("RemoteReplyRouter", () => {
       "zhangsan",
       attention("session-e", "launch-e", {
         kind: "question",
-        expectsMenuSelection: true,
+        inputMode: "menu",
       }),
     ).pending;
 
@@ -379,13 +388,40 @@ describe("RemoteReplyRouter", () => {
     ).toBe("说明[31m 继续 不能提交 制表\r");
   });
 
+  it("preserves numeric replies in Claude text-input prompts", () => {
+    const router = new RemoteReplyRouter(
+      codeGenerator("TEXTA", "TEXTB", "TEXTC", "TEXTD"),
+    );
+    const textPrompts = [
+      { sessionId: "session-a", kind: "completion" as const },
+      { sessionId: "session-b", kind: "idle" as const },
+      { sessionId: "session-c", kind: "agent" as const },
+      { sessionId: "session-d", kind: "elicitation" as const },
+    ].map(({ sessionId, kind }) =>
+      router.register(
+        "zhangsan",
+        attention(sessionId, `launch-${sessionId}`, {
+          kind,
+          inputMode: "text",
+        }),
+      ).pending,
+    );
+
+    for (const pending of textPrompts) {
+      expect(terminalInputForRemoteReply(pending, "1")).toBe("1\r");
+      expect(terminalInputForRemoteReply(pending, "继续处理")).toBe(
+        "继续处理\r",
+      );
+    }
+  });
+
   it("encodes multiple AskUserQuestion answers in terminal order", () => {
     const router = new RemoteReplyRouter(codeGenerator("QUEST"));
     const pending = router.register(
       "zhangsan",
       attention("session-a", "launch-a", {
         kind: "question",
-        expectsMenuSelection: true,
+        inputMode: "menu",
         supportsMultipleSelection: true,
         questionSelectionModes: ["single", "multiple", "single"],
         questionOptionLabels: [

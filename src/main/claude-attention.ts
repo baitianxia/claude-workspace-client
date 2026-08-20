@@ -5,6 +5,7 @@ import type {
 import type {
   RemoteAttention,
   RemoteAttentionKind,
+  RemoteInputMode,
 } from "./remote-reply-router";
 
 const MAX_ATTENTION_BODY_LENGTH = 8_000;
@@ -407,7 +408,7 @@ function baseAttention(
   kind: RemoteAttentionKind,
   title: string,
   body: string,
-  expectsMenuSelection: boolean,
+  inputMode: RemoteInputMode,
   supportsMultipleSelection = false,
   questionSelectionModes?: Array<"single" | "multiple">,
 ): RemoteAttention {
@@ -418,7 +419,7 @@ function baseAttention(
     kind,
     title,
     body: truncate(body, MAX_ATTENTION_BODY_LENGTH),
-    expectsMenuSelection,
+    inputMode,
     ...(supportsMultipleSelection ? { supportsMultipleSelection: true } : {}),
     ...(questionSelectionModes && questionSelectionModes.length > 0
       ? { questionSelectionModes }
@@ -438,7 +439,7 @@ export function attentionFromClaudeHook(
           "completion",
           "Claude Code 已完成本轮，等待你的下一步",
           body,
-          false,
+          "text",
         )
       : null;
   }
@@ -453,7 +454,7 @@ export function attentionFromClaudeHook(
         "question",
         "Claude Code 有问题需要回复",
         question.body,
-        true,
+        "menu",
         question.supportsMultipleSelection,
         question.questionSelectionModes,
       ),
@@ -470,7 +471,7 @@ export function attentionFromClaudeHook(
       "plan",
       "Claude Code 等待计划确认",
       planBody(payload),
-      true,
+      "menu",
     );
   }
 
@@ -481,7 +482,7 @@ export function attentionFromClaudeHook(
         "permission",
         "Claude Code 需要权限确认",
         permissionBody(payload),
-        true,
+        "menu",
       ),
       permissionSuggestionCount: permissionSuggestions(payload).length,
     };
@@ -496,7 +497,7 @@ export function attentionFromClaudeHook(
       "idle",
       payload.title?.trim() || "Claude Code 等待下一步回复",
       payload.message?.trim() || "Claude Code 已暂停并等待用户输入。",
-      false,
+      "text",
     );
   }
   if (payload.notification_type === "elicitation_dialog") {
@@ -505,7 +506,10 @@ export function attentionFromClaudeHook(
       "elicitation",
       payload.title?.trim() || "Claude Code 等待外部交互",
       payload.message?.trim() || "Claude Code 正在等待用户完成交互。",
-      true,
+      // Notification only identifies this as an MCP form. It does not prove
+      // that the currently focused field is a numbered terminal menu, so keep
+      // remote replies as literal text instead of synthesizing arrow keys.
+      "text",
     );
   }
   if (payload.notification_type === "elicitation_url_dialog") {
@@ -514,7 +518,7 @@ export function attentionFromClaudeHook(
       "elicitation",
       payload.title?.trim() || "Claude Code 等待打开外部链接",
       payload.message?.trim() || "Claude Code 正在等待用户完成外部交互。",
-      false,
+      "text",
     );
   }
   if (payload.notification_type === "agent_needs_input") {
@@ -523,7 +527,7 @@ export function attentionFromClaudeHook(
       "agent",
       payload.title?.trim() || "Claude Code 后台任务需要回复",
       payload.message?.trim() || "Claude Code 的后台任务正在等待用户输入。",
-      false,
+      "text",
     );
   }
   return null;
