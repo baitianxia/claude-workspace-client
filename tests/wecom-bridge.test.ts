@@ -21,6 +21,8 @@ import {
   type WeComClient,
 } from "../src/main/wecom-bridge";
 
+const DOWN = "\x1b[B";
+
 interface FakePty {
   process: IPty;
   writes: string[];
@@ -302,19 +304,21 @@ describe("WeComBridge", () => {
         markdownContent(client.sent[1].body),
       ),
     );
-    await vi.waitFor(() => expect(secondPty.writes).toEqual(["1\r"]));
+    await vi.waitFor(() => expect(secondPty.writes).toEqual(["\r"]));
     expect(firstPty.writes).toEqual([]);
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "routed",
-      lastInboundDetail: expect.stringContaining(secondCode),
+      lastInboundDetail: expect.stringMatching(
+        new RegExp(`${secondCode}.*按键写入.*等待 Claude Code 处理`, "u"),
+      ),
     });
 
     client.emit(
       "message",
       incomingMessage("message-1", `${firstCode} 2`, callbackUserId),
     );
-    await vi.waitFor(() => expect(firstPty.writes).toEqual(["2\r"]));
-    expect(secondPty.writes).toEqual(["1\r"]);
+    await vi.waitFor(() => expect(firstPty.writes).toEqual([`${DOWN}\r`]));
+    expect(secondPty.writes).toEqual(["\r"]);
     expect(client.replies).toEqual([
       expect.stringContaining(secondCode),
       expect.stringContaining(firstCode),
@@ -335,7 +339,7 @@ describe("WeComBridge", () => {
       ),
     );
     await vi.waitFor(() =>
-      expect(firstPty.writes).toEqual(["2\r", "请改用只读命令\r"]),
+      expect(firstPty.writes).toEqual([`${DOWN}\r`, "请改用只读命令\r"]),
     );
     expect(router.listForUser("zhangsan")).not.toContainEqual(
       expect.objectContaining({ code: firstCode }),
@@ -352,9 +356,9 @@ describe("WeComBridge", () => {
     );
     await vi.waitFor(() =>
       expect(firstPty.writes).toEqual([
-        "2\r",
+        `${DOWN}\r`,
         "请改用只读命令\r",
-        "1\r",
+        "\r",
       ]),
     );
     expect(bridge.getState()).toMatchObject({
@@ -365,7 +369,7 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
-  it("keeps pending routes through terminal focus, navigation and mouse reports", async () => {
+  it("keeps pending routes through terminal focus and mouse reports", async () => {
     const pty = fakePty(1);
     let launchId = "";
     const manager = new SessionManager(
@@ -403,7 +407,7 @@ describe("WeComBridge", () => {
     bridge.handleClaudeHook(hook(session.id, launchId, "npm test -- first"));
     await vi.waitFor(() => expect(client.sent).toHaveLength(1));
     const firstCode = routeCode(markdownContent(client.sent[0].body));
-    const controlInput = ["\x1b[O", "\x1b[I", "\x1b[B", "\x1b[<0;10;5M"];
+    const controlInput = ["\x1b[O", "\x1b[I", "\x1b[<0;10;5M"];
     for (const data of controlInput) {
       manager.write(session.id, data);
     }
@@ -416,7 +420,7 @@ describe("WeComBridge", () => {
       incomingMessage("direct-after-focus", `${firstCode} 1`),
     );
     await vi.waitFor(() =>
-      expect(pty.writes).toEqual([...controlInput, "1\r"]),
+      expect(pty.writes).toEqual([...controlInput, "\r"]),
     );
 
     bridge.handleClaudeHook(hook(session.id, launchId, "npm test -- second"));
@@ -433,7 +437,7 @@ describe("WeComBridge", () => {
       ),
     );
     await vi.waitFor(() =>
-      expect(pty.writes).toEqual([...controlInput, "1\r", "\x1b[O", "1\r"]),
+      expect(pty.writes).toEqual([...controlInput, "\r", "\x1b[O", "\r"]),
     );
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "routed",
@@ -443,7 +447,7 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
-  it("expires a pending route only when local input commits or cancels it", async () => {
+  it("expires a pending route when local keyboard input changes the menu", async () => {
     const pty = fakePty(1);
     let launchId = "";
     const manager = new SessionManager(
@@ -479,7 +483,7 @@ describe("WeComBridge", () => {
     bridge.handleClaudeHook(hook(session.id, launchId, "npm test"));
     await vi.waitFor(() => expect(client.sent).toHaveLength(1));
 
-    manager.write(session.id, "\r");
+    manager.write(session.id, DOWN);
     expect(router.listForUser("zhangsan")).toEqual([]);
     client.emit("message", incomingMessage("after-local-answer", "ABCDE 1"));
     await vi.waitFor(() =>
@@ -487,7 +491,7 @@ describe("WeComBridge", () => {
         expect.stringContaining("回复码 ABCDE 不存在或已过期"),
       ),
     );
-    expect(pty.writes).toEqual(["\r"]);
+    expect(pty.writes).toEqual([DOWN]);
 
     bridge.dispose();
   });

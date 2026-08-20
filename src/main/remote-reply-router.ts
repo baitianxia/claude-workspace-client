@@ -3,6 +3,9 @@ import { randomBytes } from "node:crypto";
 const DEFAULT_PENDING_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const ROUTE_CODE_LENGTH = 8;
+const TERMINAL_DOWN = "\x1b[B";
+const TERMINAL_ENTER = "\r";
+const TERMINAL_TOGGLE = " ";
 
 export type RemoteAttentionKind =
   | "permission"
@@ -113,6 +116,24 @@ function replyWithoutCode(value: string, code: string): string {
       "",
     ),
   );
+}
+
+// Claude Code's terminal menus display numbered options, but their default
+// controls are arrow keys plus Enter (and Space to toggle multi-select items).
+function singleMenuSelectionInput(selection: number): string {
+  return `${TERMINAL_DOWN.repeat(selection - 1)}${TERMINAL_ENTER}`;
+}
+
+function multipleMenuSelectionInput(selections: number[]): string {
+  const ordered = [...new Set(selections)].sort((left, right) => left - right);
+  let currentSelection = 1;
+  let input = "";
+  for (const selection of ordered) {
+    input += TERMINAL_DOWN.repeat(selection - currentSelection);
+    input += TERMINAL_TOGGLE;
+    currentSelection = selection;
+  }
+  return `${input}${TERMINAL_ENTER}`;
 }
 
 export class RemoteReplyRouter {
@@ -355,13 +376,13 @@ export function terminalActionForRemoteReply(
     }
     if (selection === denySelection) {
       return {
-        input: `${selection}\r`,
+        input: singleMenuSelectionInput(numericSelection),
         nextStage: "permission-denial-reason",
         followUpMessage:
           "已选择拒绝。请继续回复拒绝原因，或告诉 Claude Code 应该如何调整。",
       };
     }
-    return { input: `${selection}\r` };
+    return { input: singleMenuSelectionInput(numericSelection) };
   }
 
   const questionModes = pending.questionSelectionModes ?? [];
@@ -372,7 +393,7 @@ export function terminalActionForRemoteReply(
     if (Number.isInteger(numericSelection)) {
       if (numericSelection === firstOptionCount + 1) {
         return {
-          input: `${selection}\r`,
+          input: singleMenuSelectionInput(numericSelection),
           nextStage: "question-custom-answer",
           followUpMessage:
             "已选择“输入其他回答（Type something.）”。请继续回复你的具体答案。",
@@ -380,7 +401,7 @@ export function terminalActionForRemoteReply(
       }
       if (numericSelection === firstOptionCount + 2) {
         return {
-          input: `${selection}\r`,
+          input: singleMenuSelectionInput(numericSelection),
           nextStage: "question-chat-message",
           followUpMessage:
             "已选择“与 Claude 讨论这个问题（Chat about this）”。请继续回复你想讨论或补充的内容。",
@@ -406,7 +427,7 @@ export function terminalActionForRemoteReply(
           /^[1-9]$/u.test(answerSelection) &&
           Number(answerSelection) <= labels.length
         ) {
-          return `${answerSelection}\r`;
+          return singleMenuSelectionInput(Number(answerSelection));
         }
         if (
           questionModes[index] === "multiple" &&
@@ -415,7 +436,11 @@ export function terminalActionForRemoteReply(
             .split(/\s*[,，]\s*/u)
             .every((value) => Number(value) <= labels.length)
         ) {
-          return `${answerSelection.replace(/[^1-9]/gu, "")}\r`;
+          return multipleMenuSelectionInput(
+            answerSelection
+              .split(/\s*[,，]\s*/u)
+              .map((value) => Number(value)),
+          );
         }
         return null;
       });
@@ -444,7 +469,7 @@ export function terminalActionForRemoteReply(
         numericSelection >= 1 &&
         numericSelection <= labels.length
       ) {
-        return { input: `${selection}\r` };
+        return { input: singleMenuSelectionInput(numericSelection) };
       }
       throw new Error(
         `问题回复无效。请回复 1-${labels.length + 2} 的选项编号，或直接回复选项文字。`,
@@ -456,20 +481,28 @@ export function terminalActionForRemoteReply(
         .split(/\s*[,，]\s*/u)
         .every((value) => Number(value) <= labels.length)
     ) {
-      return { input: `${selection.replace(/[^1-9]/gu, "")}\r` };
+      return {
+        input: multipleMenuSelectionInput(
+          selection.split(/\s*[,，]\s*/u).map((value) => Number(value)),
+        ),
+      };
     }
     throw new Error("多选问题回复无效，请使用逗号分隔通知中的选项编号。");
   }
 
   if (pending.expectsMenuSelection && /^[1-9]$/u.test(selection)) {
-    return { input: `${selection}\r` };
+    return { input: singleMenuSelectionInput(Number(selection)) };
   }
   if (
     pending.expectsMenuSelection &&
     pending.supportsMultipleSelection &&
     /^[1-9](?:\s*[,，]\s*[1-9])+$/u.test(selection)
   ) {
-    return { input: `${selection.replace(/[^1-9]/gu, "")}\r` };
+    return {
+      input: multipleMenuSelectionInput(
+        selection.split(/\s*[,，]\s*/u).map((value) => Number(value)),
+      ),
+    };
   }
   return { input: `${normalized}\r` };
 }

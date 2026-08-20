@@ -228,13 +228,15 @@ function notificationMarkdown(
   return `${prefix}${truncateUtf8(pending.body, bodyBudget)}${suffix}`;
 }
 
-function localInputCommitsPendingReply(data: string): boolean {
+function localInputInvalidatesPendingReply(data: string): boolean {
+  const isFocusReport = data === "\x1b[I" || data === "\x1b[O";
+  const isSgrMouseReport = /^\x1b\[<[0-9;]+[Mm]$/u.test(data);
+  const isX10MouseReport = /^\x1b\[M[\s\S]{3}$/u.test(data);
   return (
-    data.includes("\r") ||
-    data.includes("\n") ||
-    data === "\x03" ||
-    data === "\x04" ||
-    data === "\x1b"
+    Boolean(data) &&
+    !isFocusReport &&
+    !isSgrMouseReport &&
+    !isX10MouseReport
   );
 }
 
@@ -403,7 +405,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
   private readonly handleSessionInput = (event: SessionInputEvent) => {
     if (
       event.source === "local" &&
-      localInputCommitsPendingReply(event.data)
+      localInputInvalidatesPendingReply(event.data)
     ) {
       const code = this.router.clearWorkspaceSession(event.sessionId);
       if (code) {
@@ -616,7 +618,9 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
 
     this.router.complete(pending.code);
     this.unsentCodes.delete(pending.code);
-    const detail = `已将回复码 ${pending.code} 的消息发送到对应 Claude Code 会话。`;
+    const detail =
+      `已将回复码 ${pending.code} 对应的按键写入 Claude Code 终端，` +
+      "正在等待 Claude Code 处理。";
     this.recordInbound("routed", detail);
     const confirmed = await this.replyToMessage(
       client,

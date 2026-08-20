@@ -6,6 +6,8 @@ import {
   type RemoteAttention,
 } from "../src/main/remote-reply-router";
 
+const DOWN = "\x1b[B";
+
 function attention(
   workspaceSessionId: string,
   launchId: string,
@@ -226,9 +228,9 @@ describe("RemoteReplyRouter", () => {
       }),
     ).pending;
 
-    expect(terminalInputForRemoteReply(customPending, "收到了")).toBe("1\r");
+    expect(terminalInputForRemoteReply(customPending, "收到了")).toBe("\r");
     expect(terminalActionForRemoteReply(customPending, "3")).toEqual({
-      input: "3\r",
+      input: `${DOWN}${DOWN}\r`,
       nextStage: "question-custom-answer",
       followUpMessage: expect.stringContaining("Type something"),
     });
@@ -257,7 +259,7 @@ describe("RemoteReplyRouter", () => {
       }),
     ).pending;
     expect(terminalActionForRemoteReply(chatPending, "4")).toEqual({
-      input: "4\r",
+      input: `${DOWN}${DOWN}${DOWN}\r`,
       nextStage: "question-chat-message",
       followUpMessage: expect.stringContaining("Chat about this"),
     });
@@ -332,35 +334,37 @@ describe("RemoteReplyRouter", () => {
     ).pending;
 
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "允许")).toBe(
-      "1\r",
+      "\r",
     );
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "是")).toBe(
-      "1\r",
+      "\r",
     );
     expect(
       terminalInputForRemoteReply(permissionWithoutSuggestion, "允许本次"),
-    ).toBe("1\r");
+    ).toBe("\r");
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "拒绝")).toBe(
-      "2\r",
+      `${DOWN}\r`,
     );
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "否")).toBe(
-      "3\r",
+      `${DOWN}${DOWN}\r`,
     );
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "始终允许")).toBe(
-      "2\r",
+      `${DOWN}\r`,
     );
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "拒绝")).toBe(
-      "3\r",
+      `${DOWN}${DOWN}\r`,
     );
     expect(
       terminalActionForRemoteReply(permissionWithSuggestion, "拒绝"),
     ).toMatchObject({
-      input: "3\r",
+      input: `${DOWN}${DOWN}\r`,
       nextStage: "permission-denial-reason",
       followUpMessage: expect.stringContaining("如何调整"),
     });
-    expect(terminalInputForRemoteReply(multiple, "1, 3")).toBe("13\r");
-    expect(terminalInputForRemoteReply(single, "2")).toBe("2\r");
+    expect(terminalInputForRemoteReply(multiple, "1, 3")).toBe(
+      ` ${DOWN}${DOWN} \r`,
+    );
+    expect(terminalInputForRemoteReply(single, "2")).toBe(`${DOWN}\r`);
     expect(() =>
       terminalInputForRemoteReply(
         permissionWithoutSuggestion,
@@ -393,7 +397,7 @@ describe("RemoteReplyRouter", () => {
     ).pending;
 
     expect(terminalInputForRemoteReply(pending, "2;1,3;4")).toBe(
-      "2\r13\r4\r",
+      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`,
     );
   });
 });
