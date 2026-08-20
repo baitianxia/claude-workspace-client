@@ -228,11 +228,18 @@ describe("RemoteReplyRouter", () => {
       }),
     ).pending;
 
+    expect(terminalInputForRemoteReply(customPending, "1")).toBe("\r");
     expect(terminalInputForRemoteReply(customPending, "收到了")).toBe("\r");
     expect(terminalActionForRemoteReply(customPending, "3")).toEqual({
       input: `${DOWN}${DOWN}\r`,
       nextStage: "question-custom-answer",
       followUpMessage: expect.stringContaining("Type something"),
+    });
+    expect(
+      terminalActionForRemoteReply(customPending, "输入其他回答"),
+    ).toMatchObject({
+      input: `${DOWN}${DOWN}\r`,
+      nextStage: "question-custom-answer",
     });
     expect(router.setReplyStage(customPending.code, "question-custom-answer")).toBe(
       true,
@@ -265,6 +272,12 @@ describe("RemoteReplyRouter", () => {
       input: `${DOWN}${DOWN}${DOWN}\r`,
       nextStage: "question-chat-message",
       followUpMessage: expect.stringContaining("Chat about this"),
+    });
+    expect(
+      terminalActionForRemoteReply(chatPending, "Chat about this"),
+    ).toMatchObject({
+      input: `${DOWN}${DOWN}${DOWN}\r`,
+      nextStage: "question-chat-message",
     });
     expect(
       terminalActionForRemoteReply(
@@ -320,6 +333,11 @@ describe("RemoteReplyRouter", () => {
         kind: "permission",
         inputMode: "menu",
         permissionSuggestionCount: 1,
+        permissionOptionLabels: [
+          "是",
+          "是，并且以后从 hook-test.example.com 获取内容时不再询问",
+          "否，并告诉 Claude 应如何调整（Esc）",
+        ],
       }),
     ).pending;
     const multiple = router.register(
@@ -342,6 +360,9 @@ describe("RemoteReplyRouter", () => {
       }),
     ).pending;
 
+    expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "1")).toBe(
+      "\r",
+    );
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "允许")).toBe(
       "\r",
     );
@@ -360,6 +381,21 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "始终允许")).toBe(
       `${DOWN}\r`,
     );
+    expect(
+      terminalInputForRemoteReply(
+        permissionWithSuggestion,
+        "是，并且以后从 hook-test.example.com 获取内容时不再询问",
+      ),
+    ).toBe(`${DOWN}\r`);
+    expect(
+      terminalActionForRemoteReply(
+        permissionWithSuggestion,
+        "否，并告诉 Claude 应如何调整",
+      ),
+    ).toMatchObject({
+      input: `${DOWN}${DOWN}\r`,
+      nextStage: "permission-denial-reason",
+    });
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "拒绝")).toBe(
       `${DOWN}${DOWN}\r`,
     );
@@ -374,6 +410,9 @@ describe("RemoteReplyRouter", () => {
       ` ${DOWN}${DOWN} \r`,
     );
     expect(terminalInputForRemoteReply(single, "2")).toBe(`${DOWN}\r`);
+    expect(() => terminalInputForRemoteReply(single, "随便输入")).toThrow(
+      "菜单回复无效",
+    );
     expect(() =>
       terminalInputForRemoteReply(
         permissionWithoutSuggestion,
@@ -433,6 +472,9 @@ describe("RemoteReplyRouter", () => {
     ).pending;
 
     expect(terminalInputForRemoteReply(pending, "2;1,3;4")).toBe(
+      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`,
+    );
+    expect(terminalInputForRemoteReply(pending, "B;C,E;I")).toBe(
       `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`,
     );
   });

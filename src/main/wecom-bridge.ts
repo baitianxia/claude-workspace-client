@@ -184,25 +184,39 @@ function notificationMarkdown(
   const replyGuidance =
     (pending.questionSelectionModes?.length ?? 0) > 1
       ? {
-          quoted: "发送 `1;2,3`（问题间用分号，多选项用逗号）",
+          quoted:
+            "发送 `1;2,3`（每题可用编号或完整选项文字；问题间用分号，多选项用逗号）",
           directExample: "1;2,3",
         }
       : pending.kind === "permission"
         ? {
-            quoted: "发送 `允许`、`拒绝`或上方选项编号",
+            quoted: "发送上方选项编号、`允许`/`拒绝`或完整选项文字",
             directExample: "允许",
           }
-      : pending.inputMode === "menu"
-        ? pending.supportsMultipleSelection
-          ? { quoted: "发送 `1,3`", directExample: "1,3" }
-          : {
-              quoted: "发送上方选项编号，例如 `1`",
-              directExample: "1",
-            }
-        : {
-            quoted: "直接发送回复内容",
-            directExample: "继续处理并运行测试",
-          };
+        : pending.kind === "question" && pending.inputMode === "menu"
+          ? pending.supportsMultipleSelection
+            ? {
+                quoted: "发送 `1,3`，也可用逗号分隔完整选项文字",
+                directExample: "1,3",
+              }
+            : {
+                quoted: "发送上方选项编号或完整选项文字，例如 `1`",
+                directExample: "1",
+              }
+          : pending.inputMode === "menu"
+            ? pending.supportsMultipleSelection
+              ? {
+                  quoted: "发送上方选项编号，例如 `1,3`",
+                  directExample: "1,3",
+                }
+              : {
+                  quoted: "发送上方选项编号，例如 `1`",
+                  directExample: "1",
+                }
+            : {
+                quoted: "直接发送回复内容",
+                directExample: "继续处理并运行测试",
+              };
   const prefix = [
     `# ${pending.title}`,
     `> 回复码：\`${pending.code}\``,

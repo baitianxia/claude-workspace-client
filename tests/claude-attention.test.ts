@@ -46,6 +46,11 @@ describe("attentionFromClaudeHook", () => {
       claudeSessionId: "claude-session",
       inputMode: "menu",
       permissionSuggestionCount: 1,
+      permissionOptionLabels: [
+        "允许：仅运行本次命令",
+        "允许：以后运行符合“npm run test”规则的命令时不再询问",
+        "拒绝：不运行本次命令，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+      ],
       body: expect.stringMatching(
         /Claude Code 希望运行下面的命令[\s\S]*Bash[\s\S]*运行测试[\s\S]*npm run test[\s\S]*是否允许 Claude Code 运行该命令[\s\S]*1\. 允许：仅运行本次命令[\s\S]*2\. 允许：以后运行符合“npm run test”规则的命令时不再询问[\s\S]*3\. 拒绝：不运行本次命令，并告诉 Claude Code 应如何调整/u,
       ),
@@ -80,6 +85,11 @@ describe("attentionFromClaudeHook", () => {
     expect(attention).toMatchObject({
       kind: "permission",
       permissionSuggestionCount: 1,
+      permissionOptionLabels: [
+        "是",
+        "是，并且以后从 www.anthropic.com 获取内容时不再询问",
+        "否，并告诉 Claude 应如何调整（Esc）",
+      ],
       body: [
         "### Fetch",
         "",

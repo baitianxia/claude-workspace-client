@@ -122,6 +122,11 @@ interface PermissionCopy {
   allowSimilar: string;
 }
 
+interface PermissionPrompt {
+  body: string;
+  optionLabels: string[];
+}
+
 function webFetchHost(payload: ClaudeHookPayload): string | null {
   const input = asRecord(payload.tool_input);
   const url = textValue(input?.url);
@@ -195,10 +200,9 @@ function permissionRuleScope(ruleValue: unknown): string | null {
     : `使用 ${toolName}`;
 }
 
-function permissionSuggestionText(
+function permissionSuggestionLabel(
   payload: ClaudeHookPayload,
   value: unknown,
-  index: number,
 ): string {
   const suggestion = asRecord(value);
   const rules = Array.isArray(suggestion?.rules) ? suggestion.rules : [];
@@ -210,7 +214,7 @@ function permissionSuggestionText(
     scopes.length > 0
       ? `允许：以后${scopes.join("，或")}时不再询问`
       : permissionCopy(payload).allowSimilar;
-  return `${index + 2}. ${scopeText}`;
+  return scopeText;
 }
 
 function webFetchSuggestionHost(value: unknown): string | null {
@@ -232,52 +236,65 @@ function webFetchSuggestionHost(value: unknown): string | null {
   return null;
 }
 
-function webFetchPermissionBody(payload: ClaudeHookPayload): string {
+function webFetchPermissionPrompt(
+  payload: ClaudeHookPayload,
+): PermissionPrompt {
   const input = asRecord(payload.tool_input);
   const url = textValue(input?.url);
   const host = webFetchHost(payload);
   const suggestions = permissionSuggestions(payload);
-  return [
-    "### Fetch",
-    "",
-    url ?? "（Hook 未提供目标网址）",
-    host ? `Claude 想从 ${host} 获取内容。` : "Claude 想获取网页内容。",
-    "",
-    "是否允许 Claude 获取此内容？",
-    "1. 是",
-    ...suggestions.map((suggestion, index) => {
+  const optionLabels = [
+    "是",
+    ...suggestions.map((suggestion) => {
       const suggestionHost = webFetchSuggestionHost(suggestion) ?? host;
       return suggestionHost
-        ? `${index + 2}. 是，并且以后从 ${suggestionHost} 获取内容时不再询问`
-        : `${index + 2}. 是，并且以后获取此类内容时不再询问`;
+        ? `是，并且以后从 ${suggestionHost} 获取内容时不再询问`
+        : "是，并且以后获取此类内容时不再询问";
     }),
-    `${suggestions.length + 2}. 否，并告诉 Claude 应如何调整（Esc）`,
-  ].join("\n");
+    "否，并告诉 Claude 应如何调整（Esc）",
+  ];
+  return {
+    body: [
+      "### Fetch",
+      "",
+      url ?? "（Hook 未提供目标网址）",
+      host ? `Claude 想从 ${host} 获取内容。` : "Claude 想获取网页内容。",
+      "",
+      "是否允许 Claude 获取此内容？",
+      ...optionLabels.map((label, index) => `${index + 1}. ${label}`),
+    ].join("\n"),
+    optionLabels,
+  };
 }
 
-function permissionBody(payload: ClaudeHookPayload): string {
+function permissionPrompt(payload: ClaudeHookPayload): PermissionPrompt {
   if (payload.tool_name === "WebFetch") {
-    return webFetchPermissionBody(payload);
+    return webFetchPermissionPrompt(payload);
   }
   const details = toolInputDetails(payload);
   const suggestions = permissionSuggestions(payload);
   const copy = permissionCopy(payload);
-  const choices = [
-    copy.question,
-    `1. ${copy.allowOnce}`,
-    ...suggestions.map((suggestion, index) =>
-      permissionSuggestionText(payload, suggestion, index),
+  const optionLabels = [
+    copy.allowOnce,
+    ...suggestions.map((suggestion) =>
+      permissionSuggestionLabel(payload, suggestion),
     ),
-    `${suggestions.length + 2}. ${copy.deny}`,
+    copy.deny,
   ];
-  return [
-    copy.introduction,
-    "",
-    `工具：${payload.tool_name ?? "未知工具"}`,
-    ...(details.length > 0 ? details : ["参数：Claude Code 未提供操作详情"]),
-    "",
-    ...choices,
-  ].join("\n");
+  return {
+    body: [
+      copy.introduction,
+      "",
+      `工具：${payload.tool_name ?? "未知工具"}`,
+      ...(details.length > 0
+        ? details
+        : ["参数：Claude Code 未提供操作详情"]),
+      "",
+      copy.question,
+      ...optionLabels.map((label, index) => `${index + 1}. ${label}`),
+    ].join("\n"),
+    optionLabels,
+  };
 }
 
 function questionBody(payload: ClaudeHookPayload): {
@@ -476,14 +493,16 @@ export function attentionFromClaudeHook(
   }
 
   if (payload.hook_event_name === "PermissionRequest") {
+    const prompt = permissionPrompt(payload);
     return {
       ...baseAttention(
         event,
         "permission",
         "Claude Code 需要权限确认",
-        permissionBody(payload),
+        prompt.body,
         "menu",
       ),
+      permissionOptionLabels: prompt.optionLabels,
       permissionSuggestionCount: permissionSuggestions(payload).length,
     };
   }

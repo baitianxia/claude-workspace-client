@@ -34,6 +34,7 @@ export interface RemoteAttention {
   supportsMultipleSelection?: boolean;
   questionSelectionModes?: Array<"single" | "multiple">;
   questionOptionLabels?: string[][];
+  permissionOptionLabels?: string[];
   permissionSuggestionCount?: number;
 }
 
@@ -87,6 +88,7 @@ function attentionFingerprint(attention: RemoteAttention): string {
     attention.supportsMultipleSelection ? "multiple" : "single",
     JSON.stringify(attention.questionSelectionModes ?? []),
     JSON.stringify(attention.questionOptionLabels ?? []),
+    JSON.stringify(attention.permissionOptionLabels ?? []),
     attention.permissionSuggestionCount ?? 0,
   ].join("\u0000");
 }
@@ -138,6 +140,44 @@ function multipleMenuSelectionInput(selections: number[]): string {
     currentSelection = selection;
   }
   return `${input}${TERMINAL_ENTER}`;
+}
+
+function normalizedChoiceText(value: string): string {
+  return normalizedReplyText(value)
+    .replace(/\s*[（(]\s*esc\s*[）)]\s*$/iu, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/[\s.。!！?？:：;；'"“”‘’（）()\[\]【】]/gu, "");
+}
+
+function menuSelectionForText(value: string, labels: string[]): number | null {
+  const candidate = normalizedChoiceText(value);
+  const index = labels.findIndex(
+    (label) => normalizedChoiceText(label) === candidate,
+  );
+  return index >= 0 ? index + 1 : null;
+}
+
+function questionSelections(
+  answer: string,
+  labels: string[],
+): number[] | null {
+  const wholeLabelSelection = menuSelectionForText(answer, labels);
+  if (wholeLabelSelection !== null) {
+    return [wholeLabelSelection];
+  }
+  const values = answer.split(/\s*[,，]\s*/u);
+  const selections = values.map((value) => {
+    if (/^[1-9][0-9]*$/u.test(value)) {
+      return Number(value);
+    }
+    return menuSelectionForText(value, labels);
+  });
+  return selections.every(
+    (selection): selection is number =>
+      selection !== null && selection >= 1 && selection <= labels.length,
+  )
+    ? selections
+    : null;
 }
 
 export class RemoteReplyRouter {
@@ -343,7 +383,13 @@ export function terminalActionForRemoteReply(
       Math.floor(pending.permissionSuggestionCount ?? 0),
     );
     const denySelection = String(suggestionCount + 2);
-    if (
+    const labelSelection = menuSelectionForText(
+      normalized,
+      pending.permissionOptionLabels ?? [],
+    );
+    if (labelSelection !== null) {
+      selection = String(labelSelection);
+    } else if (
       [
         "允许",
         "允许本次",
@@ -393,6 +439,28 @@ export function terminalActionForRemoteReply(
   const questionLabels = pending.questionOptionLabels ?? [];
   const firstOptionCount = questionLabels[0]?.length ?? 0;
   if (pending.kind === "question" && questionModes.length > 0) {
+    const normalizedQuestionChoice = normalizedChoiceText(normalized);
+    const matchesRegularOption =
+      menuSelectionForText(normalized, questionLabels[0] ?? []) !== null;
+    if (
+      !matchesRegularOption &&
+      [
+        "输入其他回答",
+        "输入其他回答typesomething",
+        "typesomething",
+      ].includes(normalizedQuestionChoice)
+    ) {
+      selection = String(firstOptionCount + 1);
+    } else if (
+      !matchesRegularOption &&
+      [
+        "与claude讨论这个问题",
+        "与claude讨论这个问题chataboutthis",
+        "chataboutthis",
+      ].includes(normalizedQuestionChoice)
+    ) {
+      selection = String(firstOptionCount + 2);
+    }
     const numericSelection = Number(selection);
     if (Number.isInteger(numericSelection)) {
       if (numericSelection === firstOptionCount + 1) {
@@ -419,32 +487,19 @@ export function terminalActionForRemoteReply(
     if (answers.length === questionModes.length) {
       const encoded = answers.map((answer, index) => {
         const labels = questionLabels[index] ?? [];
-        const labelIndex = labels.findIndex(
-          (label) =>
-            label.toLocaleLowerCase("en-US") ===
-            answer.toLocaleLowerCase("en-US"),
-        );
-        const answerSelection =
-          labelIndex >= 0 ? String(labelIndex + 1) : answer;
+        const answerSelections = questionSelections(answer, labels);
         if (
           questionModes[index] === "single" &&
-          /^[1-9]$/u.test(answerSelection) &&
-          Number(answerSelection) <= labels.length
+          answerSelections?.length === 1
         ) {
-          return singleMenuSelectionInput(Number(answerSelection));
+          return singleMenuSelectionInput(answerSelections[0]);
         }
         if (
           questionModes[index] === "multiple" &&
-          /^[1-9](?:\s*[,，]\s*[1-9])*$/u.test(answerSelection) &&
-          answerSelection
-            .split(/\s*[,，]\s*/u)
-            .every((value) => Number(value) <= labels.length)
+          answerSelections &&
+          answerSelections.length > 0
         ) {
-          return multipleMenuSelectionInput(
-            answerSelection
-              .split(/\s*[,，]\s*/u)
-              .map((value) => Number(value)),
-          );
+          return multipleMenuSelectionInput(answerSelections);
         }
         return null;
       });
@@ -459,39 +514,23 @@ export function terminalActionForRemoteReply(
 
   if (pending.kind === "question" && questionModes.length === 1) {
     const labels = questionLabels[0] ?? [];
-    const labelIndex = labels.findIndex(
-      (label) =>
-        label.toLocaleLowerCase("en-US") === normalizedAlias,
-    );
-    if (labelIndex >= 0) {
-      selection = String(labelIndex + 1);
-    }
+    const answerSelections = questionSelections(selection, labels);
     if (questionModes[0] === "single") {
-      const numericSelection = Number(selection);
-      if (
-        Number.isInteger(numericSelection) &&
-        numericSelection >= 1 &&
-        numericSelection <= labels.length
-      ) {
-        return { input: singleMenuSelectionInput(numericSelection) };
+      if (answerSelections?.length === 1) {
+        return { input: singleMenuSelectionInput(answerSelections[0]) };
       }
       throw new Error(
         `问题回复无效。请回复 1-${labels.length + 2} 的选项编号，或直接回复选项文字。`,
       );
     }
-    if (
-      /^[1-9](?:\s*[,，]\s*[1-9])*$/u.test(selection) &&
-      selection
-        .split(/\s*[,，]\s*/u)
-        .every((value) => Number(value) <= labels.length)
-    ) {
+    if (answerSelections && answerSelections.length > 0) {
       return {
-        input: multipleMenuSelectionInput(
-          selection.split(/\s*[,，]\s*/u).map((value) => Number(value)),
-        ),
+        input: multipleMenuSelectionInput(answerSelections),
       };
     }
-    throw new Error("多选问题回复无效，请使用逗号分隔通知中的选项编号。");
+    throw new Error(
+      "多选问题回复无效，请使用逗号分隔通知中的选项编号或完整选项文字。",
+    );
   }
 
   // A numeric reply is not proof that Claude is showing a menu. Only Hook
@@ -510,6 +549,11 @@ export function terminalActionForRemoteReply(
         selection.split(/\s*[,，]\s*/u).map((value) => Number(value)),
       ),
     };
+  }
+  if (pending.inputMode === "menu") {
+    throw new Error(
+      "菜单回复无效，请回复通知中的选项编号或支持的完整选项文字。",
+    );
   }
   return { input: `${normalized}\r` };
 }

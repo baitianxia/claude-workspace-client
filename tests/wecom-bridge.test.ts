@@ -299,7 +299,7 @@ describe("WeComBridge", () => {
       "message",
       incomingMixedMessage(
         "message-2",
-        "1",
+        "允许",
         callbackUserId,
         markdownContent(client.sent[1].body),
       ),
