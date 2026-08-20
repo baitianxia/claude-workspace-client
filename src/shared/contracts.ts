@@ -38,6 +38,13 @@ export type WeComConnectionStatus =
   | "connected"
   | "error";
 
+export type WeComInboundStatus =
+  | "received"
+  | "routed"
+  | "rejected"
+  | "ignored"
+  | "failed";
+
 export interface WeComState {
   enabled: boolean;
   configured: boolean;
@@ -46,6 +53,9 @@ export interface WeComState {
   targetUserId: string;
   status: WeComConnectionStatus;
   error?: string;
+  lastInboundAt?: number;
+  lastInboundStatus?: WeComInboundStatus;
+  lastInboundDetail?: string;
 }
 
 export interface AppSnapshot {

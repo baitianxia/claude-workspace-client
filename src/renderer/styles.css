@@ -124,8 +124,24 @@ button:focus-visible {
 
 .runtime-heading span:not(.status-dot) {
   margin-top: 2px;
+  overflow: hidden;
   color: #807a72;
   font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-heading .wecom-inbound-status--routed {
+  color: #91a96d;
+}
+
+.runtime-heading .wecom-inbound-status--rejected,
+.runtime-heading .wecom-inbound-status--ignored {
+  color: #d3a254;
+}
+
+.runtime-heading .wecom-inbound-status--failed {
+  color: #c36b5f;
 }
 
 .status-dot,

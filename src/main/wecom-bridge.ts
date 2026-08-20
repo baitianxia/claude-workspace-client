@@ -2,14 +2,16 @@ import { EventEmitter } from "node:events";
 import {
   generateReqId,
   WSClient,
+  type BaseMessage,
+  type EventMessage,
   type SendMsgBody,
-  type TextMessage,
   type WsFrame,
   type WsFrameHeaders,
 } from "@wecom/aibot-node-sdk";
 import type {
   ProjectRecord,
   SessionRecord,
+  WeComInboundStatus,
   WeComState,
 } from "../shared/contracts";
 import { attentionFromClaudeHook } from "./claude-attention";
@@ -43,8 +45,12 @@ export interface WeComClient {
   on(event: "reconnecting", listener: (attempt: number) => void): unknown;
   on(event: "error", listener: (error: Error) => void): unknown;
   on(
-    event: "message.text",
-    listener: (frame: WsFrame<TextMessage>) => void,
+    event: "message",
+    listener: (frame: WsFrame<BaseMessage>) => void,
+  ): unknown;
+  on(
+    event: "event.disconnected_event",
+    listener: (frame: WsFrame<EventMessage>) => void,
   ): unknown;
   sendMessage(chatId: string, body: SendMsgBody): Promise<unknown>;
   replyStream(
@@ -101,7 +107,7 @@ function truncateUtf8(value: string, maxBytes: number): string {
   return `${result}…`;
 }
 
-function quoteText(message: TextMessage): string {
+function quoteText(message: BaseMessage): string {
   const quote = message.quote;
   if (!quote) {
     return "";
@@ -123,6 +129,36 @@ function quoteText(message: TextMessage): string {
       .flatMap((item) => (item.text?.content ? [item.text.content] : []))
       .join("\n") ?? ""
   );
+}
+
+function incomingMessageText(message: BaseMessage): string {
+  const text = (message as BaseMessage & { text?: { content?: unknown } }).text
+    ?.content;
+  if (typeof text === "string") {
+    return text;
+  }
+  const voice = (
+    message as BaseMessage & { voice?: { content?: unknown } }
+  ).voice?.content;
+  if (typeof voice === "string") {
+    return voice;
+  }
+  const items = (
+    message as BaseMessage & {
+      mixed?: { msg_item?: Array<{ text?: { content?: unknown } }> };
+    }
+  ).mixed?.msg_item;
+  return (
+    items
+      ?.flatMap((item) =>
+        typeof item.text?.content === "string" ? [item.text.content] : [],
+      )
+      .join("\n") ?? ""
+  );
+}
+
+function isSupersededConnection(reason: string): boolean {
+  return /new connection (?:has been )?established/iu.test(reason);
 }
 
 function projectDisplayName(project: ProjectRecord | undefined): string {
@@ -203,6 +239,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
   private readonly sendingCodes = new Set<string>();
   private readonly processedMessageIds = new Set<string>();
   private authenticatedClient: WeComClient | null = null;
+  private supersededClient: WeComClient | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -236,6 +273,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.client?.disconnect();
     this.client = null;
     this.authenticatedClient = null;
+    this.supersededClient = null;
     this.clearRetry();
     this.configuration = { ...configuration, secret: undefined };
     this.router.clearAll();
@@ -336,6 +374,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.client?.disconnect();
     this.client = null;
     this.authenticatedClient = null;
+    this.supersededClient = null;
     this.clearRetry();
     this.router.clearAll();
     this.unsentCodes.clear();
@@ -371,6 +410,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         return;
       }
       this.authenticatedClient = client;
+      this.supersededClient = null;
       this.clearRetry();
       this.updateState({ ...this.state, status: "connected", error: undefined });
       void this.flushUnsent();
@@ -386,6 +426,19 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       if (this.client === client) {
         this.authenticatedClient = null;
         this.clearRetry();
+        if (
+          this.supersededClient === client ||
+          isSupersededConnection(reason)
+        ) {
+          this.supersededClient = client;
+          this.updateState({
+            ...this.state,
+            status: "error",
+            error:
+              "连接被其他客户端占用，请关闭使用相同 Bot ID/Secret 的客户端或改用独立机器人。",
+          });
+          return;
+        }
         this.updateState({
           ...this.state,
           status: "connecting",
@@ -400,23 +453,39 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         this.fail(`企业微信连接错误：${readableError(error)}`);
       }
     });
-    client.on("message.text", (frame) => {
+    client.on("event.disconnected_event", () => {
       if (this.client === client) {
-        void this.handleTextMessage(client, frame);
+        this.authenticatedClient = null;
+        this.supersededClient = client;
+        this.clearRetry();
+        this.updateState({
+          ...this.state,
+          status: "error",
+          error:
+            "连接被其他客户端占用，请关闭使用相同 Bot ID/Secret 的客户端或改用独立机器人。",
+        });
+      }
+    });
+    client.on("message", (frame) => {
+      if (this.client === client) {
+        void this.handleIncomingMessage(client, frame).catch((error: unknown) => {
+          if (this.client !== client) {
+            return;
+          }
+          const detail = `处理企业微信回复失败：${readableError(error)}`;
+          this.recordInbound("failed", detail);
+          void this.replyToMessage(client, frame, detail);
+        });
       }
     });
   }
 
-  private async handleTextMessage(
+  private async handleIncomingMessage(
     client: WeComClient,
-    frame: WsFrame<TextMessage>,
+    frame: WsFrame<BaseMessage>,
   ): Promise<void> {
     const message = frame.body;
-    if (
-      !message ||
-      message.chattype !== "single" ||
-      message.from?.userid !== this.configuration.targetUserId
-    ) {
+    if (!message) {
       return;
     }
     if (this.processedMessageIds.has(message.msgid)) {
@@ -429,12 +498,37 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         this.processedMessageIds.delete(oldest);
       }
     }
+
+    if (message.chattype !== "single") {
+      this.recordInbound("ignored", "收到群聊消息，已按安全策略忽略。");
+      return;
+    }
+    const senderUserId = message.from?.userid;
+    if (senderUserId !== this.configuration.targetUserId) {
+      this.recordInbound(
+        "ignored",
+        `收到 userid“${senderUserId || "未知"}”的回复，但当前配置为“${this.configuration.targetUserId}”，已忽略。`,
+      );
+      return;
+    }
+    const messageText = incomingMessageText(message);
+    if (!messageText.trim()) {
+      const detail = "收到消息，但其中没有可用于路由的文本。";
+      this.recordInbound("rejected", detail);
+      await this.replyToMessage(client, frame, detail);
+      return;
+    }
+    this.recordInbound(
+      "received",
+      "已收到企业微信回复，正在匹配 Claude Code 会话。",
+    );
     const resolved = this.router.resolve(
-      message.from.userid,
-      message.text?.content ?? "",
+      senderUserId,
+      messageText,
       quoteText(message),
     );
     if (resolved.status === "rejected") {
+      this.recordInbound("rejected", resolved.message);
       await this.replyToMessage(client, frame, resolved.message);
       return;
     }
@@ -447,10 +541,12 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       )
     ) {
       this.router.complete(pending.code);
+      const detail = `回复码 ${pending.code} 对应的 Claude Code 进程已经退出或重启，未发送任何输入。`;
+      this.recordInbound("rejected", detail);
       await this.replyToMessage(
         client,
         frame,
-        `回复码 ${pending.code} 对应的 Claude Code 进程已经退出或重启，未发送任何输入。`,
+        detail,
       );
       return;
     }
@@ -459,10 +555,13 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     try {
       input = terminalInputForRemoteReply(pending, resolved.reply);
     } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : "远程回复格式无效。";
+      this.recordInbound("rejected", detail);
       await this.replyToMessage(
         client,
         frame,
-        error instanceof Error ? error.message : "远程回复格式无效。",
+        detail,
       );
       return;
     }
@@ -472,28 +571,38 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     );
     if (!written) {
       this.router.complete(pending.code);
+      const detail = `回复码 ${pending.code} 对应的 Claude Code 进程已不可用，未发送任何输入。`;
+      this.recordInbound("failed", detail);
       await this.replyToMessage(
         client,
         frame,
-        `回复码 ${pending.code} 对应的 Claude Code 进程已不可用，未发送任何输入。`,
+        detail,
       );
       return;
     }
 
     this.router.complete(pending.code);
     this.unsentCodes.delete(pending.code);
-    await this.replyToMessage(
+    const detail = `已将回复码 ${pending.code} 的消息发送到对应 Claude Code 会话。`;
+    this.recordInbound("routed", detail);
+    const confirmed = await this.replyToMessage(
       client,
       frame,
-      `已将回复码 ${pending.code} 的消息发送到对应 Claude Code 会话。`,
+      detail,
     );
+    if (!confirmed) {
+      this.recordInbound(
+        "routed",
+        `${detail} 企业微信确认消息发送失败，请在客户端终端确认执行状态。`,
+      );
+    }
   }
 
   private async replyToMessage(
     client: WeComClient,
     frame: WsFrameHeaders,
     content: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await client.replyStream(
         frame,
@@ -501,9 +610,32 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         content,
         true,
       );
+      return true;
     } catch (error) {
       console.error("Failed to reply to WeCom message", error);
+      if (this.client !== client) {
+        return false;
+      }
+      try {
+        await client.sendMessage(this.configuration.targetUserId, {
+          msgtype: "markdown",
+          markdown: { content },
+        });
+        return true;
+      } catch (fallbackError) {
+        console.error("Failed to send WeCom reply fallback", fallbackError);
+        return false;
+      }
     }
+  }
+
+  private recordInbound(status: WeComInboundStatus, detail: string): void {
+    this.updateState({
+      ...this.state,
+      lastInboundAt: Date.now(),
+      lastInboundStatus: status,
+      lastInboundDetail: detail,
+    });
   }
 
   private async sendPending(pending: PendingRemoteReply): Promise<void> {

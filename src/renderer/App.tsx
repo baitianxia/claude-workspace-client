@@ -63,6 +63,19 @@ function wecomStatusLabel(state: AppSnapshot["wecom"]): string {
   }
 }
 
+function wecomInboundLabel(state: AppSnapshot["wecom"]): string | null {
+  if (!state.lastInboundAt || !state.lastInboundDetail) {
+    return null;
+  }
+  const time = new Date(state.lastInboundAt).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return `${time} · ${state.lastInboundDetail}`;
+}
+
 function upsertSession(
   sessions: SessionRecord[],
   replacement: SessionRecord,
@@ -947,6 +960,14 @@ export function App() {
               <span title={snapshot.wecom.error}>
                 {wecomStatusLabel(snapshot.wecom)}
               </span>
+              {wecomInboundLabel(snapshot.wecom) ? (
+                <span
+                  className={`wecom-inbound-status wecom-inbound-status--${snapshot.wecom.lastInboundStatus ?? "received"}`}
+                  title={snapshot.wecom.lastInboundDetail}
+                >
+                  {wecomInboundLabel(snapshot.wecom)}
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="runtime-actions">
@@ -1462,7 +1483,8 @@ export function App() {
               Secret 使用操作系统安全存储加密。每条待回复消息都有独立回复码，
               多个 Claude Code 进程同时等待时也会精确路由；引用机器人消息回复时
               无需重复输入回复码。启用后请新建或重启需要远程回复的 Claude Code
-              会话。
+              会话。同一组 Bot ID/Secret 同时只能连接一个客户端；多人使用时每个
+              客户端必须配置独立机器人。
             </div>
             <footer>
               <button

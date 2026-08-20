@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
 import type { IPty } from "node-pty";
 import { describe, expect, it, vi } from "vitest";
+import { EventType } from "@wecom/aibot-node-sdk";
 import type {
+  BaseMessage,
+  EventMessage,
   SendMsgBody,
   TextMessage,
   WsFrame,
@@ -128,6 +131,53 @@ function incomingMessage(
   };
 }
 
+function incomingMixedMessage(
+  msgid: string,
+  content: string,
+  userid = "zhangsan",
+  quotedContent?: string,
+): WsFrame<BaseMessage> {
+  return {
+    headers: { req_id: `request-${msgid}` },
+    body: {
+      msgid,
+      aibotid: "bot-id",
+      chattype: "single",
+      from: { userid },
+      msgtype: "mixed",
+      mixed: {
+        msg_item: [
+          { msgtype: "image", image: { url: "https://example.com/image" } },
+          { msgtype: "text", text: { content } },
+        ],
+      },
+      ...(quotedContent
+        ? {
+            quote: {
+              msgtype: "text" as const,
+              text: { content: quotedContent },
+            },
+          }
+        : {}),
+    },
+  };
+}
+
+function disconnectedEvent(): WsFrame<EventMessage> {
+  return {
+    headers: { req_id: "request-disconnected" },
+    body: {
+      msgid: "disconnected-event",
+      create_time: 1,
+      aibotid: "bot-id",
+      chattype: "single",
+      from: { userid: "zhangsan" },
+      msgtype: "event",
+      event: { eventtype: EventType.Disconnected },
+    },
+  };
+}
+
 function markdownContent(body: SendMsgBody): string {
   if (body.msgtype !== "markdown") {
     throw new Error("Expected a markdown message.");
@@ -240,8 +290,8 @@ describe("WeComBridge", () => {
     ]);
 
     client.emit(
-      "message.text",
-      incomingMessage(
+      "message",
+      incomingMixedMessage(
         "message-2",
         "1",
         "zhangsan",
@@ -251,7 +301,7 @@ describe("WeComBridge", () => {
     await vi.waitFor(() => expect(secondPty.writes).toEqual(["1\r"]));
     expect(firstPty.writes).toEqual([]);
 
-    client.emit("message.text", incomingMessage("message-1", `${firstCode} 2`));
+    client.emit("message", incomingMessage("message-1", `${firstCode} 2`));
     await vi.waitFor(() => expect(firstPty.writes).toEqual(["2\r"]));
     expect(secondPty.writes).toEqual(["1\r"]);
     expect(client.replies).toEqual([
@@ -303,18 +353,19 @@ describe("WeComBridge", () => {
     await vi.waitFor(() => expect(client.sent).toHaveLength(1));
 
     client.emit(
-      "message.text",
+      "message",
       incomingMessage("unauthorized", "ABCDE 1", "lisi"),
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(firstPty.writes).toEqual([]);
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "ignored",
+      lastInboundDetail: expect.stringContaining("lisi"),
+    });
 
     firstPty.emitExit(0);
     manager.restartSession(session.id);
-    client.emit(
-      "message.text",
-      incomingMessage("stale-reply", "ABCDE 1"),
-    );
+    client.emit("message", incomingMessage("stale-reply", "ABCDE 1"));
     bridge.handleClaudeHook(hook(session.id, launches[0], "stale command"));
     await vi.waitFor(() =>
       expect(client.replies).toContainEqual(
@@ -323,6 +374,43 @@ describe("WeComBridge", () => {
     );
     expect(client.sent).toHaveLength(1);
     expect(restartedPty.writes).toEqual([]);
+
+    bridge.dispose();
+  });
+
+  it("reports when another client takes over the same bot connection", () => {
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      vi.fn() as unknown as PtySpawner,
+      "win32",
+    );
+    const client = new FakeWeComClient();
+    const bridge = new WeComBridge(
+      manager,
+      () => [],
+      new RemoteReplyRouter(),
+      () => client as unknown as WeComClient,
+    );
+    bridge.configure({
+      enabled: true,
+      botId: "bot-id",
+      targetUserId: "zhangsan",
+      secret: "secret",
+      hasSecret: true,
+    });
+    client.emit("authenticated");
+    expect(bridge.getState().status).toBe("connected");
+
+    client.emit("event.disconnected_event", disconnectedEvent());
+    client.emit(
+      "disconnected",
+      "New connection established, server disconnected this connection",
+    );
+
+    expect(bridge.getState()).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("其他客户端占用"),
+    });
 
     bridge.dispose();
   });
