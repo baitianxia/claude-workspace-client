@@ -125,7 +125,7 @@ describe("RemoteReplyRouter", () => {
 
   it("encodes menu selections without leaking extra control characters", () => {
     const router = new RemoteReplyRouter(
-      codeGenerator("MENUA", "MENUB", "MENUC", "MENUD"),
+      codeGenerator("MENUA", "MENUB", "MENUC", "MENUD", "MENUE"),
     );
     const permissionWithoutSuggestion = router.register(
       "zhangsan",
@@ -154,20 +154,28 @@ describe("RemoteReplyRouter", () => {
       "zhangsan",
       attention("session-d", "launch-d"),
     ).pending;
+    const single = router.register(
+      "zhangsan",
+      attention("session-e", "launch-e", {
+        kind: "question",
+        expectsMenuSelection: true,
+      }),
+    ).pending;
 
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "允许")).toBe(
-      "1",
+      "1\r",
     );
     expect(terminalInputForRemoteReply(permissionWithoutSuggestion, "拒绝")).toBe(
-      "2",
+      "2\r",
     );
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "始终允许")).toBe(
-      "2",
+      "2\r",
     );
     expect(terminalInputForRemoteReply(permissionWithSuggestion, "拒绝")).toBe(
-      "3",
+      "3\r",
     );
     expect(terminalInputForRemoteReply(multiple, "1, 3")).toBe("13\r");
+    expect(terminalInputForRemoteReply(single, "2")).toBe("2\r");
     expect(() =>
       terminalInputForRemoteReply(
         permissionWithoutSuggestion,
@@ -194,6 +202,8 @@ describe("RemoteReplyRouter", () => {
       }),
     ).pending;
 
-    expect(terminalInputForRemoteReply(pending, "2;1,3;4")).toBe("213\r4");
+    expect(terminalInputForRemoteReply(pending, "2;1,3;4")).toBe(
+      "2\r13\r4\r",
+    );
   });
 });

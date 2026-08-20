@@ -219,12 +219,12 @@ describe("WeComBridge", () => {
     ]);
 
     client.emit("message.text", incomingMessage("message-2", `${secondCode} 1`));
-    await vi.waitFor(() => expect(secondPty.writes).toEqual(["1"]));
+    await vi.waitFor(() => expect(secondPty.writes).toEqual(["1\r"]));
     expect(firstPty.writes).toEqual([]);
 
     client.emit("message.text", incomingMessage("message-1", `${firstCode} 2`));
-    await vi.waitFor(() => expect(firstPty.writes).toEqual(["2"]));
-    expect(secondPty.writes).toEqual(["1"]);
+    await vi.waitFor(() => expect(firstPty.writes).toEqual(["2\r"]));
+    expect(secondPty.writes).toEqual(["1\r"]);
     expect(client.replies).toEqual([
       expect.stringContaining(secondCode),
       expect.stringContaining(firstCode),

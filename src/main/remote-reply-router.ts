@@ -300,7 +300,7 @@ export function terminalInputForRemoteReply(
     ) {
       throw new Error("权限回复无效，请回复通知中的选项编号或允许/拒绝。");
     }
-    return selection;
+    return `${selection}\r`;
   }
 
   const questionModes = pending.questionSelectionModes ?? [];
@@ -309,7 +309,7 @@ export function terminalInputForRemoteReply(
     if (answers.length === questionModes.length) {
       const encoded = answers.map((answer, index) => {
         if (questionModes[index] === "single" && /^[1-9]$/u.test(answer)) {
-          return answer;
+          return `${answer}\r`;
         }
         if (
           questionModes[index] === "multiple" &&
@@ -326,8 +326,7 @@ export function terminalInputForRemoteReply(
   }
 
   if (pending.expectsMenuSelection && /^[1-9]$/u.test(selection)) {
-    // Claude Code menus support numeric shortcuts and submit immediately.
-    return selection;
+    return `${selection}\r`;
   }
   if (
     pending.expectsMenuSelection &&
