@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const MAX_HOOK_BODY_BYTES = 256_000;
 
@@ -80,6 +84,7 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
   private readonly token = randomBytes(32).toString("base64url");
   private server: Server | null = null;
   private port: number | null = null;
+  private settingsDirectory: string | null = null;
 
   async start(): Promise<void> {
     if (this.server) {
@@ -128,15 +133,30 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
       server.close();
       throw new Error("无法获取 Claude Code Hook 服务端口。");
     }
+
+    let settingsDirectory: string;
+    try {
+      settingsDirectory = mkdtempSync(
+        join(tmpdir(), "claude-workspace-hooks-"),
+      );
+    } catch (error) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw new Error(
+        `无法创建 Claude Code Hook 配置目录：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     this.server = server;
     this.port = address.port;
+    this.settingsDirectory = settingsDirectory;
   }
 
   hookLaunchOptions(workspaceSessionId: string, launchId: string): {
     args: string[];
     env: NodeJS.ProcessEnv;
   } {
-    if (!this.port) {
+    if (!this.port || !this.settingsDirectory) {
       throw new Error("Claude Code Hook 服务尚未启动。");
     }
     const url =
@@ -174,20 +194,45 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
         ],
       },
     };
+    const settingsPath = join(
+      this.settingsDirectory,
+      `settings-${randomBytes(16).toString("hex")}.json`,
+    );
+    try {
+      writeFileSync(settingsPath, JSON.stringify(settings), {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+    } catch (error) {
+      throw new Error(
+        `无法写入 Claude Code Hook 配置：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
     return {
-      args: ["--settings", JSON.stringify(settings)],
+      args: ["--settings", settingsPath],
       env: { CLAUDE_WORKSPACE_HOOK_TOKEN: this.token },
     };
   }
 
   async stop(): Promise<void> {
     const server = this.server;
+    const settingsDirectory = this.settingsDirectory;
     this.server = null;
     this.port = null;
-    if (!server) {
-      return;
+    this.settingsDirectory = null;
+    try {
+      if (server) {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    } finally {
+      if (settingsDirectory) {
+        await rm(settingsDirectory, { recursive: true, force: true });
+      }
     }
-    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 
   private async handleRequest(

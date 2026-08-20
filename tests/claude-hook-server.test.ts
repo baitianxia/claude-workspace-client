@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { readFile } from "node:fs/promises";
 import { request } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -46,7 +47,7 @@ describe("ClaudeHookServer", () => {
     await server.start();
 
     const launch = server.hookLaunchOptions("workspace-session", "launch-id");
-    const settings = JSON.parse(launch.args[1]) as {
+    const settings = JSON.parse(await readFile(launch.args[1], "utf8")) as {
       hooks: {
         PermissionRequest: Array<{
           hooks: Array<{ url: string; headers: { Authorization: string } }>;
@@ -56,6 +57,7 @@ describe("ClaudeHookServer", () => {
       };
     };
     expect(launch.args[0]).toBe("--settings");
+    expect(launch.args[1]).toMatch(/settings-[a-f0-9]{32}\.json$/u);
     expect(settings.hooks.PreToolUse[0].matcher).toContain("AskUserQuestion");
     expect(settings.hooks.Notification[0].matcher).toContain("idle_prompt");
     expect(settings.hooks.Notification[0].matcher).toContain(
@@ -94,7 +96,7 @@ describe("ClaudeHookServer", () => {
     servers.push(server);
     await server.start();
     const launch = server.hookLaunchOptions("workspace-session", "launch-id");
-    const settings = JSON.parse(launch.args[1]) as {
+    const settings = JSON.parse(await readFile(launch.args[1], "utf8")) as {
       hooks: {
         PermissionRequest: Array<{ hooks: Array<{ url: string }> }>;
       };
@@ -109,5 +111,21 @@ describe("ClaudeHookServer", () => {
         hook_event_name: "Notification",
       }),
     ).toBe(404);
+  });
+
+  it("removes generated settings files when the hook server stops", async () => {
+    const server = new ClaudeHookServer();
+    servers.push(server);
+    await server.start();
+    const settingsPath = server.hookLaunchOptions(
+      "workspace-session",
+      "launch-id",
+    ).args[1];
+
+    await server.stop();
+
+    await expect(readFile(settingsPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });
