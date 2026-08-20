@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 
 const DEFAULT_PENDING_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const ROUTE_CODE_LENGTH = 8;
 
 export type RemoteAttentionKind =
   | "permission"
@@ -48,7 +49,7 @@ export type ResolveRemoteReplyResult =
     };
 
 function defaultCodeGenerator(): string {
-  const bytes = randomBytes(5);
+  const bytes = randomBytes(ROUTE_CODE_LENGTH);
   let result = "";
   for (const byte of bytes) {
     result += ROUTE_CODE_ALPHABET[byte % ROUTE_CODE_ALPHABET.length];
@@ -77,14 +78,16 @@ function normalizedReplyText(value: string): string {
 }
 
 function routeCodeAtStart(value: string): string | null {
-  const match = /^(?:#|\[|`)?([A-Z2-9]{5})(?=$|[\s\]`：:])/iu.exec(value);
+  const match = /^(?:#|\[|`)?([A-Z2-9]{5,8})(?=$|[\s\]`：:])/iu.exec(
+    value,
+  );
   return match?.[1].toUpperCase() ?? null;
 }
 
 function routeCodesFromQuotedNotification(value: string): string[] {
   return [
     ...value.matchAll(
-      /回复码\s*[：:]\s*(?:#|\[|`)?([A-Z2-9]{5})(?=$|[\s\]`：:])/giu,
+      /回复码\s*[：:]\s*(?:#|\[|`)?([A-Z2-9]{5,8})(?=$|[\s\]`：:])/giu,
     ),
   ].map((match) => match[1].toUpperCase());
 }
@@ -229,7 +232,7 @@ export class RemoteReplyRouter {
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const candidate = this.codeGenerator().trim().toUpperCase();
       if (
-        /^[A-Z2-9]{5}$/u.test(candidate) &&
+        /^[A-Z2-9]{5,8}$/u.test(candidate) &&
         !this.pendingByCode.has(candidate)
       ) {
         return candidate;

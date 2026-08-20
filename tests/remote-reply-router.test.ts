@@ -28,6 +28,15 @@ function codeGenerator(...codes: string[]): () => string {
 }
 
 describe("RemoteReplyRouter", () => {
+  it("generates an eight-character route code for production replies", () => {
+    const result = new RemoteReplyRouter().register(
+      "zhangsan",
+      attention("session-a", "launch-a"),
+    );
+
+    expect(result.pending.code).toMatch(/^[A-Z2-9]{8}$/u);
+  });
+
   it("routes simultaneous replies only by explicit unique code", () => {
     const router = new RemoteReplyRouter(
       codeGenerator("AAAAA", "BBBBB"),

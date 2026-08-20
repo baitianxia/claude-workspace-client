@@ -288,26 +288,56 @@ describe("WeComBridge", () => {
       "zhangsan",
       "zhangsan",
     ]);
+    const callbackUserId = "wohR_KCgAAVrFf3pjqdWOLHCn12fH5nw";
 
     client.emit(
       "message",
       incomingMixedMessage(
         "message-2",
         "1",
-        "zhangsan",
+        callbackUserId,
         markdownContent(client.sent[1].body),
       ),
     );
     await vi.waitFor(() => expect(secondPty.writes).toEqual(["1\r"]));
     expect(firstPty.writes).toEqual([]);
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "routed",
+      lastInboundDetail: expect.stringContaining(callbackUserId),
+    });
 
-    client.emit("message", incomingMessage("message-1", `${firstCode} 2`));
+    client.emit(
+      "message",
+      incomingMessage("message-1", `${firstCode} 2`, callbackUserId),
+    );
     await vi.waitFor(() => expect(firstPty.writes).toEqual(["2\r"]));
     expect(secondPty.writes).toEqual(["1\r"]);
     expect(client.replies).toEqual([
       expect.stringContaining(secondCode),
       expect.stringContaining(firstCode),
     ]);
+
+    bridge.handleClaudeHook(
+      hook(first.id, launchIds.get(first.id)!, "npm test -- third"),
+    );
+    await vi.waitFor(() => expect(client.sent).toHaveLength(3));
+    const thirdCode = routeCode(markdownContent(client.sent[2].body));
+    client.emit(
+      "message",
+      incomingMessage("other-user", `${thirdCode} 1`, "lisi"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(firstPty.writes).toEqual(["2\r"]);
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "ignored",
+      lastInboundDetail: expect.stringContaining("未绑定 userid"),
+    });
+
+    client.emit(
+      "message",
+      incomingMessage("bound-user", `${thirdCode} 1`, callbackUserId),
+    );
+    await vi.waitFor(() => expect(firstPty.writes).toEqual(["2\r", "1\r"]));
 
     bridge.dispose();
   });
@@ -354,7 +384,7 @@ describe("WeComBridge", () => {
 
     client.emit(
       "message",
-      incomingMessage("unauthorized", "ABCDE 1", "lisi"),
+      incomingMessage("unauthorized", "ZZZZZ 1", "lisi"),
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(firstPty.writes).toEqual([]);
