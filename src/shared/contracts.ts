@@ -76,6 +76,51 @@ export interface TerminalSnapshot {
   lastSequence: number;
 }
 
+export type WorkspaceFileStatus =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "untracked"
+  | "conflicted";
+
+export interface WorkspaceFileChange {
+  path: string;
+  previousPath?: string;
+  status: WorkspaceFileStatus;
+  staged: boolean;
+  unstaged: boolean;
+}
+
+export interface WorkspaceChangesSnapshot {
+  isGitRepository: boolean;
+  files: WorkspaceFileChange[];
+  truncated: boolean;
+}
+
+export type WorkspaceFileViewMode = "latest" | "diff";
+
+export interface ReadWorkspaceFileRequest {
+  projectId: string;
+  path: string;
+  mode: WorkspaceFileViewMode;
+}
+
+export type WorkspaceFileContentKind =
+  | "text"
+  | "binary"
+  | "deleted"
+  | "too-large";
+
+export interface WorkspaceFileContent {
+  path: string;
+  mode: WorkspaceFileViewMode;
+  kind: WorkspaceFileContentKind;
+  content: string;
+  size?: number;
+}
+
 export interface SessionChangedEvent {
   session: SessionRecord;
 }
@@ -150,6 +195,10 @@ export interface DesktopApi {
   writeTerminal(request: WriteTerminalRequest): void;
   resizeTerminal(request: ResizeTerminalRequest): void;
   getTerminalSnapshot(sessionId: string): Promise<TerminalSnapshot>;
+  listWorkspaceChanges(projectId: string): Promise<WorkspaceChangesSnapshot>;
+  readWorkspaceFile(
+    request: ReadWorkspaceFileRequest,
+  ): Promise<WorkspaceFileContent>;
   onTerminalData(listener: (event: TerminalDataEvent) => void): () => void;
   onSessionChanged(listener: (event: SessionChangedEvent) => void): () => void;
   onWeComStateChanged(

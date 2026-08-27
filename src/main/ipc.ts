@@ -8,6 +8,7 @@ import {
 import type {
   AppSnapshot,
   CreateSessionRequest,
+  ReadWorkspaceFileRequest,
   RenameSessionRequest,
   ResizeTerminalRequest,
   SessionNotificationRequest,
@@ -24,6 +25,7 @@ import type { SessionManager } from "./session-manager";
 import type { TemporaryWorkspace } from "./temporary-workspace";
 import type { WeComBridge } from "./wecom-bridge";
 import type { WeComSettingsService } from "./wecom-settings";
+import { WorkspaceFiles } from "./workspace-files";
 
 const MAX_CLIPBOARD_PASTE_LENGTH = 100_000;
 const MAX_CLIPBOARD_COPY_LENGTH = 2_000_000;
@@ -81,6 +83,7 @@ export function registerIpcHandlers(options: {
     wecomBridge,
     wecomSettingsService,
   } = options;
+  const workspaceFiles = new WorkspaceFiles();
 
   const getSnapshot = (): AppSnapshot => ({
     projects: projectStore.listProjects(),
@@ -300,6 +303,41 @@ export function registerIpcHandlers(options: {
       sessionManager.getTerminalSnapshot(
         requireIdentifier(sessionId, "Session ID"),
       ),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.listWorkspaceChanges,
+    (_event, projectId: unknown) => {
+      const project = projectStore.getProject(
+        requireIdentifier(projectId, "Project ID"),
+      );
+      if (!project) {
+        throw new Error("工程不存在，请重新选择目录。");
+      }
+      return workspaceFiles.list(project.rootPath);
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.readWorkspaceFile,
+    (_event, request: ReadWorkspaceFileRequest) => {
+      if (!request || typeof request !== "object") {
+        throw new Error("文件读取请求无效。");
+      }
+      const project = projectStore.getProject(
+        requireIdentifier(request.projectId, "Project ID"),
+      );
+      if (!project) {
+        throw new Error("工程不存在，请重新选择目录。");
+      }
+      if (typeof request.path !== "string") {
+        throw new Error("文件路径无效。");
+      }
+      if (request.mode !== "latest" && request.mode !== "diff") {
+        throw new Error("不支持的文件查看方式。");
+      }
+      return workspaceFiles.read(project.rootPath, request.path, request.mode);
+    },
   );
 
   ipcMain.on(

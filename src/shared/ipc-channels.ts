@@ -17,6 +17,8 @@ export const IPC_CHANNELS = {
   writeTerminal: "workspace:write-terminal",
   resizeTerminal: "workspace:resize-terminal",
   getTerminalSnapshot: "workspace:get-terminal-snapshot",
+  listWorkspaceChanges: "workspace:list-changes",
+  readWorkspaceFile: "workspace:read-file",
   terminalData: "workspace:terminal-data",
   sessionChanged: "workspace:session-changed",
   wecomStateChanged: "workspace:wecom-state-changed",

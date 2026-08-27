@@ -29,6 +29,8 @@ const IPC_CHANNELS: IpcChannelMap = {
   writeTerminal: "workspace:write-terminal",
   resizeTerminal: "workspace:resize-terminal",
   getTerminalSnapshot: "workspace:get-terminal-snapshot",
+  listWorkspaceChanges: "workspace:list-changes",
+  readWorkspaceFile: "workspace:read-file",
   terminalData: "workspace:terminal-data",
   sessionChanged: "workspace:session-changed",
   wecomStateChanged: "workspace:wecom-state-changed",
@@ -70,6 +72,10 @@ const api: DesktopApi = {
     ipcRenderer.send(IPC_CHANNELS.resizeTerminal, request),
   getTerminalSnapshot: (sessionId) =>
     ipcRenderer.invoke(IPC_CHANNELS.getTerminalSnapshot, sessionId),
+  listWorkspaceChanges: (projectId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.listWorkspaceChanges, projectId),
+  readWorkspaceFile: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.readWorkspaceFile, request),
   onTerminalData: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: TerminalDataEvent) =>
       listener(payload);

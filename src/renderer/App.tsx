@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -18,6 +20,11 @@ import {
   projectDisplayName,
   type WorkspaceSearchItem,
 } from "./workspace-search";
+
+const WorkspaceChangesPanel = lazy(async () => {
+  const module = await import("./WorkspaceChangesPanel");
+  return { default: module.WorkspaceChangesPanel };
+});
 
 function readableError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -164,6 +171,7 @@ export function App() {
   const [wecomBotIdDraft, setWeComBotIdDraft] = useState("");
   const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
   const [wecomSecretDraft, setWeComSecretDraft] = useState("");
+  const [changesPanelOpen, setChangesPanelOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
@@ -175,6 +183,12 @@ export function App() {
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    if (activeProjectId === null) {
+      setChangesPanelOpen(false);
+    }
+  }, [activeProjectId]);
 
   useEffect(() => {
     snapshotRef.current = snapshot;
@@ -1257,6 +1271,17 @@ export function App() {
                 </p>
               </div>
               <div className="toolbar-actions">
+                {activeProject ? (
+                  <button
+                    className={`toolbar-changes-button ${changesPanelOpen ? "toolbar-changes-button--active" : ""}`}
+                    type="button"
+                    aria-expanded={changesPanelOpen}
+                    onClick={() => setChangesPanelOpen((open) => !open)}
+                  >
+                    <span aria-hidden="true">{`{ }`}</span>
+                    修改文件
+                  </button>
+                ) : null}
                 <button
                   className="toolbar-rename-button"
                   type="button"
@@ -1334,6 +1359,14 @@ export function App() {
             >
               启动 Claude Code
             </button>
+            <button
+              className="text-button"
+              type="button"
+              aria-expanded={changesPanelOpen}
+              onClick={() => setChangesPanelOpen(true)}
+            >
+              查看修改文件
+            </button>
             {!snapshot.claudeExecutable.path ? (
               <button
                 className="text-button"
@@ -1387,6 +1420,17 @@ export function App() {
               ×
             </button>
           </div>
+        ) : null}
+        {changesPanelOpen && activeProject ? (
+          <Suspense
+            fallback={<div className="changes-panel changes-panel--loading">正在加载文件视图…</div>}
+          >
+            <WorkspaceChangesPanel
+              key={activeProject.id}
+              project={activeProject}
+              onClose={() => setChangesPanelOpen(false)}
+            />
+          </Suspense>
         ) : null}
       </section>
       {quickSwitcherOpen ? (

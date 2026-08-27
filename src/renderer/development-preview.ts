@@ -5,6 +5,7 @@ import type {
   SessionRecord,
   TerminalDataEvent,
   WeComStateChangedEvent,
+  WorkspaceFileContent,
 } from "../shared/contracts";
 
 const now = Date.now();
@@ -92,6 +93,95 @@ const previewSnapshot: AppSnapshot = {
     botId: "",
     targetUserId: "",
     status: "disabled",
+  },
+};
+
+const previewFileContents: Record<string, { latest: string; diff: string }> = {
+  "README.md": {
+    latest: `# 登录超时处理
+
+本次调整把会话续期和失败重试拆成两个明确步骤。
+
+| 状态 | 行为 |
+| --- | --- |
+| 即将过期 | 后台续期 |
+| 已失效 | 返回登录页 |
+
+\`\`\`mermaid
+flowchart LR
+  A[读取会话] --> B{是否过期}
+  B -- 否 --> C[继续请求]
+  B -- 是 --> D[刷新令牌]
+  D --> C
+\`\`\`
+
+> Mermaid 使用严格安全模式在本地渲染。
+`,
+    diff: `diff --git a/README.md b/README.md
+index 7741a3c..b11d5f1 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,8 @@
+ # 登录超时处理
+
+-会话过期后重新登录。
++本次调整把会话续期和失败重试拆成两个明确步骤。
++
++\`\`\`mermaid
++flowchart LR
++  A[读取会话] --> B{是否过期}
++\`\`\`
+`,
+  },
+  "src/auth/session.ts": {
+    latest: `export async function refreshSession(token: string) {
+  const response = await fetch("/api/session/refresh", {
+    method: "POST",
+    headers: { Authorization: \`Bearer \${token}\` },
+  });
+
+  if (!response.ok) {
+    throw new Error("Session refresh failed");
+  }
+  return response.json();
+}
+`,
+    diff: `diff --git a/src/auth/session.ts b/src/auth/session.ts
+index 30940bc..9a142d3 100644
+--- a/src/auth/session.ts
++++ b/src/auth/session.ts
+@@ -1,5 +1,11 @@
+ export async function refreshSession(token: string) {
+-  return fetch("/api/session/refresh");
++  const response = await fetch("/api/session/refresh", {
++    method: "POST",
++    headers: { Authorization: \`Bearer \${token}\` },
++  });
++  if (!response.ok) {
++    throw new Error("Session refresh failed");
++  }
++  return response.json();
+ }
+`,
+  },
+  "src/auth/session.test.ts": {
+    latest: `import { expect, it } from "vitest";
+
+it("refreshes an active session", async () => {
+  await expect(Promise.resolve("ok")).resolves.toBe("ok");
+});
+`,
+    diff: `diff --git a/src/auth/session.test.ts b/src/auth/session.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/auth/session.test.ts
+@@ -0,0 +1,5 @@
++import { expect, it } from "vitest";
++
++it("refreshes an active session", async () => {
++  await expect(Promise.resolve("ok")).resolves.toBe("ok");
++});
+`,
   },
 };
 
@@ -249,6 +339,47 @@ export function installDevelopmentPreview(): void {
       data: `\u001b[38;2;218;130;96mClaude Code\u001b[0m  ${sessionId}\r\n\r\n  Development interface preview\r\n`,
       lastSequence: 0,
     }),
+    listWorkspaceChanges: async (projectId) => ({
+      isGitRepository: true,
+      truncated: false,
+      files:
+        projectId === "mall-service"
+          ? [
+              {
+                path: "README.md",
+                status: "modified",
+                staged: false,
+                unstaged: true,
+              },
+              {
+                path: "src/auth/session.ts",
+                status: "modified",
+                staged: true,
+                unstaged: true,
+              },
+              {
+                path: "src/auth/session.test.ts",
+                status: "untracked",
+                staged: false,
+                unstaged: true,
+              },
+            ]
+          : [],
+    }),
+    readWorkspaceFile: async ({ path, mode }) => {
+      const file = previewFileContents[path];
+      if (!file) {
+        throw new Error("Preview file does not exist.");
+      }
+      const content: WorkspaceFileContent = {
+        path,
+        mode,
+        kind: "text",
+        content: file[mode],
+        size: new TextEncoder().encode(file[mode]).length,
+      };
+      return content;
+    },
     onTerminalData: (listener) => {
       terminalListeners.add(listener);
       return () => terminalListeners.delete(listener);
