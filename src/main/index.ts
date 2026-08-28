@@ -1,21 +1,113 @@
-import { app, BrowserWindow, dialog, safeStorage, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  safeStorage,
+  shell,
+  type MessageBoxOptions,
+} from "electron";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ClaudeLocator } from "./claude-locator";
-import { ClaudeHookServer } from "./claude-hook-server";
+import type { ClaudeHookEvent } from "./claude-hook-server";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
-import { SessionManager } from "./session-manager";
+import type { SessionHostClient } from "./session-host/client";
+import { connectSessionHost } from "./session-host/launcher";
 import { TemporaryWorkspace } from "./temporary-workspace";
 import { WeComBridge } from "./wecom-bridge";
 import { WeComSettingsService } from "./wecom-settings";
 
 let mainWindow: BrowserWindow | null = null;
-let sessionManager: SessionManager | null = null;
+let sessionHostClient: SessionHostClient | null = null;
 let removeIpcHandlers: (() => void) | null = null;
-let claudeHookServer: ClaudeHookServer | null = null;
 let wecomBridge: WeComBridge | null = null;
 let allowClose = false;
+let exitPromptOpen = false;
+let cleanupStarted = false;
+
+function runningSessionCount(): number {
+  return (
+    sessionHostClient
+      ?.listSessions()
+      .filter(
+        (session) =>
+          session.status === "running" || session.status === "starting",
+      ).length ?? 0
+  );
+}
+
+async function showExitChoice(window?: BrowserWindow): Promise<number> {
+  const count = runningSessionCount();
+  const options: MessageBoxOptions = {
+    type: "question",
+    title: "是否同时结束所有会话？",
+    message: `当前有 ${count} 个 Claude Code 会话正在运行。退出客户端时，是否同时结束这些会话？`,
+    detail:
+      "选择“仅退出客户端”后，会话会在后台继续运行；下次启动客户端时会自动重新连接。",
+    buttons: [
+      "仅退出客户端（会话继续运行）",
+      "退出并结束所有会话",
+      "取消",
+    ],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  };
+  const result = window
+    ? await dialog.showMessageBox(window, options)
+    : await dialog.showMessageBox(options);
+  return result.response;
+}
+
+async function requestApplicationExit(window?: BrowserWindow): Promise<void> {
+  if (exitPromptOpen) {
+    return;
+  }
+  if (!sessionHostClient?.hasRunningSessions()) {
+    allowClose = true;
+    app.quit();
+    return;
+  }
+  exitPromptOpen = true;
+  try {
+    const choice = await showExitChoice(window);
+    if (choice === 2) {
+      return;
+    }
+    if (choice === 1) {
+      await sessionHostClient.stopAll();
+    }
+    allowClose = true;
+    app.quit();
+  } catch (error) {
+    const options: MessageBoxOptions = {
+      type: "error",
+      title: "无法退出 Claude Workspace",
+      message: "处理后台会话时发生错误，客户端尚未退出。",
+      detail: error instanceof Error ? error.message : String(error),
+      buttons: ["确定"],
+      noLink: true,
+    };
+    if (window && !window.isDestroyed()) {
+      await dialog.showMessageBox(window, options);
+    } else {
+      await dialog.showMessageBox(options);
+    }
+  } finally {
+    exitPromptOpen = false;
+  }
+}
+
+function cleanupApplication(): void {
+  if (cleanupStarted) {
+    return;
+  }
+  cleanupStarted = true;
+  wecomBridge?.dispose();
+  removeIpcHandlers?.();
+  sessionHostClient?.close();
+}
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -75,25 +167,11 @@ function createWindow(): BrowserWindow {
     }, 500);
   });
   window.on("close", (event) => {
-    if (allowClose || !sessionManager?.hasRunningSessions()) {
+    if (allowClose || !sessionHostClient?.hasRunningSessions()) {
       return;
     }
-    const choice = dialog.showMessageBoxSync(window, {
-      type: "warning",
-      title: "仍有会话正在运行",
-      message: "关闭客户端会终止所有正在运行的 Claude Code 会话。",
-      detail: "Claude Code 会保存对话记录，之后仍可通过 /resume 恢复。",
-      buttons: ["取消", "关闭并终止会话"],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    });
-    if (choice === 0) {
-      event.preventDefault();
-      return;
-    }
-    allowClose = true;
-    sessionManager.dispose();
+    event.preventDefault();
+    void requestApplicationExit(window);
   });
 
   const developmentUrl = process.env.VITE_DEV_SERVER_URL;
@@ -114,45 +192,49 @@ async function startApplication(): Promise<void> {
 
   const claudeLocator = new ClaudeLocator(projectStore);
   await claudeLocator.initialize();
-  const hookServer = new ClaudeHookServer();
-  let hookAvailabilityError: string | undefined;
-  try {
-    await hookServer.start();
-    claudeHookServer = hookServer;
-  } catch (error) {
-    hookAvailabilityError = `无法启动本机 Claude Code Hook 服务：${
-      error instanceof Error ? error.message : String(error)
-    }`;
-    console.error(hookAvailabilityError);
-  }
-  sessionManager = new SessionManager(
-    () => claudeLocator.requireExecutable(),
-    undefined,
-    process.platform,
+  const { client } = await connectSessionHost({
+    userDataPath: app.getPath("userData"),
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    developmentExecutablePath: process.execPath,
+    developmentHostScriptPath: join(__dirname, "session-host/process.js"),
+  });
+  sessionHostClient = client;
+  const hostSnapshot = await client.initialize(
+    claudeLocator.getState().path,
     projectStore.listSessions(),
-    (sessionId, launchId) =>
-      claudeHookServer && wecomBridge?.shouldInjectClaudeHooks()
-        ? claudeHookServer.hookLaunchOptions(sessionId, launchId)
-        : { args: [] },
   );
-  await projectStore.replaceSessions(sessionManager.listSessions());
+  await projectStore.replaceSessions(hostSnapshot.sessions);
 
   wecomBridge = new WeComBridge(
-    sessionManager,
+    client,
     () => projectStore.listProjects(),
     undefined,
     undefined,
-    hookAvailabilityError,
+    hostSnapshot.hookAvailabilityError,
   );
+  const forwardClaudeHook = (event: ClaudeHookEvent) =>
+    wecomBridge?.handleClaudeHook(event);
+  client.once("disconnected", (error) => {
+    if (allowClose || cleanupStarted) {
+      return;
+    }
+    dialog.showErrorBox(
+      "Session Host 连接已中断",
+      error?.message ??
+        "后台会话服务已停止。正在运行的终端可能已经中断，请重新启动客户端确认会话状态。",
+    );
+  });
   const wecomSettingsService = new WeComSettingsService(
     projectStore,
     wecomBridge,
     safeStorage,
   );
   wecomSettingsService.initialize();
-  claudeHookServer?.on("hook", (event) =>
-    wecomBridge?.handleClaudeHook(event),
-  );
+  client.on("claudeHook", forwardClaudeHook);
+  for (const event of client.drainQueuedHooks()) {
+    forwardClaudeHook(event);
+  }
 
   mainWindow = createWindow();
   const temporaryWorkspace = new TemporaryWorkspace(
@@ -162,7 +244,9 @@ async function startApplication(): Promise<void> {
     window: mainWindow,
     projectStore,
     claudeLocator,
-    sessionManager,
+    sessionManager: client,
+    setSessionExecutable: (executablePath) =>
+      client.setExecutable(executablePath),
     temporaryWorkspace,
     wecomBridge,
     wecomSettingsService,
@@ -196,10 +280,14 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
+  if (!allowClose && sessionHostClient?.hasRunningSessions()) {
+    event.preventDefault();
+    void requestApplicationExit(
+      mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined,
+    );
+    return;
+  }
   allowClose = true;
-  wecomBridge?.dispose();
-  sessionManager?.dispose();
-  void claudeHookServer?.stop();
-  removeIpcHandlers?.();
+  cleanupApplication();
 });

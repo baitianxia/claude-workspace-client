@@ -216,7 +216,7 @@ export function TerminalView({ session, active }: TerminalViewProps) {
           {session.status === "failed"
             ? `启动失败：${session.error ?? "未知错误"}。可在右上角重启此会话。`
             : session.status === "interrupted"
-              ? "客户端上次关闭后，该会话已中断。可在右上角重启，并通过 /resume 恢复 Claude Code 对话。"
+              ? "后台会话进程上次未正常结束。可在右上角重启，并通过 /resume 恢复 Claude Code 对话。"
               : `会话已退出${session.exitCode === undefined ? "" : `（代码 ${session.exitCode}）`}。可在右上角重启此会话。`}
         </div>
       ) : null}

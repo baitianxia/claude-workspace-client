@@ -21,7 +21,7 @@ import {
   terminalActionForRemoteReply,
   type PendingRemoteReply,
 } from "./remote-reply-router";
-import type { SessionManager, SessionInputEvent } from "./session-manager";
+import type { SessionInputEvent, SessionRuntime } from "./session-runtime";
 
 export interface WeComRuntimeConfiguration {
   enabled: boolean;
@@ -298,7 +298,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
   private retryTimer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly sessionManager: SessionManager,
+    private readonly sessionManager: SessionRuntime,
     private readonly listProjects: () => ProjectRecord[],
     private readonly router = new RemoteReplyRouter(),
     private readonly clientFactory: WeComClientFactory = defaultClientFactory,
@@ -625,7 +625,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       await this.replyToMessage(client, frame, detail);
       return;
     }
-    const written = this.sessionManager.writeRemoteReply(
+    const written = await this.sessionManager.writeRemoteReply(
       pending.workspaceSessionId,
       action.input,
     );

@@ -14,12 +14,13 @@
     "build": "npm run clean && npm run build:main && npm run build:renderer",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
+    "prepare:session-host-runtime": "node scripts/prepare-session-host-runtime.mjs",
     "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "pack:win": "npm run build && npm run clean:release && electron-builder --win dir --x64",
-    "dist:win:zip": "npm run build && npm run clean:release && electron-builder --win zip --x64",
-    "dist:win": "npm run build && npm run clean:release && electron-builder --win nsis --x64"
+    "pack:win": "npm run build && npm run prepare:session-host-runtime && npm run clean:release && electron-builder --win dir --x64",
+    "dist:win:zip": "npm run build && npm run prepare:session-host-runtime && npm run clean:release && electron-builder --win zip --x64",
+    "dist:win": "npm run build && npm run prepare:session-host-runtime && npm run clean:release && electron-builder --win nsis --x64"
   },
   "build": {
     "appId": "com.local.claudeworkspace",
@@ -32,6 +33,12 @@
     "files": [
       "dist/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/session-host-runtime",
+        "to": "session-host"
+      }
     ],
     "directories": {
       "output": "release",
@@ -52,6 +59,7 @@
     "nsis": {
       "oneClick": false,
       "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "include": "build/installer.nsh",
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true

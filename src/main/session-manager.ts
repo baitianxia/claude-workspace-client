@@ -8,7 +8,19 @@ import type {
   TerminalSnapshot,
 } from "../shared/contracts";
 import { createClaudeLaunchSpec } from "./claude-executable";
+import type { SessionRuntime } from "./session-runtime";
+import type {
+  SessionInputEvent,
+  SessionRuntimeEvents,
+  SessionWorkspace,
+} from "./session-runtime";
 import { nextSessionTitle } from "./session-title";
+
+export type {
+  SessionInputEvent,
+  SessionRuntimeEvents as SessionManagerEvents,
+  SessionWorkspace,
+} from "./session-runtime";
 
 const MAX_TERMINAL_BUFFER_LENGTH = 2_000_000;
 
@@ -18,12 +30,6 @@ interface ManagedSession {
   launchId: string | null;
   terminalBuffer: string;
   sequence: number;
-}
-
-export interface SessionInputEvent {
-  sessionId: string;
-  source: "local" | "remote";
-  data: string;
 }
 
 export interface ClaudeSessionLaunchOptions {
@@ -36,22 +42,11 @@ export type ClaudeSessionLaunchOptionsProvider = (
   launchId: string,
 ) => ClaudeSessionLaunchOptions;
 
-export interface SessionManagerEvents {
-  data: [event: TerminalDataEvent];
-  changed: [session: SessionRecord];
-  input: [event: SessionInputEvent];
-}
-
 export type PtySpawner = (
   file: string,
   args: string[] | string,
   options: IPtyForkOptions,
 ) => IPty;
-
-export interface SessionWorkspace {
-  projectId: string | null;
-  cwd: string;
-}
 
 function stringEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
@@ -64,7 +59,7 @@ function stringEnvironment(environment: NodeJS.ProcessEnv): Record<string, strin
 function restoredTerminalMessage(record: SessionRecord): string {
   const stateMessage =
     record.status === "interrupted"
-      ? "客户端上次关闭时，这个会话仍在运行。原进程已经结束。"
+      ? "后台会话进程上次结束时，这个会话仍在运行。原进程已经中断。"
       : "这是上次保留的会话标签，终端内容不会写入本地配置。";
   return (
     `\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n` +
@@ -79,6 +74,20 @@ function restartingTerminalMessage(): string {
     "  正在原工作目录重新启动 Claude Code…\r\n" +
     "  如需恢复之前的 Claude Code 对话，请使用 /resume。\r\n\r\n"
   );
+}
+
+function requireSessionTitle(requestedTitle: string): string {
+  const title = requestedTitle.trim();
+  if (!title) {
+    throw new Error("会话名称不能为空。");
+  }
+  if ([...title].length > 80) {
+    throw new Error("会话名称不能超过 80 个字符。");
+  }
+  if (/\p{Cc}/u.test(title)) {
+    throw new Error("会话名称不能包含控制字符。");
+  }
+  return title;
 }
 
 export function describeClaudeSpawnError(error: unknown): string {
@@ -103,7 +112,10 @@ export function describeClaudeSpawnError(error: unknown): string {
   return message;
 }
 
-export class SessionManager extends EventEmitter<SessionManagerEvents> {
+export class SessionManager
+  extends EventEmitter<SessionRuntimeEvents>
+  implements SessionRuntime
+{
   private readonly sessions = new Map<string, ManagedSession>();
 
   constructor(
@@ -114,31 +126,21 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     private readonly getLaunchOptions?: ClaudeSessionLaunchOptionsProvider,
   ) {
     super();
-    for (const initial of initialSessions) {
-      if (this.sessions.has(initial.id)) {
-        continue;
-      }
-      const record: SessionRecord = {
-        ...initial,
-        status:
-          initial.status === "running" || initial.status === "starting"
-            ? "interrupted"
-            : initial.status,
-      };
-      this.sessions.set(record.id, {
-        record,
-        process: null,
-        launchId: null,
-        terminalBuffer: restoredTerminalMessage(record),
-        sequence: 0,
-      });
-    }
+    this.restoreInitialSessions(initialSessions);
   }
 
   listSessions(): SessionRecord[] {
     return [...this.sessions.values()]
       .map(({ record }) => ({ ...record }))
       .sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  /** Adopt records from the pre-Host workspace store on the first Host run. */
+  adoptInitialSessions(initialSessions: SessionRecord[]): void {
+    if (this.sessions.size > 0) {
+      throw new Error("Session Host already contains sessions.");
+    }
+    this.restoreInitialSessions(initialSessions);
   }
 
   createSession(
@@ -149,7 +151,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     const workspaceSessions = this.listSessions().filter(
       (session) => session.projectId === workspace.projectId,
     );
-    const title = requestedTitle?.trim() || nextSessionTitle(workspaceSessions);
+    const title = requestedTitle?.trim()
+      ? requireSessionTitle(requestedTitle)
+      : nextSessionTitle(workspaceSessions);
     const sessionId = randomUUID();
     const record: SessionRecord = {
       id: sessionId,
@@ -256,16 +260,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       throw new Error("会话不存在或已经关闭。");
     }
 
-    const title = requestedTitle.trim();
-    if (!title) {
-      throw new Error("会话名称不能为空。");
-    }
-    if ([...title].length > 80) {
-      throw new Error("会话名称不能超过 80 个字符。");
-    }
-    if (/\p{Cc}/u.test(title)) {
-      throw new Error("会话名称不能包含控制字符。");
-    }
+    const title = requireSessionTitle(requestedTitle);
 
     if (session.record.title !== title) {
       session.record.title = title;
@@ -287,6 +282,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return (
       session?.record.status === "running" && session.launchId === launchId
     );
+  }
+
+  getLaunchId(sessionId: string): string | null {
+    return this.sessions.get(sessionId)?.launchId ?? null;
   }
 
   private writeInput(
@@ -331,6 +330,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.process?.kill();
   }
 
+  stopAll(): void {
+    for (const session of this.sessions.values()) {
+      if (
+        session.record.status === "running" ||
+        session.record.status === "starting"
+      ) {
+        session.process?.kill();
+      }
+    }
+  }
+
   removeSession(sessionId: string): SessionRecord {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -357,7 +367,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   hasRunningSessions(): boolean {
     return [...this.sessions.values()].some(
-      (session) => session.record.status === "running",
+      (session) =>
+        session.record.status === "running" ||
+        session.record.status === "starting",
     );
   }
 
@@ -373,10 +385,28 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   }
 
   dispose(): void {
-    for (const session of this.sessions.values()) {
-      if (session.record.status === "running") {
-        session.process?.kill();
+    this.stopAll();
+  }
+
+  private restoreInitialSessions(initialSessions: SessionRecord[]): void {
+    for (const initial of initialSessions) {
+      if (this.sessions.has(initial.id)) {
+        continue;
       }
+      const record: SessionRecord = {
+        ...initial,
+        status:
+          initial.status === "running" || initial.status === "starting"
+            ? "interrupted"
+            : initial.status,
+      };
+      this.sessions.set(record.id, {
+        record,
+        process: null,
+        launchId: null,
+        terminalBuffer: restoredTerminalMessage(record),
+        sequence: 0,
+      });
     }
   }
 

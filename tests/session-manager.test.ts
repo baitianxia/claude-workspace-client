@@ -362,6 +362,10 @@ describe("SessionManager", () => {
     expect(() => manager.renameSession(created.id, "名".repeat(81))).toThrow(
       "不能超过 80 个字符",
     );
+    expect(() => manager.createSession(project(), "名".repeat(81))).toThrow(
+      "不能超过 80 个字符",
+    );
+    expect(manager.listSessions()).toHaveLength(1);
   });
 
   it("explains Windows error 193 as an invalid Claude Code executable", () => {

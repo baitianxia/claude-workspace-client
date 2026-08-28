@@ -21,7 +21,7 @@ import type {
 import { IPC_CHANNELS } from "../shared/ipc-channels";
 import type { ClaudeLocator } from "./claude-locator";
 import type { ProjectStore } from "./project-store";
-import type { SessionManager } from "./session-manager";
+import type { SessionRuntime } from "./session-runtime";
 import type { TemporaryWorkspace } from "./temporary-workspace";
 import type { WeComBridge } from "./wecom-bridge";
 import type { WeComSettingsService } from "./wecom-settings";
@@ -69,7 +69,8 @@ export function registerIpcHandlers(options: {
   window: BrowserWindow;
   projectStore: ProjectStore;
   claudeLocator: ClaudeLocator;
-  sessionManager: SessionManager;
+  sessionManager: SessionRuntime;
+  setSessionExecutable(executablePath: string | null): Promise<void>;
   temporaryWorkspace: TemporaryWorkspace;
   wecomBridge: WeComBridge;
   wecomSettingsService: WeComSettingsService;
@@ -79,6 +80,7 @@ export function registerIpcHandlers(options: {
     projectStore,
     claudeLocator,
     sessionManager,
+    setSessionExecutable,
     temporaryWorkspace,
     wecomBridge,
     wecomSettingsService,
@@ -135,7 +137,7 @@ export function registerIpcHandlers(options: {
     IPC_CHANNELS.removeProject,
     async (_event, projectId: unknown) => {
       const validatedId = requireIdentifier(projectId, "Project ID");
-      sessionManager.removeProjectSessions(validatedId);
+      await sessionManager.removeProjectSessions(validatedId);
       await projectStore.removeProject(validatedId);
     },
   );
@@ -159,12 +161,18 @@ export function registerIpcHandlers(options: {
     if (selection.canceled || selection.filePaths.length === 0) {
       return null;
     }
-    return claudeLocator.setCustomExecutable(selection.filePaths[0]);
+    const state = await claudeLocator.setCustomExecutable(
+      selection.filePaths[0],
+    );
+    await setSessionExecutable(state.path);
+    return state;
   });
 
-  ipcMain.handle(IPC_CHANNELS.autoDetectClaudeExecutable, () =>
-    claudeLocator.autoDetect(),
-  );
+  ipcMain.handle(IPC_CHANNELS.autoDetectClaudeExecutable, async () => {
+    const state = await claudeLocator.autoDetect();
+    await setSessionExecutable(state.path);
+    return state;
+  });
 
   ipcMain.handle(
     IPC_CHANNELS.updateWeComConfig,
@@ -199,7 +207,7 @@ export function registerIpcHandlers(options: {
       } else {
         throw new Error("Session scope is invalid.");
       }
-      const session = sessionManager.createSession(
+      const session = await sessionManager.createSession(
         { projectId, cwd },
         request.title,
       );
@@ -211,7 +219,7 @@ export function registerIpcHandlers(options: {
   ipcMain.handle(
     IPC_CHANNELS.restartSession,
     async (_event, sessionId: unknown) => {
-      const session = sessionManager.restartSession(
+      const session = await sessionManager.restartSession(
         requireIdentifier(sessionId, "Session ID"),
       );
       await projectStore.replaceSessions(sessionManager.listSessions());
@@ -229,7 +237,10 @@ export function registerIpcHandlers(options: {
       if (typeof request.title !== "string") {
         throw new Error("Session title is invalid.");
       }
-      const session = sessionManager.renameSession(sessionId, request.title);
+      const session = await sessionManager.renameSession(
+        sessionId,
+        request.title,
+      );
       await projectStore.replaceSessions(sessionManager.listSessions());
       return session;
     },
@@ -238,7 +249,7 @@ export function registerIpcHandlers(options: {
   ipcMain.handle(
     IPC_CHANNELS.removeSession,
     async (_event, sessionId: unknown) => {
-      const removed = sessionManager.removeSession(
+      const removed = await sessionManager.removeSession(
         requireIdentifier(sessionId, "Session ID"),
       );
       await projectStore.replaceSessions(sessionManager.listSessions());
@@ -253,9 +264,8 @@ export function registerIpcHandlers(options: {
 
   ipcMain.handle(
     IPC_CHANNELS.stopSession,
-    (_event, sessionId: unknown) => {
-      sessionManager.stop(requireIdentifier(sessionId, "Session ID"));
-    },
+    async (_event, sessionId: unknown) =>
+      sessionManager.stop(requireIdentifier(sessionId, "Session ID")),
   );
 
   ipcMain.handle(IPC_CHANNELS.readClipboardText, () =>

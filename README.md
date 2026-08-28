@@ -23,6 +23,7 @@ Claude Workspace 帮你在一个桌面窗口中组织多个工程和 Claude Code
 | 状态提醒 | 后台会话产生新输出时显示未读标记，结束或失败时发送系统通知 |
 | 修改文件查看 | 在右侧栏查看 Git 修改列表、相对 `HEAD` 的对比和磁盘最新内容；代码支持语法高亮，Markdown 支持 GFM 与 Mermaid |
 | 工作区整理 | 支持工程别名、置顶和折叠，会话标签与界面状态可跨应用重启保留 |
+| 后台会话 | 退出客户端时可选择让 Claude Code 会话继续运行，下次启动客户端自动重新连接 |
 | 企业微信协作 | Claude Code 等待授权、提问、计划确认或完成回复时，可推送消息并接收远程输入 |
 | 本地优先 | 项目文件不经过 Claude Workspace 云服务，企业微信 Secret 使用系统安全存储保护 |
 
@@ -53,6 +54,20 @@ claude
 > [!NOTE]
 > 当前程序未配置商业 Authenticode 代码签名证书，Windows SmartScreen 可能显示未知发布者提示。请确认压缩包来自可信的分发渠道。
 
+### 手动安装新版本
+
+当前版本不支持自动更新。安装新版或替换 ZIP 解压目录前，如果仍有会话运行：
+
+1. 关闭 Claude Workspace 客户端。
+2. 在“是否同时结束所有会话？”中选择“仅退出客户端（会话继续运行）”。
+3. 等客户端窗口完全退出后，运行新版安装包；如果使用 ZIP 版本，则完整解压到新目录，不要覆盖正在使用的旧目录。
+4. 启动新版客户端。客户端会连接用户目录中的 Session Host，并恢复原会话标签、运行状态和仍在内存中的终端内容。
+
+如果不再需要这些会话，关闭时选择“退出并结束所有会话”。安装器检测到客户端仍在运行时只会要求返回客户端处理，不会强制结束客户端或后台会话。
+
+> [!IMPORTANT]
+> 首次从不含 Session Host 的旧版本升级时，旧版本已经启动的 PTY 无法在进程之间转移，因此不能被新架构接管。安装本分支版本后新建或重启的会话，才具备后续跨客户端退出和手动升级继续运行的能力。
+
 ### 第一次使用
 
 1. 启动 Claude Workspace。左侧的 Claude Code 状态卡会自动查找本机 CLI。
@@ -78,6 +93,7 @@ Claude Workspace 会自动查找原生安装的 `claude.exe` 和 npm 安装产�
 | 粘贴到终端 | 按 `Ctrl+V` 或 `Ctrl+Shift+V` |
 | 中断终端命令 | 未选中文本时按 `Ctrl+C` |
 | 恢复对话 | 重启会话后，在 Claude Code 中使用 `/resume` |
+| 退出客户端 | 有运行中会话时，明确选择让会话继续运行、结束所有会话或取消退出 |
 | 查看修改文件 | 在工程会话工具栏点击“修改文件”；列表每 4 秒自动刷新，也可手动刷新 |
 
 从列表移除工程只会删除 Claude Workspace 中的记录，不会删除磁盘上的项目文件。删除临时会话会同时删除它的临时工作目录及其中的文件，应用会在执行前要求确认。
@@ -114,11 +130,13 @@ Claude Workspace 可以通过企业微信智能机器人的 WebSocket 长连接�
 ## 数据与安全
 
 - Claude Workspace 直接在所选目录中启动本机 Claude Code，不提供中转模型请求的云服务。
-- 工程列表、会话标签、Claude Code 路径和应用配置保存在 Electron 用户数据目录，Windows 默认位置为 `%APPDATA%\Claude Workspace\workspace.json`。
-- 终端输出只保留在当前应用进程的内存缓冲区，不写入 `workspace.json`。Claude Code 自身保存的历史可以通过 `/resume` 恢复。
+- 工程列表、会话镜像、Claude Code 路径和应用配置保存在 Electron 用户数据目录，Windows 默认位置为 `%APPDATA%\Claude Workspace\workspace.json`。
+- Session Host 的鉴权令牌、会话状态和独立运行时位于 `%APPDATA%\Claude Workspace\session-host`。运行时放在安装目录之外，因此替换客户端安装文件不会占用或终止它。
+- 终端输出只保留在 Session Host 的内存缓冲区，不写入 `workspace.json` 或 Host 状态文件。只要 Host 仍在运行，客户端退出再启动后可以取回缓冲；Host 退出、崩溃或系统重启后，应依赖 Claude Code 的 `/resume` 恢复对话。
 - 临时工作目录位于 `%APPDATA%\Claude Workspace\temporary-workspaces`，只有删除对应临时会话时才会被清理。
 - 企业微信 Secret 通过 Electron `safeStorage` 使用操作系统凭据保护能力加密后保存，不会以明文传给界面层。
-- Claude Code Hook 服务只监听 `127.0.0.1` 的随机端口，并要求每次应用启动时生成的 Bearer Token。
+- Claude Code Hook 服务只监听 `127.0.0.1` 的随机端口，并要求每次 Session Host 启动时生成的 Bearer Token。
+- 客户端与 Session Host 通过当前用户的命名管道通信，并使用保存在用户目录中的随机令牌鉴权；协议消息有大小上限。
 - 界面运行在启用沙箱和上下文隔离的 Renderer 中，只能通过受限 IPC 调用主进程能力，不能任意启动进程。
 - 界面不能直接读取磁盘或执行 Git。“修改文件”只能通过已保存的工程 ID 请求主进程，并且只能读取当前 Git 修改列表中的工程内相对路径；目录穿越、控制字符路径和伪造的未修改文件路径会被拒绝，符号链接也不会被跟随读取其目标内容。
 - 文件最新内容限制为 2 MB，单个 Git 对比输出限制为 3 MB；二进制文件不会作为文本解码。Markdown 原始 HTML 不会渲染，Mermaid 使用严格安全模式，单个图表代码块限制为 100,000 个字符。
@@ -126,11 +144,13 @@ Claude Workspace 可以通过企业微信智能机器人的 WebSocket 长连接�
 
 远程通知可能包含工作目录、工具名称与参数、问题选项、计划正文或 Claude Code 的实际回复，以便你判断如何处理。结构化参数中名称类似 `token`、`secret`、`password` 的值会被隐藏，但自然语言或命令中的凭据无法可靠自动识别。请限制机器人的可见范围，不要在提示词或命令中直接写入敏感信息。
 
+Session Host 的规范架构、生命周期和版本兼容约束见 [`docs/session-host.md`](docs/session-host.md)。
+
 ## 当前限制
 
 - 当前只提供 Windows x64 构建，尚未提供 Windows ARM64、macOS 或 Linux 发行版。
-- 关闭客户端会终止所有正在运行的本地 PTY 进程，企业微信长连接也会停止。
-- 会话标签会持久化，但终端输出不会跨应用重启保留；需要依赖 Claude Code 的 `/resume` 恢复对话。
+- 仅退出客户端时，本地 PTY 会由 Session Host 继续运行，但企业微信长连接会停止；客户端关闭期间不能立即接收或回复企业微信消息，Host 收到的 Claude Hook 事件会在下次连接时交给客户端处理。
+- Session Host 不是系统服务。Windows 注销、关机、Host 崩溃或用户主动结束 Host 进程都会中断 PTY；终端输出不落盘，不能跨这些边界恢复。
 - 多个会话可以指向同一个工程目录，因此也可能同时修改同一批文件；当前不会自动创建 Git worktree。
 - 修改文件侧栏依赖本机 `git`，只展示 Git 工作区状态；非 Git 工程、超过 2 MB 的文本文件和二进制文件不提供内容预览。
 - 企业微信远程回复依赖支持 HTTP Hooks 的 Claude Code 版本。如果组织策略限制 `allowedHttpHookUrls`，管理员需要允许客户端生成的本机 `127.0.0.1` Hook 地址。
