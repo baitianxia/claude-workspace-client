@@ -200,21 +200,148 @@ function permissionRuleScope(ruleValue: unknown): string | null {
     : `使用 ${toolName}`;
 }
 
+function permissionModeAction(mode: string | null): string | null {
+  switch (mode) {
+    case "acceptEdits":
+      return "自动接受文件编辑";
+    case "default":
+    case "manual":
+      return "恢复逐项权限确认";
+    case "auto":
+      return "切换到自动模式";
+    case "dontAsk":
+      return "切换到不再询问模式";
+    case "bypassPermissions":
+      return "绕过权限检查";
+    case "plan":
+      return "切换到计划模式";
+    default:
+      return mode ? `切换到“${truncate(mode, 200)}”权限模式` : null;
+  }
+}
+
 function permissionSuggestionLabel(
   payload: ClaudeHookPayload,
   value: unknown,
 ): string {
   const suggestion = asRecord(value);
+  const type = textValue(suggestion?.type);
+  const destination = textValue(suggestion?.destination);
+
+  if (type === "setMode") {
+    const mode = textValue(suggestion?.mode);
+    const sessionPrefix = destination === "session" ? "在本会话内" : "以后";
+    const action = permissionModeAction(mode);
+    return action
+      ? `允许：本次操作，并${sessionPrefix}${action}`
+      : permissionCopy(payload).allowSimilar;
+  }
+
+  if (type === "addDirectories" || type === "removeDirectories") {
+    const directories = Array.isArray(suggestion?.directories)
+      ? suggestion.directories.flatMap((directoryValue) => {
+          const directory = textValue(directoryValue);
+          return directory ? [`“${truncate(directory, 500)}”`] : [];
+        })
+      : [];
+    if (directories.length > 0) {
+      const action = type === "addDirectories" ? "添加为" : "移出";
+      const scope = destination === "session" ? "本会话工作目录" : "工作目录";
+      return `允许：本次操作，并将 ${directories.join("、")} ${action}${scope}`;
+    }
+    return permissionCopy(payload).allowSimilar;
+  }
+
   const rules = Array.isArray(suggestion?.rules) ? suggestion.rules : [];
   const scopes = rules.flatMap((ruleValue) => {
     const scope = permissionRuleScope(ruleValue);
     return scope ? [scope] : [];
   });
+
+  if (
+    (type === "replaceRules" || type === "removeRules") &&
+    scopes.length > 0
+  ) {
+    const behavior = textValue(suggestion?.behavior);
+    const behaviorLabel =
+      behavior === "deny"
+        ? "拒绝"
+        : behavior === "ask"
+          ? "询问"
+          : "允许";
+    const action = type === "replaceRules" ? "替换" : "移除";
+    return `允许：本次操作，并${action}${behaviorLabel}权限规则：${scopes.join("，或")}`;
+  }
+
   const scopeText =
     scopes.length > 0
       ? `允许：以后${scopes.join("，或")}时不再询问`
-      : permissionCopy(payload).allowSimilar;
+      : type
+        ? `允许：本次操作，并应用 Claude Code 提供的“${truncate(type, 200)}”权限设置`
+        : permissionCopy(payload).allowSimilar;
   return scopeText;
+}
+
+function permissionDestinationDescription(value: unknown): string | null {
+  const destination = textValue(asRecord(value)?.destination);
+  if (destination === "session") {
+    return "仅当前会话";
+  }
+  if (destination === "localSettings") {
+    return "当前工程本地设置";
+  }
+  if (destination === "projectSettings") {
+    return "当前工程共享设置";
+  }
+  if (destination === "userSettings") {
+    return "用户设置";
+  }
+  return destination ? truncate(destination, 200) : null;
+}
+
+function normalizedPermissionLabel(value: string): string {
+  return value
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLocaleLowerCase("en-US");
+}
+
+function duplicatePermissionLabels(labels: string[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const label of labels) {
+    const normalized = normalizedPermissionLabel(label);
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+  return new Set(
+    [...counts.entries()].flatMap(([label, count]) =>
+      count > 1 ? [label] : [],
+    ),
+  );
+}
+
+function disambiguatePermissionSuggestionLabels(
+  suggestions: unknown[],
+  labels: string[],
+): string[] {
+  const duplicateBaseLabels = duplicatePermissionLabels(labels);
+  const labelsWithDestinations = labels.map((label, index) => {
+    if (!duplicateBaseLabels.has(normalizedPermissionLabel(label))) {
+      return label;
+    }
+    const destination = permissionDestinationDescription(suggestions[index]);
+    return destination
+      ? `${label}（权限保存范围：${destination}）`
+      : label;
+  });
+  const remainingDuplicates = duplicatePermissionLabels(
+    labelsWithDestinations,
+  );
+  return labelsWithDestinations.map((label, index) =>
+    remainingDuplicates.has(normalizedPermissionLabel(label))
+      ? `${label}（Claude Code 权限建议 ${index + 1}）`
+      : label,
+  );
 }
 
 function webFetchSuggestionHost(value: unknown): string | null {
@@ -236,6 +363,22 @@ function webFetchSuggestionHost(value: unknown): string | null {
   return null;
 }
 
+function webFetchSuggestionLabel(
+  payload: ClaudeHookPayload,
+  value: unknown,
+): string {
+  const suggestion = asRecord(value);
+  const type = textValue(suggestion?.type);
+  const hasRules = Array.isArray(suggestion?.rules);
+  if (type !== "addRules" && !hasRules) {
+    return permissionSuggestionLabel(payload, value);
+  }
+  const suggestionHost = webFetchSuggestionHost(value) ?? webFetchHost(payload);
+  return suggestionHost
+    ? `是，并且以后从 ${suggestionHost} 获取内容时不再询问`
+    : "是，并且以后获取此类内容时不再询问";
+}
+
 function webFetchPermissionPrompt(
   payload: ClaudeHookPayload,
 ): PermissionPrompt {
@@ -243,14 +386,15 @@ function webFetchPermissionPrompt(
   const url = textValue(input?.url);
   const host = webFetchHost(payload);
   const suggestions = permissionSuggestions(payload);
+  const suggestionLabels = disambiguatePermissionSuggestionLabels(
+    suggestions,
+    suggestions.map((suggestion) =>
+      webFetchSuggestionLabel(payload, suggestion),
+    ),
+  );
   const optionLabels = [
     "是",
-    ...suggestions.map((suggestion) => {
-      const suggestionHost = webFetchSuggestionHost(suggestion) ?? host;
-      return suggestionHost
-        ? `是，并且以后从 ${suggestionHost} 获取内容时不再询问`
-        : "是，并且以后获取此类内容时不再询问";
-    }),
+    ...suggestionLabels,
     "否，并告诉 Claude 应如何调整（Esc）",
   ];
   return {
@@ -274,11 +418,15 @@ function permissionPrompt(payload: ClaudeHookPayload): PermissionPrompt {
   const details = toolInputDetails(payload);
   const suggestions = permissionSuggestions(payload);
   const copy = permissionCopy(payload);
-  const optionLabels = [
-    copy.allowOnce,
-    ...suggestions.map((suggestion) =>
+  const suggestionLabels = disambiguatePermissionSuggestionLabels(
+    suggestions,
+    suggestions.map((suggestion) =>
       permissionSuggestionLabel(payload, suggestion),
     ),
+  );
+  const optionLabels = [
+    copy.allowOnce,
+    ...suggestionLabels,
     copy.deny,
   ];
   return {

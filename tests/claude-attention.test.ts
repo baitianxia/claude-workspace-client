@@ -57,6 +57,96 @@ describe("attentionFromClaudeHook", () => {
     });
   });
 
+  it("distinguishes mode and working-directory permission suggestions", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "Write",
+        tool_input: {
+          file_path: "C:\\Users\\alice\\.claude\\hooks\\notify.ps1",
+          content: "Write-Output 'hook fired'",
+        },
+        permission_suggestions: [
+          {
+            type: "setMode",
+            mode: "acceptEdits",
+            destination: "session",
+          },
+          {
+            type: "addDirectories",
+            directories: ["C:\\Users\\alice\\.claude"],
+            destination: "session",
+          },
+        ],
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      kind: "permission",
+      permissionSuggestionCount: 2,
+      permissionOptionLabels: [
+        "允许：仅执行本次操作",
+        "允许：本次操作，并在本会话内自动接受文件编辑",
+        "允许：本次操作，并将 “C:\\Users\\alice\\.claude” 添加为本会话工作目录",
+        "拒绝：不执行本次操作，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+      ],
+    });
+    expect(attention?.body).toContain(
+      "2. 允许：本次操作，并在本会话内自动接受文件编辑",
+    );
+    expect(attention?.body).toContain(
+      "3. 允许：本次操作，并将 “C:\\Users\\alice\\.claude” 添加为本会话工作目录",
+    );
+    expect(
+      new Set(attention?.permissionOptionLabels).size,
+    ).toBe(attention?.permissionOptionLabels?.length);
+  });
+
+  it("uses persistence scope to distinguish otherwise identical rules", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "npm test" },
+        permission_suggestions: [
+          {
+            type: "addRules",
+            rules: [{ toolName: "Bash", ruleContent: "npm test" }],
+            behavior: "allow",
+            destination: "session",
+          },
+          {
+            type: "addRules",
+            rules: [{ toolName: "Bash", ruleContent: "npm test" }],
+            behavior: "allow",
+            destination: "localSettings",
+          },
+        ],
+      }),
+    );
+
+    expect(attention?.permissionOptionLabels?.slice(1, 3)).toEqual([
+      "允许：以后运行符合“npm test”规则的命令时不再询问（权限保存范围：仅当前会话）",
+      "允许：以后运行符合“npm test”规则的命令时不再询问（权限保存范围：当前工程本地设置）",
+    ]);
+  });
+
+  it("keeps opaque duplicate suggestions separately selectable", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "Write",
+        tool_input: { file_path: "C:\\outside\\file.txt", content: "test" },
+        permission_suggestions: [{}, {}],
+      }),
+    );
+
+    expect(attention?.permissionOptionLabels?.slice(1, 3)).toEqual([
+      "允许：以后执行此类操作时不再询问（Claude Code 权限建议 1）",
+      "允许：以后执行此类操作时不再询问（Claude Code 权限建议 2）",
+    ]);
+  });
+
   it("matches Claude Code's WebFetch permission dialog line for line", () => {
     const attention = attentionFromClaudeHook(
       hook({
