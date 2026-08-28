@@ -100,6 +100,23 @@ function normalizedReplyText(value: string): string {
     .trim();
 }
 
+function normalizedReplyForPending(
+  value: string,
+  pending: PendingRemoteReply,
+): string {
+  if (
+    pending.kind === "question" &&
+    (pending.questionSelectionModes?.length ?? 0) > 1
+  ) {
+    return value
+      .replace(/(?:\r\n?|\n)+/gu, ";")
+      .replace(/\t+/gu, " ")
+      .replace(/\p{Cc}/gu, "")
+      .trim();
+  }
+  return normalizedReplyText(value);
+}
+
 function routeCodeAtStart(value: string): string | null {
   const match = /^(?:#|\[|`)?([A-Z2-9]{5,8})(?=$|[\s\]`：:])/iu.exec(
     value,
@@ -116,11 +133,12 @@ function routeCodesFromQuotedNotification(value: string): string[] {
 }
 
 function replyWithoutCode(value: string, code: string): string {
-  return normalizedReplyText(
-    value.replace(
-      new RegExp(`^(?:#|\\[)?${code}(?:\\])?(?:\\s*[：:])?\\s*`, "iu"),
-      "",
+  return value.replace(
+    new RegExp(
+      `^\\s*(?:#|\\[|\\x60)?${code}(?:\\]|\\x60)?(?:\\s*[：:])?\\s*`,
+      "iu",
     ),
+    "",
   );
 }
 
@@ -330,7 +348,10 @@ export class RemoteReplyRouter {
       };
     }
 
-    const reply = codeFromMessage ? replyWithoutCode(content, code) : content;
+    const reply = normalizedReplyForPending(
+      codeFromMessage ? replyWithoutCode(messageText, code) : messageText,
+      pending,
+    );
     if (!reply) {
       return {
         status: "rejected",
@@ -589,7 +610,7 @@ export function terminalActionForRemoteReply(
       }
     }
     throw new Error(
-      "问题回复无效。多个问题请按通知顺序使用分号分隔答案；每项可用编号或完整选项文字，多选项使用逗号分隔。",
+      "问题回复无效。多个问题请按通知顺序使用分号或换行分隔答案；每项可用编号或完整选项文字，多选项使用逗号分隔。",
     );
   }
 

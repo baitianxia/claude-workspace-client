@@ -579,5 +579,20 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(pending, "B;C,E;I")).toBe(
       `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`,
     );
+
+    const lineSeparated = router.resolve(
+      "zhangsan",
+      "QUEST 2\n1,3\n4",
+    );
+    expect(lineSeparated.status).toBe("matched");
+    if (lineSeparated.status !== "matched") {
+      throw new Error("Expected line-separated answers to match.");
+    }
+    expect(
+      terminalInputForRemoteReply(
+        lineSeparated.pending,
+        lineSeparated.reply,
+      ),
+    ).toBe(`${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`);
   });
 });

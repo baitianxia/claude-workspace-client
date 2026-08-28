@@ -106,6 +106,45 @@ function hook(
   };
 }
 
+function multipleQuestionHook(
+  workspaceSessionId: string,
+  launchId: string,
+): ClaudeHookEvent {
+  return {
+    workspaceSessionId,
+    launchId,
+    payload: {
+      session_id: `claude-${workspaceSessionId}`,
+      transcript_path: `C:\\transcripts\\${workspaceSessionId}.jsonl`,
+      cwd: "C:\\work\\mall",
+      hook_event_name: "PreToolUse",
+      tool_name: "AskUserQuestion",
+      tool_input: {
+        questions: [
+          {
+            header: "文件类型",
+            question: "你想创建什么类型的文件？",
+            options: [
+              { label: "文本文件", description: "普通文本文件" },
+              { label: "Markdown 文档", description: "笔记或说明文件" },
+            ],
+            multiSelect: false,
+          },
+          {
+            header: "文件内容",
+            question: "文件内容大概是什么？",
+            options: [
+              { label: "空文件", description: "内容之后再说" },
+              { label: "描述内容", description: "稍后输入具体内容" },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+    },
+  };
+}
+
 function incomingMessage(
   msgid: string,
   content: string,
@@ -402,7 +441,7 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
-  it("keeps pending routes through terminal focus and mouse reports", async () => {
+  it("keeps pending routes through passive terminal protocol reports", async () => {
     const pty = fakePty(1);
     let launchId = "";
     const manager = new SessionManager(
@@ -440,7 +479,20 @@ describe("WeComBridge", () => {
     bridge.handleClaudeHook(hook(session.id, launchId, "npm test -- first"));
     await vi.waitFor(() => expect(client.sent).toHaveLength(1));
     const firstCode = routeCode(markdownContent(client.sent[0].body));
-    const controlInput = ["\x1b[O", "\x1b[I", "\x1b[<0;10;5M"];
+    const controlInput = [
+      "\x1b[O",
+      "\x1b[I",
+      "\x1b[<0;10;5M",
+      "\x1b[?1;2c",
+      "\x1b[0n",
+      "\x1b[12;34R",
+      "\x1b[?12;34R",
+      "\x1b[8;36;120t",
+      "\x1b[?2004;1$y",
+      "\x1bP1$r0m\x1b\\",
+      "\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+      "\x1b[I\x1b[12;34R",
+    ];
     for (const data of controlInput) {
       manager.write(session.id, data);
     }
@@ -476,6 +528,68 @@ describe("WeComBridge", () => {
       lastInboundStatus: "routed",
       lastInboundDetail: expect.stringContaining(secondCode),
     });
+
+    bridge.dispose();
+  });
+
+  it("routes line-separated answers after xterm protocol responses", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => pty.process) as PtySpawner,
+      "win32",
+      [],
+      (_sessionId, currentLaunchId) => {
+        launchId = currentLaunchId;
+        return { args: [] };
+      },
+    );
+    const session = manager.createSession({
+      projectId: null,
+      cwd: "C:\\work\\one",
+    });
+    const client = new FakeWeComClient();
+    const router = new RemoteReplyRouter(() => "QUEST");
+    const bridge = new WeComBridge(
+      manager,
+      () => [],
+      router,
+      () => client as unknown as WeComClient,
+    );
+    bridge.configure({
+      enabled: true,
+      botId: "bot-id",
+      targetUserId: "zhangsan",
+      secret: "secret",
+      hasSecret: true,
+    });
+    client.emit("authenticated");
+
+    bridge.handleClaudeHook(multipleQuestionHook(session.id, launchId));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const notification = markdownContent(client.sent[0].body);
+    expect(notification).toContain("问题间用分号或换行");
+
+    manager.write(session.id, "\x1b[12;34R");
+    client.emit(
+      "message",
+      incomingMessage(
+        "line-separated-answer",
+        "1\n2",
+        "zhangsan",
+        notification,
+      ),
+    );
+
+    await vi.waitFor(() =>
+      expect(pty.writes).toEqual(["\x1b[12;34R", `\r${DOWN}\r`]),
+    );
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "routed",
+      lastInboundDetail: expect.stringContaining("QUEST"),
+    });
+    expect(router.listForUser("zhangsan")).toEqual([]);
 
     bridge.dispose();
   });

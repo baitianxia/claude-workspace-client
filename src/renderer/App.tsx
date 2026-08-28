@@ -167,7 +167,7 @@ export function App() {
   );
   const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
   const [wecomSettingsOpen, setWeComSettingsOpen] = useState(false);
-  const [wecomEnabledDraft, setWeComEnabledDraft] = useState(false);
+  const [wecomEnabledDraft, setWeComEnabledDraft] = useState(true);
   const [wecomBotIdDraft, setWeComBotIdDraft] = useState("");
   const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
   const [wecomSecretDraft, setWeComSecretDraft] = useState("");
@@ -785,7 +785,9 @@ export function App() {
     });
 
   const openWeComSettings = () => {
-    setWeComEnabledDraft(snapshot?.wecom.enabled ?? false);
+    setWeComEnabledDraft(
+      snapshot ? !snapshot.wecom.configured || snapshot.wecom.enabled : true,
+    );
     setWeComBotIdDraft(snapshot?.wecom.botId ?? "");
     setWeComUserIdDraft(snapshot?.wecom.targetUserId ?? "");
     setWeComSecretDraft("");

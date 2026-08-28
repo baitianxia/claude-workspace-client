@@ -185,7 +185,7 @@ function notificationMarkdown(
     (pending.questionSelectionModes?.length ?? 0) > 1
       ? {
           quoted:
-            "发送 `1;2,3`（每题可用编号或完整选项文字；问题间用分号，多选项用逗号）",
+            "发送 `1;2,3`（每题可用编号或完整选项文字；问题间用分号或换行，多选项用逗号）",
           directExample: "1;2,3",
         }
       : pending.kind === "permission"
@@ -242,16 +242,36 @@ function notificationMarkdown(
   return `${prefix}${truncateUtf8(pending.body, bodyBudget)}${suffix}`;
 }
 
+const PASSIVE_TERMINAL_REPORT_PATTERNS = [
+  /^\x1b\[[IO]/u,
+  /^\x1b\[<[0-9;]+[Mm]/u,
+  /^\x1b\[M[\s\S]{3}/u,
+  /^\x1b\[(?:\?[0-9;]+c|>[0-9;]+c|0n|\??[0-9]+;[0-9]+R|[468];[0-9]+;[0-9]+t|\??[0-9]+;[0-4]\$y)/u,
+  /^\x1bP[01]\$r[^\x1b]*\x1b\\/u,
+  /^\x1b\](?:4;[0-9]+|10|11|12);rgb:[0-9a-f]+\/[0-9a-f]+\/[0-9a-f]+(?:\x07|\x1b\\)/iu,
+];
+
+function isPassiveTerminalProtocolData(data: string): boolean {
+  if (!data) {
+    return false;
+  }
+  let remaining = data;
+  while (remaining) {
+    const match = PASSIVE_TERMINAL_REPORT_PATTERNS.map((pattern) =>
+      pattern.exec(remaining),
+    ).find((candidate): candidate is RegExpExecArray => candidate !== null);
+    if (!match) {
+      return false;
+    }
+    remaining = remaining.slice(match[0].length);
+  }
+  return true;
+}
+
 function localInputInvalidatesPendingReply(data: string): boolean {
-  const isFocusReport = data === "\x1b[I" || data === "\x1b[O";
-  const isSgrMouseReport = /^\x1b\[<[0-9;]+[Mm]$/u.test(data);
-  const isX10MouseReport = /^\x1b\[M[\s\S]{3}$/u.test(data);
-  return (
-    Boolean(data) &&
-    !isFocusReport &&
-    !isSgrMouseReport &&
-    !isX10MouseReport
-  );
+  // xterm emits both genuine user input and automatic terminal-protocol
+  // responses through onData. Only the former changes the user's menu state.
+  return Boolean(data) && !isPassiveTerminalProtocolData(data);
 }
 
 export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
