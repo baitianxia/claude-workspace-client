@@ -3,16 +3,25 @@ import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import type { SessionRecord, TerminalDataEvent } from "../shared/contracts";
 import { consumeTerminalShortcut } from "../shared/terminal-shortcuts";
+import { TerminalOutputScheduler } from "./terminal-output-scheduler";
 
 interface TerminalViewProps {
   session: SessionRecord;
   active: boolean;
+  focusRequest: number;
 }
 
-export function TerminalView({ session, active }: TerminalViewProps) {
+export function TerminalView({
+  session,
+  active,
+  focusRequest,
+}: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const activeRef = useRef(active);
+  const focusPendingRef = useRef(false);
+  activeRef.current = active;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -59,6 +68,15 @@ export function TerminalView({ session, active }: TerminalViewProps) {
     terminal.open(container);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    const outputScheduler = new TerminalOutputScheduler(
+      {
+        write: (data, callback) => terminal.write(data, callback),
+      },
+      (callback) => {
+        window.requestAnimationFrame(callback);
+      },
+      () => activeRef.current && !document.hidden,
+    );
 
     let disposed = false;
     let initialized = false;
@@ -74,8 +92,25 @@ export function TerminalView({ session, active }: TerminalViewProps) {
         return;
       }
       lastSequence = event.sequence;
-      terminal.write(event.data);
+      outputScheduler.write(event.data);
     });
+
+    const initializeLiveOutput = (snapshotSequence: number) => {
+      if (disposed) {
+        return;
+      }
+      lastSequence = snapshotSequence;
+      initialized = true;
+      pendingEvents
+        .sort((left, right) => left.sequence - right.sequence)
+        .forEach((event) => {
+          if (event.sequence > lastSequence) {
+            lastSequence = event.sequence;
+            outputScheduler.write(event.data);
+          }
+        });
+      pendingEvents.length = 0;
+    };
 
     void window.claudeWorkspace
       .getTerminalSnapshot(session.id)
@@ -83,22 +118,20 @@ export function TerminalView({ session, active }: TerminalViewProps) {
         if (disposed) {
           return;
         }
-        terminal.write(snapshot.data);
-        lastSequence = snapshot.lastSequence;
-        initialized = true;
-        pendingEvents
-          .sort((left, right) => left.sequence - right.sequence)
-          .forEach((event) => {
-            if (event.sequence > lastSequence) {
-              lastSequence = event.sequence;
-              terminal.write(event.data);
-            }
-          });
-        pendingEvents.length = 0;
+        if (!snapshot.data) {
+          initializeLiveOutput(snapshot.lastSequence);
+          return;
+        }
+        terminal.write(snapshot.data, () => {
+          initializeLiveOutput(snapshot.lastSequence);
+        });
       })
       .catch((error: unknown) => {
         if (!disposed) {
-          terminal.writeln(`\r\n\x1b[31m无法读取终端内容：${String(error)}\x1b[0m`);
+          terminal.writeln(
+            `\r\n\x1b[31m无法读取终端内容：${String(error)}\x1b[0m`,
+            () => initializeLiveOutput(0),
+          );
         }
       });
 
@@ -159,6 +192,10 @@ export function TerminalView({ session, active }: TerminalViewProps) {
           columns: terminal.cols,
           rows: terminal.rows,
         });
+        if (activeRef.current && focusPendingRef.current) {
+          terminal.focus();
+          focusPendingRef.current = false;
+        }
       } catch {
         // Ignore transient layout changes while switching tabs.
       }
@@ -173,6 +210,7 @@ export function TerminalView({ session, active }: TerminalViewProps) {
       container.removeEventListener("contextmenu", handleContextMenu);
       inputDisposable.dispose();
       unsubscribe();
+      outputScheduler.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -181,8 +219,11 @@ export function TerminalView({ session, active }: TerminalViewProps) {
 
   useEffect(() => {
     if (!active) {
+      focusPendingRef.current = false;
+      terminalRef.current?.blur();
       return;
     }
+    focusPendingRef.current = true;
     const timer = window.setTimeout(() => {
       const terminal = terminalRef.current;
       const fitAddon = fitAddonRef.current;
@@ -190,16 +231,21 @@ export function TerminalView({ session, active }: TerminalViewProps) {
       if (!terminal || !fitAddon || !container || container.clientWidth < 40) {
         return;
       }
-      fitAddon.fit();
-      window.claudeWorkspace.resizeTerminal({
-        sessionId: session.id,
-        columns: terminal.cols,
-        rows: terminal.rows,
-      });
-      terminal.focus();
+      try {
+        fitAddon.fit();
+        window.claudeWorkspace.resizeTerminal({
+          sessionId: session.id,
+          columns: terminal.cols,
+          rows: terminal.rows,
+        });
+        terminal.focus();
+        focusPendingRef.current = false;
+      } catch {
+        // ResizeObserver will retry after transient tab layout changes settle.
+      }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [active, session.id, session.status]);
+  }, [active, focusRequest, session.id]);
 
   return (
     <div

@@ -30,6 +30,11 @@ export function terminalShortcutAction(
   if (key === "v") {
     return "paste";
   }
+  if (key === "k") {
+    // Let the app-level Ctrl+K handler open the workspace switcher instead of
+    // allowing xterm to consume the key and send it to Claude Code.
+    return "suppress";
+  }
   return null;
 }
 
@@ -39,8 +44,8 @@ export function consumeTerminalShortcut(
 ): TerminalShortcutAction {
   const action = terminalShortcutAction(event, hasSelection);
   if (action !== null) {
-    // xterm also listens for the browser's native copy/paste events. Cancelling
-    // the keyboard default keeps a handled shortcut on exactly one path.
+    // Cancelling the keyboard default keeps browser and xterm handling from
+    // creating a second path for a shortcut owned by the workspace UI.
     event.preventDefault();
   }
   return action;

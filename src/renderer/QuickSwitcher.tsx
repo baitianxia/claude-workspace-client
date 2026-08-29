@@ -27,7 +27,13 @@ export function QuickSwitcher({
   );
 
   useEffect(() => {
+    const previousFocus = document.activeElement;
     inputRef.current?.focus();
+    return () => {
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    };
   }, []);
 
   useEffect(() => {

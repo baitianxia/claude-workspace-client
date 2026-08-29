@@ -172,6 +172,7 @@ export function App() {
   const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
   const [wecomSecretDraft, setWeComSecretDraft] = useState("");
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
+  const [terminalFocusRequest, setTerminalFocusRequest] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
@@ -438,6 +439,21 @@ export function App() {
     }
   };
 
+  const requestTerminalFocus = () => {
+    setTerminalFocusRequest((current) => current + 1);
+  };
+
+  const selectSession = (
+    projectId: string | null,
+    sessionId: string | null,
+  ) => {
+    setActiveProjectId(projectId);
+    setActiveSessionId(sessionId);
+    if (sessionId) {
+      requestTerminalFocus();
+    }
+  };
+
   const addProject = () =>
     runAction(async () => {
       const project = await window.claudeWorkspace.selectProjectDirectory();
@@ -535,8 +551,10 @@ export function App() {
     const workspaceSessions = sessions.filter(
       (session) => session.projectId === item.projectId,
     );
-    setActiveProjectId(item.projectId);
-    setActiveSessionId(item.sessionId ?? workspaceSessions[0]?.id ?? null);
+    selectSession(
+      item.projectId,
+      item.sessionId ?? workspaceSessions[0]?.id ?? null,
+    );
     setCollapsedProjectIds((current) => {
       const next = new Set(current);
       next.delete(item.projectId ?? TEMPORARY_GROUP_KEY);
@@ -782,6 +800,7 @@ export function App() {
             }
           : current,
       );
+      requestTerminalFocus();
     });
 
   const openWeComSettings = () => {
@@ -880,8 +899,7 @@ export function App() {
             type="button"
             title={`${session.title}（双击重命名）`}
             onClick={() => {
-              setActiveProjectId(session.projectId);
-              setActiveSessionId(session.id);
+              selectSession(session.projectId, session.id);
             }}
             onDoubleClick={() => startRenamingSession(session)}
           >
@@ -1053,8 +1071,7 @@ export function App() {
                 type="button"
                 title="不关联工程目录，使用应用隔离的临时工作目录"
                 onClick={() => {
-                  setActiveProjectId(null);
-                  setActiveSessionId(temporarySessions[0]?.id ?? null);
+                  selectSession(null, temporarySessions[0]?.id ?? null);
                 }}
               >
                 <span className="temporary-icon" aria-hidden="true">›_</span>
@@ -1167,8 +1184,10 @@ export function App() {
                         className="project-select"
                         type="button"
                         onClick={() => {
-                          setActiveProjectId(project.id);
-                          setActiveSessionId(projectSessions[0]?.id ?? null);
+                          selectSession(
+                            project.id,
+                            projectSessions[0]?.id ?? null,
+                          );
                         }}
                         onDoubleClick={() => startRenamingProject(project)}
                         title={`${project.rootPath}（双击修改别名）`}
@@ -1278,7 +1297,12 @@ export function App() {
                     className={`toolbar-changes-button ${changesPanelOpen ? "toolbar-changes-button--active" : ""}`}
                     type="button"
                     aria-expanded={changesPanelOpen}
-                    onClick={() => setChangesPanelOpen((open) => !open)}
+                    onClick={() => {
+                      setChangesPanelOpen(!changesPanelOpen);
+                      if (changesPanelOpen) {
+                        requestTerminalFocus();
+                      }
+                    }}
                   >
                     <span aria-hidden="true">{`{ }`}</span>
                     修改文件
@@ -1340,6 +1364,7 @@ export function App() {
                   key={session.id}
                   session={session}
                   active={session.id === activeSessionId}
+                  focusRequest={terminalFocusRequest}
                 />
               ))}
             </div>
@@ -1430,7 +1455,10 @@ export function App() {
             <WorkspaceChangesPanel
               key={activeProject.id}
               project={activeProject}
-              onClose={() => setChangesPanelOpen(false)}
+              onClose={() => {
+                setChangesPanelOpen(false);
+                requestTerminalFocus();
+              }}
             />
           </Suspense>
         ) : null}
@@ -1439,7 +1467,10 @@ export function App() {
         <QuickSwitcher
           projects={projects}
           sessions={sessions}
-          onClose={() => setQuickSwitcherOpen(false)}
+          onClose={() => {
+            setQuickSwitcherOpen(false);
+            requestTerminalFocus();
+          }}
           onSelect={selectWorkspaceItem}
         />
       ) : null}

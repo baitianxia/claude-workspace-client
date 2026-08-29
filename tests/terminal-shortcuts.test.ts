@@ -56,6 +56,20 @@ describe("terminalShortcutAction", () => {
     expect(terminalShortcutAction(keyboardEvent("x"), true)).toBeNull();
   });
 
+  it("leaves Ctrl+K for the app-level workspace switcher", () => {
+    const preventDefault = vi.fn();
+    expect(
+      consumeTerminalShortcut(
+        keyboardEvent("k", { preventDefault }),
+        false,
+      ),
+    ).toBe("suppress");
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(
+      terminalShortcutAction(keyboardEvent("k", { altKey: true }), false),
+    ).toBeNull();
+  });
+
   it("prevents the native clipboard path during consecutive copy-paste cycles", () => {
     const preventDefault = vi.fn();
     const actions = [
