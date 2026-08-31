@@ -12,6 +12,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createAddedFileDiff,
+  gitStatusArgs,
   parsePorcelainStatus,
   WorkspaceFiles,
 } from "../src/main/workspace-files";
@@ -44,6 +45,17 @@ afterEach(async () => {
 });
 
 describe("workspace file status parsing", () => {
+  it("uses the legacy-compatible porcelain v1 flag", () => {
+    expect(gitStatusArgs("packages/client")).toEqual([
+      "status",
+      "--porcelain",
+      "-z",
+      "--untracked-files=all",
+      "--",
+      "packages/client",
+    ]);
+  });
+
   it("parses staged, unstaged, untracked, renamed and conflicted entries", () => {
     const changes = parsePorcelainStatus(
       [

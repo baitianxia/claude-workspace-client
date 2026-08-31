@@ -52,7 +52,7 @@ interface WorkspaceScan {
 function gitErrorMessage(error: unknown): string {
   const failure = error as GitFailure;
   if (failure.code === "ENOENT") {
-    return "未找到 Git，无法读取工程修改。";
+    return "未找到 Git，无法读取工程变更。";
   }
   if (
     failure.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ||
@@ -116,7 +116,7 @@ function requireSafeRelativePath(path: string): string {
     /\p{Cc}/u.test(path) ||
     path.startsWith("/")
   ) {
-    throw new Error("文件路径无效。请刷新修改列表后重试。");
+    throw new Error("文件路径无效。请刷新变更列表后重试。");
   }
   const segments = path.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
@@ -191,6 +191,19 @@ export function parsePorcelainStatus(output: string): InternalFileChange[] {
     });
   }
   return changes;
+}
+
+export function gitStatusArgs(projectPrefix: string): string[] {
+  return [
+    "status",
+    // A bare --porcelain selects v1 and also works with older Git versions
+    // that reject the newer --porcelain=v1 spelling.
+    "--porcelain",
+    "-z",
+    "--untracked-files=all",
+    "--",
+    projectPrefix || ".",
+  ];
 }
 
 function projectRelativePath(
@@ -293,7 +306,7 @@ export class WorkspaceFiles {
     }
     const change = scan.files.find((candidate) => candidate.path === safePath);
     if (!change) {
-      throw new Error("该文件已不在修改列表中，请刷新后重试。");
+      throw new Error("该文件已不在变更列表中，请刷新后重试。");
     }
     if (mode === "latest") {
       return this.readLatest(scan.context, change);
@@ -349,14 +362,10 @@ export class WorkspaceFiles {
     if (!context) {
       return null;
     }
-    const status = await runGit(context.repositoryRoot, [
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--untracked-files=all",
-      "--",
-      context.projectPrefix || ".",
-    ]);
+    const status = await runGit(
+      context.repositoryRoot,
+      gitStatusArgs(context.projectPrefix),
+    );
     const files = parsePorcelainStatus(status)
       .flatMap((file): InternalFileChange[] => {
         const relativePath = projectRelativePath(
@@ -439,7 +448,7 @@ export class WorkspaceFiles {
       };
     }
     if (!fileStat.isFile()) {
-      throw new Error("当前修改项不是可读取的普通文件。");
+      throw new Error("当前变更项不是可读取的普通文件。");
     }
     if (fileStat.size > MAX_FILE_BYTES) {
       return {

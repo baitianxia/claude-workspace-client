@@ -1305,7 +1305,7 @@ export function App() {
                     }}
                   >
                     <span aria-hidden="true">{`{ }`}</span>
-                    修改文件
+                    文件变更
                   </button>
                 ) : null}
                 <button
@@ -1392,7 +1392,7 @@ export function App() {
               aria-expanded={changesPanelOpen}
               onClick={() => setChangesPanelOpen(true)}
             >
-              查看修改文件
+              查看文件变更
             </button>
             {!snapshot.claudeExecutable.path ? (
               <button

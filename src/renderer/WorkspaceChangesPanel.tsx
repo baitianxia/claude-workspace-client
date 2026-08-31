@@ -210,18 +210,18 @@ export function WorkspaceChangesPanel({
   const markdown = Boolean(selectedPath && isMarkdownPath(selectedPath));
 
   return (
-    <aside className="changes-panel" aria-label={`${project.name} 修改文件`}>
+    <aside className="changes-panel" aria-label={`${project.name} 文件变更`}>
       <header className="changes-panel-header">
         <div>
           <span className="changes-panel-eyebrow">WORKSPACE CHANGES</span>
-          <h2>修改文件</h2>
+          <h2>文件变更</h2>
           <p title={project.rootPath}>{project.rootPath}</p>
         </div>
         <div className="changes-panel-header-actions">
           <button
             type="button"
-            title="刷新修改文件"
-            aria-label="刷新修改文件"
+            title="刷新文件变更"
+            aria-label="刷新文件变更"
             disabled={listLoading}
             onClick={() => {
               setListRefreshVersion((version) => version + 1);
@@ -230,14 +230,14 @@ export function WorkspaceChangesPanel({
           >
             ↻
           </button>
-          <button type="button" title="关闭" aria-label="关闭修改文件侧栏" onClick={onClose}>
+          <button type="button" title="关闭" aria-label="关闭文件变更侧栏" onClick={onClose}>
             ×
           </button>
         </div>
       </header>
 
       <div className="changes-panel-body">
-        <section className="change-file-list" aria-label="修改文件列表">
+        <section className="change-file-list" aria-label="文件变更列表">
           <div className="change-file-list-heading">
             <strong>{snapshot?.files.length ?? 0} 个文件</strong>
             {listLoading ? <span>刷新中…</span> : null}
@@ -245,7 +245,7 @@ export function WorkspaceChangesPanel({
           {snapshot && !snapshot.isGitRepository ? (
             <div className="change-list-message">
               <strong>不是 Git 仓库</strong>
-              <span>当前工程没有可读取的 Git 修改列表。</span>
+              <span>当前工程没有可读取的 Git 变更列表。</span>
             </div>
           ) : snapshot?.files.length === 0 ? (
             <div className="change-list-message">
@@ -263,7 +263,7 @@ export function WorkspaceChangesPanel({
             ))
           )}
           {snapshot?.truncated ? (
-            <div className="change-list-warning">仅显示前 2,000 个修改文件。</div>
+            <div className="change-list-warning">仅显示前 2,000 个变更文件。</div>
           ) : null}
         </section>
 
@@ -331,7 +331,7 @@ export function WorkspaceChangesPanel({
                     ) : (
                       <div className="change-content-empty">
                         <strong>没有文本差异</strong>
-                        <p>文件状态已变化，请刷新修改列表。</p>
+                        <p>文件状态已变化，请刷新变更列表。</p>
                       </div>
                     )
                   ) : markdown && markdownMode === "preview" ? (
@@ -355,7 +355,7 @@ export function WorkspaceChangesPanel({
           ) : (
             <div className="change-content-empty">
               <span aria-hidden="true">{`{ }`}</span>
-              <strong>选择一个修改文件</strong>
+              <strong>选择一项文件变更</strong>
               <p>可以查看相对 HEAD 的对比，或工作区中的最新内容。</p>
             </div>
           )}
