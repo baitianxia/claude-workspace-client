@@ -3,6 +3,9 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ClaudeLocator } from "./claude-locator";
 import { ClaudeHookServer } from "./claude-hook-server";
+import { AutomationService } from "./automation-service";
+import { AutomationStore } from "./automation-store";
+import { ClaudeCodeJobRunner } from "./claude-code-job-runner";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
 import { SessionManager } from "./session-manager";
@@ -15,7 +18,10 @@ let sessionManager: SessionManager | null = null;
 let removeIpcHandlers: (() => void) | null = null;
 let claudeHookServer: ClaudeHookServer | null = null;
 let wecomBridge: WeComBridge | null = null;
+let automationService: AutomationService | null = null;
 let allowClose = false;
+let shutdownComplete = false;
+let shutdownPromise: Promise<void> | null = null;
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -75,15 +81,19 @@ function createWindow(): BrowserWindow {
     }, 500);
   });
   window.on("close", (event) => {
-    if (allowClose || !sessionManager?.hasRunningSessions()) {
+    const hasRunningSessions = sessionManager?.hasRunningSessions() ?? false;
+    const hasRunningAutomation = automationService?.hasRunningRuns() ?? false;
+    if (allowClose || (!hasRunningSessions && !hasRunningAutomation)) {
       return;
     }
     const choice = dialog.showMessageBoxSync(window, {
       type: "warning",
-      title: "仍有会话正在运行",
-      message: "关闭客户端会终止所有正在运行的 Claude Code 会话。",
-      detail: "Claude Code 会保存对话记录，之后仍可通过 /resume 恢复。",
-      buttons: ["取消", "关闭并终止会话"],
+      title: "仍有任务正在运行",
+      message: "关闭客户端会终止正在运行的 Claude Code 会话和后台自动化。",
+      detail: hasRunningAutomation
+        ? "后台自动化的结果可能处于未知状态；下次启动时不会自动重跑，以避免重复发信。"
+        : "Claude Code 会保存交互式对话记录，之后仍可通过 /resume 恢复。",
+      buttons: ["取消", "关闭并终止任务"],
       defaultId: 0,
       cancelId: 0,
       noLink: true,
@@ -93,7 +103,6 @@ function createWindow(): BrowserWindow {
       return;
     }
     allowClose = true;
-    sessionManager.dispose();
   });
 
   const developmentUrl = process.env.VITE_DEV_SERVER_URL;
@@ -154,6 +163,21 @@ async function startApplication(): Promise<void> {
     wecomBridge?.handleClaudeHook(event),
   );
 
+  const automationStore = new AutomationStore(
+    join(app.getPath("userData"), "automation.json"),
+  );
+  const automationRunner = new ClaudeCodeJobRunner(
+    () => claudeLocator.requireExecutable(),
+    join(app.getPath("userData"), "automation-runtime"),
+  );
+  automationService = new AutomationService(
+    automationStore,
+    automationRunner,
+    (projectId) => projectStore.getProject(projectId),
+    wecomBridge,
+  );
+  await automationService.initialize();
+
   mainWindow = createWindow();
   const temporaryWorkspace = new TemporaryWorkspace(
     join(app.getPath("userData"), "temporary-workspaces"),
@@ -166,6 +190,7 @@ async function startApplication(): Promise<void> {
     temporaryWorkspace,
     wecomBridge,
     wecomSettingsService,
+    automationService,
   });
 }
 
@@ -196,10 +221,48 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
   allowClose = true;
-  wecomBridge?.dispose();
-  sessionManager?.dispose();
-  void claudeHookServer?.stop();
-  removeIpcHandlers?.();
+  if (shutdownComplete) {
+    return;
+  }
+  event.preventDefault();
+  if (shutdownPromise) {
+    return;
+  }
+  shutdownPromise = (async () => {
+    try {
+      removeIpcHandlers?.();
+    } catch (error) {
+      console.error("Failed to remove IPC handlers during shutdown", error);
+    }
+    removeIpcHandlers = null;
+    try {
+      await automationService?.dispose();
+    } catch (error) {
+      console.error("Failed to stop automation during shutdown", error);
+    }
+    try {
+      wecomBridge?.dispose();
+    } catch (error) {
+      console.error("Failed to stop WeCom during shutdown", error);
+    }
+    try {
+      sessionManager?.dispose();
+    } catch (error) {
+      console.error("Failed to stop sessions during shutdown", error);
+    }
+    try {
+      await claudeHookServer?.stop();
+    } catch (error) {
+      console.error("Failed to stop Claude hooks during shutdown", error);
+    }
+  })()
+    .catch((error: unknown) => {
+      console.error("Failed to shut down Claude Workspace cleanly", error);
+    })
+    .finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
 });

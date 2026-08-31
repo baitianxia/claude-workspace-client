@@ -2162,6 +2162,629 @@ button:disabled {
   font-size: 10px;
 }
 
+.automation-runtime-card {
+  margin-top: -7px;
+}
+
+.automation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  color: #d8d0c7;
+  background: rgba(8, 7, 6, 0.78);
+  backdrop-filter: blur(7px);
+}
+
+.automation-backdrop--loading {
+  color: #aaa198;
+  font-size: 12px;
+}
+
+.automation-dialog {
+  display: flex;
+  width: min(1180px, calc(100vw - 44px));
+  height: min(900px, calc(100vh - 44px));
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #51473f;
+  border-radius: 15px;
+  background: #1d1a17;
+  box-shadow: 0 32px 110px rgba(0, 0, 0, 0.64);
+}
+
+.automation-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 18px 20px 16px;
+  border-bottom: 1px solid #3c3630;
+  background:
+    linear-gradient(115deg, rgba(132, 77, 55, 0.15), transparent 44%),
+    #211e1a;
+  gap: 20px;
+}
+
+.automation-header h2,
+.automation-form-heading h3 {
+  margin: 0;
+  color: #f0e8df;
+  font-weight: 650;
+}
+
+.automation-header h2 {
+  margin-top: 3px;
+  font-size: 18px;
+}
+
+.automation-header p,
+.automation-form-heading p {
+  margin: 5px 0 0;
+  color: #9d958c;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.automation-eyebrow {
+  color: #c47c60;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.automation-header > button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: #9d958c;
+  background: transparent;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.automation-header > button:hover {
+  color: #f0e8df;
+  background: #342f2a;
+}
+
+.automation-tabs {
+  display: flex;
+  min-height: 43px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  padding: 0 16px;
+  border-bottom: 1px solid #38322d;
+  background: #1b1815;
+}
+
+.automation-tabs > button {
+  position: relative;
+  padding: 0 13px;
+  border: 0;
+  color: #918980;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.automation-tabs > button > span {
+  margin-left: 4px;
+  color: #b1816c;
+}
+
+.automation-tabs > button:hover,
+.automation-tabs > .automation-tab--active {
+  color: #e6ddd3;
+}
+
+.automation-tabs > .automation-tab--active::after {
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  left: 10px;
+  height: 2px;
+  background: #d17a59;
+  content: "";
+}
+
+.automation-scheduler-state {
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+  color: #918980;
+  font-size: 11px;
+  gap: 7px;
+}
+
+.automation-error {
+  display: flex;
+  min-height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 14px;
+  border-bottom: 1px solid #70493f;
+  color: #dfaa9e;
+  background: rgba(83, 45, 38, 0.52);
+  font-size: 11px;
+  gap: 12px;
+}
+
+.automation-error > button {
+  border: 0;
+  color: #d79b8d;
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.automation-jobs-layout {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: 258px minmax(0, 1fr);
+}
+
+.automation-job-list {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-right: 1px solid #38322d;
+  background: #1b1815;
+  scrollbar-color: #4a423a transparent;
+  scrollbar-width: thin;
+}
+
+.automation-list-heading {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  min-height: 43px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 8px 13px;
+  border-bottom: 1px solid #37312c;
+  background: rgba(29, 26, 23, 0.98);
+}
+
+.automation-list-heading strong {
+  color: #aaa198;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.automation-list-heading button {
+  padding: 5px 8px;
+  border: 1px solid #504238;
+  border-radius: 6px;
+  color: #d2a38e;
+  background: #2a241f;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.automation-job-row {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: flex-start;
+  padding: 11px 12px;
+  border: 0;
+  border-bottom: 1px solid rgba(55, 49, 44, 0.72);
+  color: #aba299;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+  gap: 9px;
+}
+
+.automation-job-row:hover {
+  background: #27231f;
+}
+
+.automation-job-row--selected {
+  background: #302a25;
+  box-shadow: inset 2px 0 #d17a59;
+}
+
+.automation-job-row > .status-dot {
+  margin-top: 5px;
+}
+
+.automation-job-row > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.automation-job-row strong,
+.automation-job-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-job-row strong {
+  color: #ded5cb;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.automation-job-row small {
+  color: #8f877e;
+  font-size: 10px;
+}
+
+.automation-empty-list,
+.automation-runs-empty {
+  padding: 32px 18px;
+  color: #827a72;
+  text-align: center;
+  font-size: 10px;
+}
+
+.automation-job-form {
+  min-width: 0;
+  min-height: 0;
+  padding: 18px 20px 20px;
+  overflow-y: auto;
+  background: #201d19;
+  scrollbar-color: #4a423a transparent;
+  scrollbar-width: thin;
+}
+
+.automation-form-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 20px;
+}
+
+.automation-form-heading h3 {
+  font-size: 15px;
+}
+
+.automation-inline-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 7px 9px;
+  border: 1px solid #423b35;
+  border-radius: 7px;
+  color: #aca39a;
+  background: #29251f;
+  cursor: pointer;
+  font-size: 11px;
+  gap: 6px;
+}
+
+.automation-inline-toggle input {
+  accent-color: #d67856;
+}
+
+.automation-form-grid,
+.automation-destination-grid {
+  display: grid;
+  gap: 11px;
+}
+
+.automation-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.automation-destination-grid {
+  margin-top: 13px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.automation-form-grid > label,
+.automation-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.automation-field {
+  margin-top: 13px;
+}
+
+.automation-destination-grid > .automation-field {
+  margin-top: 0;
+}
+
+.automation-form-grid label > span,
+.automation-field > span {
+  color: #aaa198;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.automation-job-form input,
+.automation-job-form select,
+.automation-job-form textarea {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid #433c35;
+  border-radius: 7px;
+  outline: 0;
+  color: #eee6dc;
+  background: #171512;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.automation-job-form textarea {
+  resize: vertical;
+}
+
+.automation-job-form input:focus,
+.automation-job-form select:focus,
+.automation-job-form textarea:focus {
+  border-color: #92634f;
+  box-shadow: 0 0 0 2px rgba(210, 119, 87, 0.12);
+}
+
+.automation-job-form input::placeholder,
+.automation-job-form textarea::placeholder {
+  color: #766f68;
+}
+
+.automation-field small {
+  color: #817a72;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.automation-prompt-field textarea {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.automation-warning,
+.automation-form-note {
+  padding: 9px 10px;
+  border-left: 2px solid #9a674f;
+  color: #a49a91;
+  background: rgba(79, 62, 52, 0.2);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.automation-warning {
+  margin-bottom: 13px;
+  border-left-color: #c18d53;
+  color: #c9a981;
+}
+
+.automation-form-note {
+  margin-top: 15px;
+}
+
+.automation-form-actions {
+  display: flex;
+  align-items: center;
+  margin-top: 17px;
+  gap: 8px;
+}
+
+.automation-form-actions > span {
+  flex: 1;
+}
+
+.automation-danger-button {
+  padding: 7px 10px;
+  border: 1px solid #68443c;
+  border-radius: 7px;
+  color: #d79a8d;
+  background: #34231f;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 570;
+}
+
+.automation-danger-button:hover:not(:disabled) {
+  border-color: #875247;
+  color: #efb1a3;
+  background: #3b2722;
+}
+
+.automation-runs {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  padding: 14px 16px 22px;
+  overflow-y: auto;
+  background: #1d1a17;
+  scrollbar-color: #4a423a transparent;
+  scrollbar-width: thin;
+}
+
+.automation-run-card {
+  margin: 0 auto 10px;
+  max-width: 970px;
+  overflow: hidden;
+  border: 1px solid #3d3731;
+  border-radius: 10px;
+  background: #211e1a;
+}
+
+.automation-run-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid #37312c;
+  background: #25211d;
+  gap: 12px;
+}
+
+.automation-run-card > header > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.automation-run-card > header strong {
+  overflow: hidden;
+  color: #ded5cb;
+  font-size: 12px;
+  font-weight: 630;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-run-card > header code,
+.automation-run-card > header > span {
+  color: #8f877e;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+}
+
+.automation-run-status {
+  padding: 2px 5px;
+  border: 1px solid #554b42;
+  border-radius: 4px;
+  color: #b8ada2;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.automation-run-status--succeeded {
+  border-color: rgba(124, 153, 88, 0.5);
+  color: #acc483;
+}
+
+.automation-run-status--running,
+.automation-run-status--queued {
+  border-color: rgba(199, 145, 76, 0.5);
+  color: #d3a45e;
+}
+
+.automation-run-status--failed,
+.automation-run-status--timed-out,
+.automation-run-status--cancelled {
+  border-color: rgba(187, 91, 78, 0.5);
+  color: #dc8c80;
+}
+
+.automation-run-body {
+  padding: 11px 12px;
+}
+
+.automation-run-body > p {
+  margin: 0;
+  color: #bbb1a7;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.automation-run-meta,
+.automation-deliveries {
+  display: flex;
+  margin-top: 9px;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.automation-run-meta > span,
+.automation-deliveries > span {
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: #988f86;
+  background: #2b2722;
+  font-size: 10px;
+}
+
+.automation-deliveries > span {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.automation-run-body details {
+  margin-top: 9px;
+  color: #9c938a;
+  font-size: 10px;
+}
+
+.automation-run-body details > summary {
+  cursor: pointer;
+}
+
+.automation-run-result-details > p {
+  margin: 8px 0 0;
+  color: #a9a097;
+  line-height: 1.5;
+}
+
+.automation-run-result-details > ul {
+  display: grid;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  gap: 5px;
+}
+
+.automation-run-result-details a {
+  color: #c58c73;
+  text-underline-offset: 2px;
+}
+
+.automation-run-result-details a:hover {
+  color: #dda58c;
+}
+
+.automation-run-body pre {
+  max-height: 180px;
+  margin: 7px 0 0;
+  padding: 9px;
+  overflow: auto;
+  border-radius: 6px;
+  color: #b9afa5;
+  background: #151310;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.automation-run-card > footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 12px 11px;
+  gap: 7px;
+}
+
+.automation-runs-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.automation-runs-empty strong {
+  color: #aaa198;
+  font-size: 12px;
+}
+
+.automation-runs-empty span {
+  font-size: 11px;
+}
+
 @media (max-width: 1080px) {
   .app-shell {
     grid-template-columns: 272px minmax(0, 1fr);
@@ -2181,5 +2804,13 @@ button:disabled {
 
   .changes-panel-body {
     grid-template-columns: 205px minmax(0, 1fr);
+  }
+
+  .automation-jobs-layout {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .automation-destination-grid {
+    grid-template-columns: 1fr;
   }
 }

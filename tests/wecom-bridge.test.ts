@@ -172,6 +172,35 @@ function incomingMessage(
   };
 }
 
+function incomingGroupMessage(
+  msgid: string,
+  chatid: string,
+  content: string,
+  userid = "zhangsan",
+  quotedContent?: string,
+): WsFrame<BaseMessage> {
+  return {
+    headers: { req_id: `request-${msgid}` },
+    body: {
+      msgid,
+      aibotid: "bot-id",
+      chattype: "group",
+      chatid,
+      from: { userid },
+      msgtype: "text",
+      text: { content },
+      ...(quotedContent
+        ? {
+            quote: {
+              msgtype: "text" as const,
+              text: { content: quotedContent },
+            },
+          }
+        : {}),
+    },
+  } as WsFrame<BaseMessage>;
+}
+
 function incomingMixedMessage(
   msgid: string,
   content: string,
@@ -705,6 +734,74 @@ describe("WeComBridge", () => {
     );
     expect(client.sent).toHaveLength(1);
     expect(restartedPty.writes).toEqual([]);
+
+    bridge.dispose();
+  });
+
+  it("routes group messages and outbound reports through the shared bot connection", async () => {
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      vi.fn() as unknown as PtySpawner,
+      "win32",
+    );
+    const client = new FakeWeComClient();
+    const bridge = new WeComBridge(
+      manager,
+      () => [],
+      new RemoteReplyRouter(),
+      () => client as unknown as WeComClient,
+    );
+    const businessHandler = vi.fn().mockResolvedValue({
+      status: "accepted" as const,
+      message: "已触发任务。",
+    });
+    bridge.setBusinessMessageHandler(businessHandler);
+    bridge.configure({
+      enabled: true,
+      botId: "bot-id",
+      targetUserId: "zhangsan",
+      secret: "secret",
+      hasSecret: true,
+    });
+    client.emit("authenticated");
+
+    const frame = incomingGroupMessage(
+      "group-message-1",
+      "group-one",
+      "  /run 每日报告  ",
+      "lisi",
+      "[RPT-ABCDEF1234] 上次报告",
+    );
+    client.emit("message", frame);
+
+    await vi.waitFor(() => expect(businessHandler).toHaveBeenCalledTimes(1));
+    expect(businessHandler).toHaveBeenCalledWith({
+      messageId: "group-message-1",
+      chatId: "group-one",
+      userId: "lisi",
+      text: "/run 每日报告",
+      quoteText: "[RPT-ABCDEF1234] 上次报告",
+    });
+    await vi.waitFor(() => expect(client.replies).toEqual(["已触发任务。"]));
+    expect(bridge.getState()).toMatchObject({
+      lastInboundStatus: "routed",
+      lastInboundDetail: "已触发任务。",
+    });
+
+    client.emit("message", frame);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(businessHandler).toHaveBeenCalledTimes(1);
+
+    await bridge.sendMarkdown("group-one", "# [RPT-ABCDEF1234]\n报告正文");
+    expect(client.sent).toEqual([
+      {
+        chatId: "group-one",
+        body: {
+          msgtype: "markdown",
+          markdown: { content: "# [RPT-ABCDEF1234]\n报告正文" },
+        },
+      },
+    ]);
 
     bridge.dispose();
   });

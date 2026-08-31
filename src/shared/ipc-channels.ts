@@ -6,6 +6,11 @@ export const IPC_CHANNELS = {
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
+  upsertAutomationJob: "workspace:upsert-automation-job",
+  deleteAutomationJob: "workspace:delete-automation-job",
+  runAutomationJob: "workspace:run-automation-job",
+  retryAutomationRun: "workspace:retry-automation-run",
+  cancelAutomationRun: "workspace:cancel-automation-run",
   createSession: "workspace:create-session",
   restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
@@ -22,4 +27,5 @@ export const IPC_CHANNELS = {
   terminalData: "workspace:terminal-data",
   sessionChanged: "workspace:session-changed",
   wecomStateChanged: "workspace:wecom-state-changed",
+  automationStateChanged: "workspace:automation-state-changed",
 } as const;

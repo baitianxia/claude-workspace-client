@@ -32,6 +32,23 @@ export interface WeComRuntimeConfiguration {
   configurationError?: string;
 }
 
+export interface WeComBusinessMessage {
+  messageId: string;
+  chatId: string;
+  userId: string;
+  text: string;
+  quoteText: string;
+}
+
+export interface WeComBusinessMessageResult {
+  status: "accepted" | "rejected";
+  message: string;
+}
+
+export type WeComBusinessMessageHandler = (
+  message: WeComBusinessMessage,
+) => Promise<WeComBusinessMessageResult>;
+
 interface WeComBridgeEvents {
   stateChanged: [state: WeComState];
 }
@@ -296,6 +313,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
   private authenticatedClient: WeComClient | null = null;
   private supersededClient: WeComClient | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
+  private businessMessageHandler: WeComBusinessMessageHandler | null = null;
 
   constructor(
     private readonly sessionManager: SessionManager,
@@ -322,6 +340,41 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         this.configuration.hasSecret &&
         !this.configuration.configurationError,
     );
+  }
+
+  setBusinessMessageHandler(
+    handler: WeComBusinessMessageHandler | null,
+  ): void {
+    this.businessMessageHandler = handler;
+  }
+
+  async sendMarkdown(targetId: string, content: string): Promise<void> {
+    const target = targetId.trim();
+    if (!target || [...target].length > 200 || /\p{Cc}|\s/u.test(target)) {
+      throw new Error("企业微信投递目标格式无效。");
+    }
+    const client = this.client;
+    if (!client || this.authenticatedClient !== client) {
+      throw new Error("企业微信机器人尚未连接。");
+    }
+    try {
+      await client.sendMessage(target, {
+        msgtype: "markdown",
+        markdown: { content: truncateUtf8(content, 18_000) },
+      });
+      if (this.client === client && this.state.status === "error") {
+        this.updateState({
+          ...this.state,
+          status: "connected",
+          error: undefined,
+        });
+      }
+    } catch (error) {
+      if (this.client === client) {
+        this.fail(`企业微信消息推送失败：${readableError(error)}`);
+      }
+      throw error;
+    }
   }
 
   configure(configuration: WeComRuntimeConfiguration): WeComState {
@@ -434,6 +487,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.router.clearAll();
     this.unsentCodes.clear();
     this.sendingCodes.clear();
+    this.businessMessageHandler = null;
   }
 
   private readonly handleSessionInput = (event: SessionInputEvent) => {
@@ -557,10 +611,6 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       }
     }
 
-    if (message.chattype !== "single") {
-      this.recordInbound("ignored", "收到群聊消息，已按安全策略忽略。");
-      return;
-    }
     const messageText = incomingMessageText(message);
     if (!messageText.trim()) {
       const detail = "收到消息，但其中没有可用于路由的文本。";
@@ -569,6 +619,38 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       return;
     }
     const quotedText = quoteText(message);
+    if (message.chattype === "group") {
+      const chatId = message.chatid?.trim();
+      const userId = message.from?.userid?.trim();
+      if (!this.businessMessageHandler) {
+        this.recordInbound("ignored", "收到群聊消息，但未启用自动化业务路由。");
+        return;
+      }
+      if (!chatId || !userId) {
+        const detail = "群聊消息缺少 chatid 或发送者 userid，无法安全路由。";
+        this.recordInbound("rejected", detail);
+        await this.replyToMessage(client, frame, detail);
+        return;
+      }
+      this.recordInbound("received", "已收到群聊自动化请求，正在匹配任务。");
+      const result = await this.businessMessageHandler({
+        messageId: message.msgid,
+        chatId,
+        userId,
+        text: messageText.trim(),
+        quoteText: quotedText.trim(),
+      });
+      this.recordInbound(
+        result.status === "accepted" ? "routed" : "rejected",
+        result.message,
+      );
+      await this.replyToMessage(client, frame, result.message);
+      return;
+    }
+    if (message.chattype !== "single") {
+      this.recordInbound("ignored", "收到不支持的企业微信会话类型。");
+      return;
+    }
     const resolved = this.router.resolve(
       this.configuration.targetUserId,
       messageText,
@@ -692,7 +774,12 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         return false;
       }
       try {
-        await client.sendMessage(this.configuration.targetUserId, {
+        const message = (frame as WsFrame<BaseMessage>).body;
+        const fallbackTarget =
+          message?.chatid ||
+          message?.from?.userid ||
+          this.configuration.targetUserId;
+        await client.sendMessage(fallbackTarget, {
           msgtype: "markdown",
           markdown: { content },
         });

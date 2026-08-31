@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  AutomationStateChangedEvent,
   DesktopApi,
   SessionChangedEvent,
   TerminalDataEvent,
@@ -18,6 +19,11 @@ const IPC_CHANNELS: IpcChannelMap = {
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
+  upsertAutomationJob: "workspace:upsert-automation-job",
+  deleteAutomationJob: "workspace:delete-automation-job",
+  runAutomationJob: "workspace:run-automation-job",
+  retryAutomationRun: "workspace:retry-automation-run",
+  cancelAutomationRun: "workspace:cancel-automation-run",
   createSession: "workspace:create-session",
   restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
@@ -34,6 +40,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   terminalData: "workspace:terminal-data",
   sessionChanged: "workspace:session-changed",
   wecomStateChanged: "workspace:wecom-state-changed",
+  automationStateChanged: "workspace:automation-state-changed",
 };
 
 const api: DesktopApi = {
@@ -50,6 +57,16 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.autoDetectClaudeExecutable),
   updateWeComConfig: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.updateWeComConfig, request),
+  upsertAutomationJob: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.upsertAutomationJob, request),
+  deleteAutomationJob: (jobId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.deleteAutomationJob, jobId),
+  runAutomationJob: (jobId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.runAutomationJob, jobId),
+  retryAutomationRun: (runId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.retryAutomationRun, runId),
+  cancelAutomationRun: (runId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.cancelAutomationRun, runId),
   createSession: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.createSession, request),
   restartSession: (sessionId) =>
@@ -97,6 +114,14 @@ const api: DesktopApi = {
     ) => listener(payload);
     ipcRenderer.on(IPC_CHANNELS.wecomStateChanged, handler);
     return () => ipcRenderer.off(IPC_CHANNELS.wecomStateChanged, handler);
+  },
+  onAutomationStateChanged: (listener) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: AutomationStateChangedEvent,
+    ) => listener(payload);
+    ipcRenderer.on(IPC_CHANNELS.automationStateChanged, handler);
+    return () => ipcRenderer.off(IPC_CHANNELS.automationStateChanged, handler);
   },
 };
 

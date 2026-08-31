@@ -58,11 +58,115 @@ export interface WeComState {
   lastInboundDetail?: string;
 }
 
+export interface AutomationJobRecord {
+  id: string;
+  name: string;
+  enabled: boolean;
+  projectId: string;
+  /** Five-field cron expression evaluated in the computer's local timezone. */
+  schedule: string;
+  /** Project-relative path to the MCP JSON loaded for this job. */
+  mcpConfigPath: string;
+  allowedMcpServers: string[];
+  prompt: string;
+  emailRecipients: string[];
+  wecomTargetIds: string[];
+  /** User IDs allowed to start follow-up runs; "*" explicitly allows the group. */
+  allowedWecomUserIds: string[];
+  timeoutMinutes: number;
+  maxTurns: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type AutomationRunTrigger = "scheduled" | "manual" | "wecom";
+
+export type AutomationRunStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "timed-out"
+  | "cancelled"
+  | "skipped";
+
+export type AutomationDeliveryStatus =
+  | "pending"
+  | "sending"
+  | "sent"
+  | "failed"
+  | "skipped";
+
+export interface AutomationDeliveryRecord {
+  targetId: string;
+  status: AutomationDeliveryStatus;
+  attempts: number;
+  sentAt?: number;
+  nextAttemptAt?: number;
+  error?: string;
+}
+
+export interface AutomationEvidence {
+  title: string;
+  url: string;
+}
+
+export type AutomationEmailStatus =
+  | "not-requested"
+  | "sent"
+  | "failed";
+
+export interface AutomationRunOutput {
+  outcome: "notify" | "no-change";
+  summary: string;
+  wecomMarkdown: string;
+  evidence: AutomationEvidence[];
+  email: {
+    status: AutomationEmailStatus;
+    recipients: string[];
+    detail: string;
+  };
+}
+
+export interface AutomationRunRecord {
+  id: string;
+  reportCode: string;
+  jobId: string;
+  jobName: string;
+  trigger: AutomationRunTrigger;
+  status: AutomationRunStatus;
+  attempt: number;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  scheduledFor?: number;
+  triggerMessageId?: string;
+  sourceRunId?: string;
+  requestedBy?: string;
+  requestText?: string;
+  quoteText?: string;
+  sessionId?: string;
+  exitCode?: number;
+  result?: AutomationRunOutput;
+  error?: string;
+  diagnostic?: string;
+  deliveries: AutomationDeliveryRecord[];
+}
+
+export interface AutomationSnapshot {
+  jobs: AutomationJobRecord[];
+  runs: AutomationRunRecord[];
+  runningJobIds: string[];
+  schedulerActive: boolean;
+  lastSchedulerCheckAt?: number;
+}
+
 export interface AppSnapshot {
   projects: ProjectRecord[];
   sessions: SessionRecord[];
   claudeExecutable: ClaudeExecutableState;
   wecom: WeComState;
+  automation: AutomationSnapshot;
 }
 
 export interface TerminalDataEvent {
@@ -129,6 +233,10 @@ export interface WeComStateChangedEvent {
   state: WeComState;
 }
 
+export interface AutomationStateChangedEvent {
+  state: AutomationSnapshot;
+}
+
 export type CreateSessionRequest =
   | {
       scope: "project";
@@ -165,6 +273,22 @@ export interface UpdateWeComConfigRequest {
   secret?: string;
 }
 
+export interface UpsertAutomationJobRequest {
+  id?: string;
+  name: string;
+  enabled: boolean;
+  projectId: string;
+  schedule: string;
+  mcpConfigPath: string;
+  allowedMcpServers: string[];
+  prompt: string;
+  emailRecipients: string[];
+  wecomTargetIds: string[];
+  allowedWecomUserIds: string[];
+  timeoutMinutes: number;
+  maxTurns: number;
+}
+
 export interface ResizeTerminalRequest {
   sessionId: string;
   columns: number;
@@ -184,6 +308,13 @@ export interface DesktopApi {
   selectClaudeExecutable(): Promise<ClaudeExecutableState | null>;
   autoDetectClaudeExecutable(): Promise<ClaudeExecutableState>;
   updateWeComConfig(request: UpdateWeComConfigRequest): Promise<WeComState>;
+  upsertAutomationJob(
+    request: UpsertAutomationJobRequest,
+  ): Promise<AutomationJobRecord>;
+  deleteAutomationJob(jobId: string): Promise<void>;
+  runAutomationJob(jobId: string): Promise<AutomationRunRecord>;
+  retryAutomationRun(runId: string): Promise<AutomationRunRecord>;
+  cancelAutomationRun(runId: string): Promise<void>;
   createSession(request: CreateSessionRequest): Promise<SessionRecord>;
   restartSession(sessionId: string): Promise<SessionRecord>;
   renameSession(request: RenameSessionRequest): Promise<SessionRecord>;
@@ -203,5 +334,8 @@ export interface DesktopApi {
   onSessionChanged(listener: (event: SessionChangedEvent) => void): () => void;
   onWeComStateChanged(
     listener: (event: WeComStateChangedEvent) => void,
+  ): () => void;
+  onAutomationStateChanged(
+    listener: (event: AutomationStateChangedEvent) => void,
   ): () => void;
 }

@@ -26,6 +26,11 @@ const WorkspaceChangesPanel = lazy(async () => {
   return { default: module.WorkspaceChangesPanel };
 });
 
+const AutomationPanel = lazy(async () => {
+  const module = await import("./AutomationPanel");
+  return { default: module.AutomationPanel };
+});
+
 function readableError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   return raw.replace(/^Error invoking remote method '[^']+': Error: /u, "");
@@ -81,6 +86,17 @@ function wecomInboundLabel(state: AppSnapshot["wecom"]): string | null {
     hour12: false,
   });
   return `${time} · ${state.lastInboundDetail}`;
+}
+
+function automationStatusLabel(state: AppSnapshot["automation"]): string {
+  if (state.runningJobIds.length) {
+    return `${state.runningJobIds.length} 个任务正在运行`;
+  }
+  const enabled = state.jobs.filter((job) => job.enabled).length;
+  if (!state.jobs.length) {
+    return "尚未配置任务";
+  }
+  return `${enabled} 个定时任务已启用`;
 }
 
 function upsertSession(
@@ -171,6 +187,7 @@ export function App() {
   const [wecomBotIdDraft, setWeComBotIdDraft] = useState("");
   const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
   const [wecomSecretDraft, setWeComSecretDraft] = useState("");
+  const [automationPanelOpen, setAutomationPanelOpen] = useState(false);
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -346,6 +363,15 @@ export function App() {
         );
       },
     );
+    const unsubscribeAutomation =
+      window.claudeWorkspace.onAutomationStateChanged(({ state }) => {
+        if (disposed) {
+          return;
+        }
+        setSnapshot((current) =>
+          current ? { ...current, automation: state } : current,
+        );
+      });
 
     void window.claudeWorkspace
       .getSnapshot()
@@ -402,6 +428,7 @@ export function App() {
       unsubscribeSession();
       unsubscribeTerminal();
       unsubscribeWeCom();
+      unsubscribeAutomation();
     };
   }, []);
 
@@ -990,7 +1017,7 @@ export function App() {
               }`}
             />
             <div>
-              <strong>企业微信远程回复</strong>
+              <strong>企业微信智能机器人</strong>
               <span title={snapshot.wecom.error}>
                 {wecomStatusLabel(snapshot.wecom)}
               </span>
@@ -1007,6 +1034,33 @@ export function App() {
           <div className="runtime-actions">
             <button type="button" onClick={openWeComSettings} disabled={busy}>
               {snapshot.wecom.configured ? "修改配置" : "开始配置"}
+            </button>
+          </div>
+        </section>
+
+        <section className="claude-runtime-card automation-runtime-card">
+          <div className="runtime-heading">
+            <span
+              className={`status-dot ${
+                snapshot.automation.runningJobIds.length
+                  ? "status-dot--pending"
+                  : snapshot.automation.schedulerActive
+                    ? "status-dot--online"
+                    : "status-dot--offline"
+              }`}
+            />
+            <div>
+              <strong>网页与邮件自动化</strong>
+              <span>{automationStatusLabel(snapshot.automation)}</span>
+            </div>
+          </div>
+          <div className="runtime-actions">
+            <button
+              type="button"
+              onClick={() => setAutomationPanelOpen(true)}
+              disabled={busy}
+            >
+              {snapshot.automation.jobs.length ? "管理任务" : "创建任务"}
             </button>
           </div>
         </section>
@@ -1474,6 +1528,22 @@ export function App() {
           onSelect={selectWorkspaceItem}
         />
       ) : null}
+      {automationPanelOpen ? (
+        <Suspense
+          fallback={
+            <div className="automation-backdrop automation-backdrop--loading">
+              正在加载自动化管理…
+            </div>
+          }
+        >
+          <AutomationPanel
+            automation={snapshot.automation}
+            projects={projects}
+            defaultWeComUserId={snapshot.wecom.targetUserId || undefined}
+            onClose={() => setAutomationPanelOpen(false)}
+          />
+        </Suspense>
+      ) : null}
       {wecomSettingsOpen ? (
         <div className="settings-backdrop" role="presentation">
           <form
@@ -1507,7 +1577,7 @@ export function App() {
               />
               <span>
                 <strong>启用远程通知与回复</strong>
-                <small>Claude Code 等待输入时推送到指定企业微信用户</small>
+                <small>终端远程回复、自动化群聊交互与主动推送共用一个连接</small>
               </span>
             </label>
             <label className="settings-field">
@@ -1557,7 +1627,8 @@ export function App() {
               />
             </label>
             <div className="settings-note">
-              Secret 使用操作系统安全存储加密。每条待回复消息都有独立回复码，
+              Secret 使用操作系统安全存储加密。一个机器人连接可同时服务终端回复和
+              多个自动化任务。每条待回复消息都有独立回复码，
               多个 Claude Code 进程同时等待时也会精确路由；引用机器人消息回复时
               无需重复输入回复码。启用后请新建或重启需要远程回复的 Claude Code
               会话。同一组 Bot ID/Secret 同时只能连接一个客户端；多人使用时每个
