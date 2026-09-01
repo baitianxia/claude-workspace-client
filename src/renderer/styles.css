@@ -1266,6 +1266,10 @@ button:disabled {
   backdrop-filter: blur(6px);
 }
 
+.settings-backdrop--above-automation {
+  z-index: 70;
+}
+
 .settings-dialog {
   width: min(520px, calc(100vw - 48px));
   padding: 20px;
@@ -2673,6 +2677,75 @@ button:disabled {
   margin: 10px 0 0;
   color: #817a72;
   font-size: 10px;
+}
+
+.automation-wecom-sender {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid #453c35;
+  border-radius: 9px;
+  background: rgba(27, 24, 21, 0.76);
+  gap: 12px;
+}
+
+.automation-wecom-sender--connected {
+  border-color: #465044;
+  background: rgba(35, 47, 36, 0.38);
+}
+
+.automation-wecom-sender--error {
+  border-color: #67463e;
+  background: rgba(69, 39, 34, 0.32);
+}
+
+.automation-wecom-sender > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.automation-wecom-sender > div > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.automation-wecom-sender strong {
+  color: #ddd4ca;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.automation-wecom-sender small {
+  overflow: hidden;
+  color: #8f877e;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-wecom-sender > button {
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  border: 1px solid #574a41;
+  border-radius: 7px;
+  color: #d8cec5;
+  background: #302923;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 620;
+}
+
+.automation-wecom-sender > button:hover {
+  border-color: #87604f;
+  color: #f1e7dd;
+  background: #3b3029;
 }
 
 .automation-job-form .automation-compact-list-input {

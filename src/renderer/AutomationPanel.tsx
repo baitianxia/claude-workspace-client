@@ -11,6 +11,7 @@ import type {
   DiscoveredWeComGroup,
   ProjectRecord,
   UpsertAutomationJobRequest,
+  WeComState,
 } from "../shared/contracts";
 import {
   automationScheduleExpression,
@@ -23,7 +24,9 @@ import { projectDisplayName } from "./workspace-search";
 interface AutomationPanelProps {
   automation: AutomationSnapshot;
   projects: ProjectRecord[];
+  wecom: WeComState;
   defaultWeComUserId?: string;
+  onConfigureWeCom(): void;
   onClose(): void;
 }
 
@@ -71,6 +74,22 @@ function shortWeComTargetId(value: string): string {
 
 function discoveredGroupLabel(group: DiscoveredWeComGroup): string {
   return `${group.alias || "未命名群"} · ${shortWeComTargetId(group.chatId)}`;
+}
+
+function wecomConnectionLabel(wecom: WeComState): string {
+  if (!wecom.configured) {
+    return "尚未配置";
+  }
+  switch (wecom.status) {
+    case "connected":
+      return "已连接";
+    case "connecting":
+      return "正在连接";
+    case "disabled":
+      return "已停用";
+    case "error":
+      return "连接异常";
+  }
 }
 
 function deliveryChannelsForJob(
@@ -213,7 +232,9 @@ function dateTime(value: number | undefined): string {
 export function AutomationPanel({
   automation,
   projects,
+  wecom,
   defaultWeComUserId,
+  onConfigureWeCom,
   onClose,
 }: AutomationPanelProps) {
   const initialJob = automation.jobs[0];
@@ -707,6 +728,43 @@ export function AutomationPanel({
                     </span>
                   </button>
                 </div>
+
+                {draft.deliveryChannels.includes("wecom") ? (
+                  <div
+                    className={`automation-wecom-sender automation-wecom-sender--${wecom.status}`}
+                  >
+                    <div>
+                      <span
+                        className={`status-dot ${
+                          wecom.status === "connected"
+                            ? "status-dot--online"
+                            : wecom.status === "connecting"
+                              ? "status-dot--pending"
+                              : "status-dot--offline"
+                        }`}
+                      />
+                      <span>
+                        <strong>发送机器人</strong>
+                        <small
+                          title={
+                            wecom.error ||
+                            (wecom.configured
+                              ? `Bot ID ${wecom.botId}`
+                              : undefined)
+                          }
+                        >
+                          {wecom.configured
+                            ? `${wecomConnectionLabel(wecom)} · Bot ID ${wecom.botId}`
+                            : "尚未配置 Bot ID 与 Secret"}
+                        </small>
+                        <small>所有自动化任务共用这个机器人连接</small>
+                      </span>
+                    </div>
+                    <button type="button" onClick={onConfigureWeCom}>
+                      {wecom.configured ? "修改机器人" : "配置机器人"}
+                    </button>
+                  </div>
+                ) : null}
 
                 {draft.deliveryChannels.length ? (
                   <div className="automation-destination-grid">

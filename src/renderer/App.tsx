@@ -1539,13 +1539,20 @@ export function App() {
           <AutomationPanel
             automation={snapshot.automation}
             projects={projects}
+            wecom={snapshot.wecom}
             defaultWeComUserId={snapshot.wecom.targetUserId || undefined}
+            onConfigureWeCom={openWeComSettings}
             onClose={() => setAutomationPanelOpen(false)}
           />
         </Suspense>
       ) : null}
       {wecomSettingsOpen ? (
-        <div className="settings-backdrop" role="presentation">
+        <div
+          className={`settings-backdrop ${
+            automationPanelOpen ? "settings-backdrop--above-automation" : ""
+          }`}
+          role="presentation"
+        >
           <form
             className="settings-dialog"
             role="dialog"
@@ -1576,7 +1583,7 @@ export function App() {
                 }
               />
               <span>
-                <strong>启用远程通知与回复</strong>
+                <strong>启用企业微信机器人连接</strong>
                 <small>终端远程回复、自动化群聊交互与主动推送共用一个连接</small>
               </span>
             </label>

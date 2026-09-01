@@ -90,12 +90,12 @@ const previewSnapshot: AppSnapshot = {
     source: "detected",
   },
   wecom: {
-    enabled: false,
-    configured: false,
-    hasSecret: false,
-    botId: "",
-    targetUserId: "",
-    status: "disabled",
+    enabled: true,
+    configured: true,
+    hasSecret: true,
+    botId: "aibot-preview-news",
+    targetUserId: "developer",
+    status: "connected",
   },
   automation: {
     discoveredWeComGroups: [
