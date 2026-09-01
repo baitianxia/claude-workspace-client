@@ -2451,7 +2451,7 @@ button:disabled {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  margin-bottom: 16px;
+  margin-bottom: 13px;
   gap: 20px;
 }
 
@@ -2489,7 +2489,7 @@ button:disabled {
 
 .automation-destination-grid {
   margin-top: 13px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .automation-form-grid > label,
@@ -2552,8 +2552,202 @@ button:disabled {
   line-height: 1.45;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  margin: -1px;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.automation-schedule-block {
+  display: flex;
+  margin-top: 13px;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.automation-section-label,
+.automation-channel-section > legend {
+  padding: 0;
+  color: #aaa198;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.automation-schedule-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.72fr) minmax(180px, 1fr);
+  gap: 8px;
+}
+
+.automation-schedule-controls label {
+  position: relative;
+  min-width: 0;
+}
+
+.automation-schedule-block > small {
+  color: #817a72;
+  font-size: 10px;
+}
+
 .automation-prompt-field textarea {
+  min-height: 88px;
   font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.automation-channel-section {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  margin: 15px 0 0;
+}
+
+.automation-channel-picker {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 7px;
+  gap: 8px;
+}
+
+.automation-channel-option {
+  display: flex;
+  min-width: 154px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid #433c35;
+  border-radius: 8px;
+  color: #9f978e;
+  text-align: left;
+  background: #191714;
+  cursor: pointer;
+  gap: 9px;
+}
+
+.automation-channel-option:hover {
+  border-color: #655248;
+  background: #24201c;
+}
+
+.automation-channel-option--selected {
+  border-color: #8c5d49;
+  color: #eadfd5;
+  background: rgba(104, 65, 49, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(209, 122, 89, 0.12);
+}
+
+.automation-channel-option > span:first-child {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 7px;
+  color: #d48a6d;
+  background: #302720;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.automation-channel-option > span:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.automation-channel-option strong {
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.automation-channel-option small {
+  color: #817a72;
+  font-size: 9px;
+}
+
+.automation-channel-empty {
+  margin: 10px 0 0;
+  color: #817a72;
+  font-size: 10px;
+}
+
+.automation-job-form .automation-compact-list-input {
+  min-height: 34px;
+  resize: vertical;
+}
+
+.automation-advanced-settings {
+  margin-top: 15px;
+  overflow: hidden;
+  border: 1px solid #3d3731;
+  border-radius: 9px;
+  background: rgba(24, 22, 19, 0.64);
+}
+
+.automation-advanced-settings > summary {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 11px;
+  color: #aaa198;
+  cursor: pointer;
+  list-style: none;
+  gap: 12px;
+}
+
+.automation-advanced-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.automation-advanced-settings > summary:hover {
+  color: #e0d7ce;
+  background: rgba(54, 47, 41, 0.5);
+}
+
+.automation-advanced-settings > summary > span:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.automation-advanced-settings > summary strong {
+  font-size: 11px;
+}
+
+.automation-advanced-settings > summary small {
+  color: #817a72;
+  font-size: 9px;
+}
+
+.automation-advanced-settings > summary > span:last-child {
+  color: #8d847c;
+  font-size: 14px;
+  transition: transform 120ms ease;
+}
+
+.automation-advanced-settings[open] > summary {
+  border-bottom: 1px solid #3d3731;
+}
+
+.automation-advanced-settings[open] > summary > span:last-child {
+  transform: rotate(180deg);
+}
+
+.automation-advanced-body {
+  padding: 12px;
+}
+
+.automation-advanced-body > .automation-field {
+  margin-top: 12px;
+}
+
+.automation-advanced-body .automation-form-note {
+  margin-top: 12px;
 }
 
 .automation-warning,
@@ -2579,7 +2773,7 @@ button:disabled {
 .automation-form-actions {
   display: flex;
   align-items: center;
-  margin-top: 17px;
+  margin-top: 13px;
   gap: 8px;
 }
 
@@ -2809,7 +3003,10 @@ button:disabled {
   .automation-jobs-layout {
     grid-template-columns: 220px minmax(0, 1fr);
   }
+}
 
+@media (max-width: 800px) {
+  .automation-schedule-controls,
   .automation-destination-grid {
     grid-template-columns: 1fr;
   }

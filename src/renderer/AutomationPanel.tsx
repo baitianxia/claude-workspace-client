@@ -11,6 +11,12 @@ import type {
   ProjectRecord,
   UpsertAutomationJobRequest,
 } from "../shared/contracts";
+import {
+  automationScheduleExpression,
+  automationScheduleFields,
+  automationScheduleLabel,
+  type AutomationScheduleMode,
+} from "./automation-schedule";
 import { projectDisplayName } from "./workspace-search";
 
 interface AutomationPanelProps {
@@ -24,6 +30,8 @@ interface JobDraft {
   name: string;
   enabled: boolean;
   projectId: string;
+  scheduleMode: AutomationScheduleMode;
+  scheduleTime: string;
   schedule: string;
   mcpConfigPath: string;
   allowedMcpServers: string;
@@ -33,7 +41,10 @@ interface JobDraft {
   allowedWecomUserIds: string;
   timeoutMinutes: string;
   maxTurns: string;
+  deliveryChannels: DeliveryChannel[];
 }
+
+type DeliveryChannel = "wecom" | "email";
 
 function readableError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -51,17 +62,37 @@ function parseList(value: string): string[] {
     .filter(Boolean);
 }
 
+function deliveryChannelsForJob(
+  job: AutomationJobRecord | undefined,
+): DeliveryChannel[] {
+  if (!job) {
+    return ["wecom"];
+  }
+  const channels: DeliveryChannel[] = [];
+  if (job.wecomTargetIds.length) {
+    channels.push("wecom");
+  }
+  if (job.emailRecipients.length) {
+    channels.push("email");
+  }
+  return channels;
+}
+
 function draftForJob(
   job: AutomationJobRecord | undefined,
   projects: ProjectRecord[],
   defaultWeComUserId?: string,
 ): JobDraft {
+  const schedule = job?.schedule ?? "0 9 * * 1-5";
+  const scheduleFields = automationScheduleFields(schedule);
   return job
     ? {
         name: job.name,
         enabled: job.enabled,
         projectId: job.projectId,
-        schedule: job.schedule,
+        scheduleMode: scheduleFields.mode,
+        scheduleTime: scheduleFields.time,
+        schedule,
         mcpConfigPath: job.mcpConfigPath,
         allowedMcpServers: listText(job.allowedMcpServers),
         prompt: job.prompt,
@@ -70,12 +101,15 @@ function draftForJob(
         allowedWecomUserIds: listText(job.allowedWecomUserIds),
         timeoutMinutes: String(job.timeoutMinutes),
         maxTurns: String(job.maxTurns),
+        deliveryChannels: deliveryChannelsForJob(job),
       }
     : {
         name: "",
         enabled: true,
         projectId: projects[0]?.id ?? "",
-        schedule: "0 9 * * 1-5",
+        scheduleMode: scheduleFields.mode,
+        scheduleTime: scheduleFields.time,
+        schedule,
         mcpConfigPath: ".mcp.json",
         allowedMcpServers: "web\nmail",
         prompt: "",
@@ -84,6 +118,7 @@ function draftForJob(
         allowedWecomUserIds: defaultWeComUserId ?? "",
         timeoutMinutes: "20",
         maxTurns: "20",
+        deliveryChannels: deliveryChannelsForJob(undefined),
       };
 }
 
@@ -227,6 +262,15 @@ export function AutomationPanel({
     setError(null);
   };
 
+  const toggleDeliveryChannel = (channel: DeliveryChannel) => {
+    setDraft((current) => ({
+      ...current,
+      deliveryChannels: current.deliveryChannels.includes(channel)
+        ? current.deliveryChannels.filter((value) => value !== channel)
+        : [...current.deliveryChannels, channel],
+    }));
+  };
+
   const saveJob = (event: FormEvent) => {
     event.preventDefault();
     const request: UpsertAutomationJobRequest = {
@@ -234,13 +278,23 @@ export function AutomationPanel({
       name: draft.name,
       enabled: draft.enabled,
       projectId: draft.projectId,
-      schedule: draft.schedule,
+      schedule: automationScheduleExpression(
+        draft.scheduleMode,
+        draft.scheduleTime,
+        draft.schedule,
+      ),
       mcpConfigPath: draft.mcpConfigPath,
       allowedMcpServers: parseList(draft.allowedMcpServers),
       prompt: draft.prompt,
-      emailRecipients: parseList(draft.emailRecipients),
-      wecomTargetIds: parseList(draft.wecomTargetIds),
-      allowedWecomUserIds: parseList(draft.allowedWecomUserIds),
+      emailRecipients: draft.deliveryChannels.includes("email")
+        ? parseList(draft.emailRecipients)
+        : [],
+      wecomTargetIds: draft.deliveryChannels.includes("wecom")
+        ? parseList(draft.wecomTargetIds)
+        : [],
+      allowedWecomUserIds: draft.deliveryChannels.includes("wecom")
+        ? parseList(draft.allowedWecomUserIds)
+        : [],
       timeoutMinutes: Number(draft.timeoutMinutes),
       maxTurns: Number(draft.maxTurns),
     };
@@ -286,10 +340,7 @@ export function AutomationPanel({
           <div>
             <span className="automation-eyebrow">CLAUDE CODE + MCP</span>
             <h2 id="automation-title">网页信息推送自动化</h2>
-            <p>
-              调度、运行记录和企微投递由客户端负责；网页读取与邮件发送由任务允许的
-              MCP 完成。
-            </p>
+            <p>定时读取网页，把新信息推送到企业微信或邮箱。</p>
           </div>
           <button type="button" aria-label="关闭自动化管理" onClick={onClose}>
             ×
@@ -304,7 +355,7 @@ export function AutomationPanel({
             className={tab === "jobs" ? "automation-tab--active" : ""}
             onClick={() => setTab("jobs")}
           >
-            任务配置 <span>{automation.jobs.length}</span>
+            任务 <span>{automation.jobs.length}</span>
           </button>
           <button
             type="button"
@@ -313,7 +364,7 @@ export function AutomationPanel({
             className={tab === "runs" ? "automation-tab--active" : ""}
             onClick={() => setTab("runs")}
           >
-            运行记录 <span>{automation.runs.length}</span>
+            记录 <span>{automation.runs.length}</span>
           </button>
           <div className="automation-scheduler-state">
             <span
@@ -357,7 +408,9 @@ export function AutomationPanel({
                       />
                       <span>
                         <strong>{job.name}</strong>
-                        <small>{job.schedule} · 本机时区</small>
+                        <small>
+                          {automationScheduleLabel(job.schedule)} · 本机时区
+                        </small>
                         <small>
                           {running
                             ? "正在运行"
@@ -378,7 +431,7 @@ export function AutomationPanel({
               <div className="automation-form-heading">
                 <div>
                   <h3>{selectedJob ? selectedJob.name : "新建自动化任务"}</h3>
-                  <p>每次执行启动独立的无界面 Claude Code 进程。</p>
+                  <p>设置执行时间、任务内容和推送目标。</p>
                 </div>
                 <label className="automation-inline-toggle">
                   <input
@@ -429,90 +482,83 @@ export function AutomationPanel({
                     ))}
                   </select>
                 </label>
-                <label>
-                  <span>定时表达式（分 时 日 月 星期）</span>
-                  <input
-                    value={draft.schedule}
-                    maxLength={100}
-                    placeholder="0 9 * * 1-5"
-                    onChange={(event) =>
-                      setDraft({ ...draft, schedule: event.currentTarget.value })
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  <span>工程内 MCP 配置</span>
-                  <input
-                    value={draft.mcpConfigPath}
-                    maxLength={500}
-                    placeholder=".mcp.json"
-                    onChange={(event) =>
-                      setDraft({
-                        ...draft,
-                        mcpConfigPath: event.currentTarget.value,
-                      })
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  <span>超时（分钟）</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={120}
-                    value={draft.timeoutMinutes}
-                    onChange={(event) =>
-                      setDraft({
-                        ...draft,
-                        timeoutMinutes: event.currentTarget.value,
-                      })
-                    }
-                    required
-                  />
-                </label>
-                <label>
-                  <span>最大 Agent 轮数</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={draft.maxTurns}
-                    onChange={(event) =>
-                      setDraft({ ...draft, maxTurns: event.currentTarget.value })
-                    }
-                    required
-                  />
-                </label>
               </div>
 
-              <label className="automation-field">
-                <span>允许的 MCP 服务器</span>
-                <textarea
-                  rows={2}
-                  value={draft.allowedMcpServers}
-                  placeholder="web&#10;mail"
-                  onChange={(event) =>
-                    setDraft({
-                      ...draft,
-                      allowedMcpServers: event.currentTarget.value,
-                    })
-                  }
-                  required
-                />
-                <small>
-                  只从上述配置文件复制这些服务器，并仅批准 `mcp__服务器名__*`。
-                </small>
-              </label>
+              <div className="automation-schedule-block">
+                <span className="automation-section-label">执行时间</span>
+                <div className="automation-schedule-controls">
+                  <label>
+                    <span className="visually-hidden">执行频率</span>
+                    <select
+                      aria-label="执行频率"
+                      value={draft.scheduleMode}
+                      onChange={(event) => {
+                        const scheduleMode = event.currentTarget
+                          .value as AutomationScheduleMode;
+                        setDraft((current) => ({
+                          ...current,
+                          schedule:
+                            scheduleMode === "custom"
+                              ? automationScheduleExpression(
+                                  current.scheduleMode,
+                                  current.scheduleTime,
+                                  current.schedule,
+                                )
+                              : current.schedule,
+                          scheduleMode,
+                        }));
+                      }}
+                    >
+                      <option value="weekdays">每个工作日</option>
+                      <option value="daily">每天</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </label>
+                  {draft.scheduleMode === "custom" ? (
+                    <label>
+                      <span className="visually-hidden">Cron 表达式</span>
+                      <input
+                        aria-label="Cron 表达式"
+                        value={draft.schedule}
+                        maxLength={100}
+                        placeholder="0 9 * * 1-5"
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            schedule: event.currentTarget.value,
+                          })
+                        }
+                        required
+                      />
+                    </label>
+                  ) : (
+                    <label>
+                      <span className="visually-hidden">执行时间</span>
+                      <input
+                        aria-label="执行时间"
+                        type="time"
+                        value={draft.scheduleTime}
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            scheduleTime: event.currentTarget.value,
+                          })
+                        }
+                        required
+                      />
+                    </label>
+                  )}
+                </div>
+                <small>按本机时区执行；复杂计划可选择“自定义”。</small>
+              </div>
 
               <label className="automation-field automation-prompt-field">
-                <span>任务提示词</span>
+                <span>任务内容</span>
                 <textarea
-                  rows={8}
+                  rows={4}
                   value={draft.prompt}
                   maxLength={50_000}
-                  placeholder="使用网页 MCP 检查指定页面，只保留符合条件的新信息……"
+                  placeholder="例如：检查行业资讯页面，只整理新出现且与业务相关的信息。"
                   onChange={(event) =>
                     setDraft({ ...draft, prompt: event.currentTarget.value })
                   }
@@ -520,58 +566,185 @@ export function AutomationPanel({
                 />
               </label>
 
-              <div className="automation-destination-grid">
-                <label className="automation-field">
-                  <span>固定邮件收件人</span>
-                  <textarea
-                    rows={3}
-                    value={draft.emailRecipients}
-                    placeholder="owner@example.com"
-                    onChange={(event) =>
-                      setDraft({
-                        ...draft,
-                        emailRecipients: event.currentTarget.value,
-                      })
+              <fieldset className="automation-channel-section">
+                <legend>推送到</legend>
+                <div className="automation-channel-picker">
+                  <button
+                    type="button"
+                    aria-pressed={draft.deliveryChannels.includes("wecom")}
+                    className={
+                      draft.deliveryChannels.includes("wecom")
+                        ? "automation-channel-option automation-channel-option--selected"
+                        : "automation-channel-option"
                     }
-                  />
-                  <small>邮件 MCP 仍须在服务端独立执行同一白名单。</small>
-                </label>
-                <label className="automation-field">
-                  <span>企业微信 userid / 群 chatid</span>
-                  <textarea
-                    rows={3}
-                    value={draft.wecomTargetIds}
-                    placeholder="wrxxxxxxxx"
-                    onChange={(event) =>
-                      setDraft({
-                        ...draft,
-                        wecomTargetIds: event.currentTarget.value,
-                      })
+                    onClick={() => toggleDeliveryChannel("wecom")}
+                  >
+                    <span>企</span>
+                    <span>
+                      <strong>企业微信</strong>
+                      <small>个人或群聊</small>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={draft.deliveryChannels.includes("email")}
+                    className={
+                      draft.deliveryChannels.includes("email")
+                        ? "automation-channel-option automation-channel-option--selected"
+                        : "automation-channel-option"
                     }
-                  />
-                  <small>在目标群 @机器人发送 `/chatid` 可查询本群 ID。</small>
-                </label>
-                <label className="automation-field">
-                  <span>允许群内交互的 userid</span>
-                  <textarea
-                    rows={3}
-                    value={draft.allowedWecomUserIds}
-                    placeholder="zhangsan"
-                    onChange={(event) =>
-                      setDraft({
-                        ...draft,
-                        allowedWecomUserIds: event.currentTarget.value,
-                      })
-                    }
-                  />
-                  <small>留空禁止群内执行；明确填写 `*` 才允许群内所有成员。</small>
-                </label>
-              </div>
+                    onClick={() => toggleDeliveryChannel("email")}
+                  >
+                    <span>邮</span>
+                    <span>
+                      <strong>邮件</strong>
+                      <small>固定收件人</small>
+                    </span>
+                  </button>
+                </div>
 
-              <div className="automation-form-note">
-                内置 Shell、读写文件和浏览器工具均不提供给后台任务。任务采用普通 Claude
-                Code 登录上下文启动，以兼容现有账号；独立 MCP 配置会按服务器名单过滤后临时加载。
-              </div>
+                {draft.deliveryChannels.length ? (
+                  <div className="automation-destination-grid">
+                    {draft.deliveryChannels.includes("wecom") ? (
+                      <label className="automation-field">
+                        <span>企业微信接收人或群</span>
+                        <textarea
+                          className="automation-compact-list-input"
+                          rows={1}
+                          value={draft.wecomTargetIds}
+                          placeholder="userid 或群 chatid，多个用逗号分隔"
+                          required
+                          onChange={(event) =>
+                            setDraft({
+                              ...draft,
+                              wecomTargetIds: event.currentTarget.value,
+                            })
+                          }
+                        />
+                        <small>在目标群 @机器人发送 `/chatid` 可查询群 ID。</small>
+                      </label>
+                    ) : null}
+                    {draft.deliveryChannels.includes("email") ? (
+                      <label className="automation-field">
+                        <span>邮件收件人</span>
+                        <textarea
+                          className="automation-compact-list-input"
+                          rows={1}
+                          value={draft.emailRecipients}
+                          placeholder="owner@example.com，多个用逗号分隔"
+                          required
+                          onChange={(event) =>
+                            setDraft({
+                              ...draft,
+                              emailRecipients: event.currentTarget.value,
+                            })
+                          }
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="automation-channel-empty">暂不推送，仅保留运行记录。</p>
+                )}
+              </fieldset>
+
+              <details className="automation-advanced-settings">
+                <summary>
+                  <span>
+                    <strong>高级设置</strong>
+                    <small>MCP、安全与执行限制</small>
+                  </span>
+                  <span aria-hidden="true">⌄</span>
+                </summary>
+                <div className="automation-advanced-body">
+                  <div className="automation-form-grid">
+                    <label>
+                      <span>MCP 配置文件</span>
+                      <input
+                        value={draft.mcpConfigPath}
+                        maxLength={500}
+                        placeholder=".mcp.json"
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            mcpConfigPath: event.currentTarget.value,
+                          })
+                        }
+                        required
+                      />
+                    </label>
+                    <label>
+                      <span>允许的 MCP 服务</span>
+                      <textarea
+                        rows={2}
+                        value={draft.allowedMcpServers}
+                        placeholder="web&#10;mail"
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            allowedMcpServers: event.currentTarget.value,
+                          })
+                        }
+                        required
+                      />
+                    </label>
+                    <label>
+                      <span>超时（分钟）</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={120}
+                        value={draft.timeoutMinutes}
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            timeoutMinutes: event.currentTarget.value,
+                          })
+                        }
+                        required
+                      />
+                    </label>
+                    <label>
+                      <span>最大执行轮数</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={draft.maxTurns}
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            maxTurns: event.currentTarget.value,
+                          })
+                        }
+                        required
+                      />
+                    </label>
+                  </div>
+
+                  {draft.deliveryChannels.includes("wecom") ? (
+                    <label className="automation-field">
+                      <span>允许通过企微触发任务的用户</span>
+                      <textarea
+                        rows={2}
+                        value={draft.allowedWecomUserIds}
+                        placeholder="userid；留空表示不允许远程触发"
+                        onChange={(event) =>
+                          setDraft({
+                            ...draft,
+                            allowedWecomUserIds: event.currentTarget.value,
+                          })
+                        }
+                      />
+                      <small>明确填写 `*` 才允许群内所有成员。</small>
+                    </label>
+                  ) : null}
+
+                  <div className="automation-form-note">
+                    后台任务只加载这里允许的 MCP 服务，不提供内置 Shell、文件读写或浏览器工具。
+                  </div>
+                </div>
+              </details>
 
               <footer className="automation-form-actions">
                 {selectedJob ? (
@@ -604,7 +777,7 @@ export function AutomationPanel({
                   type="submit"
                   disabled={busy || !projects.length}
                 >
-                  {busy ? "正在处理…" : "保存任务"}
+                  {busy ? "正在处理…" : "保存"}
                 </button>
               </footer>
             </form>
