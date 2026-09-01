@@ -1,9 +1,14 @@
-import type { AutomationJobRecord } from "../shared/contracts";
 import {
   matchesParsedCronSchedule,
   parseCronSchedule,
   type ParsedCronSchedule,
 } from "./cron-schedule";
+
+export interface ScheduledItem {
+  id: string;
+  enabled: boolean;
+  schedule: string;
+}
 
 const CHECK_INTERVAL_MILLISECONDS = 15_000;
 const MAX_CATCH_UP_MINUTES = 60;
@@ -16,13 +21,15 @@ export class ScheduledJobService {
   private readonly activeTicks = new Set<Promise<void>>();
 
   constructor(
-    private readonly listJobs: () => AutomationJobRecord[],
+    private readonly listJobs: () => ScheduledItem[],
     private readonly trigger: (
-      job: AutomationJobRecord,
+      job: ScheduledItem,
       scheduledFor: number,
     ) => Promise<void>,
     private readonly onChecked: (checkedAt: number) => void = () => undefined,
     private readonly now: () => number = Date.now,
+    private readonly onError: (error: unknown, itemId?: string) => void = () =>
+      undefined,
   ) {}
 
   start(): void {
@@ -84,7 +91,8 @@ export class ScheduledJobService {
           parseCronSchedule(job.schedule);
         this.parsedSchedules.set(job.schedule, schedule);
       } catch (error) {
-        console.error(`Invalid automation schedule for ${job.id}`, error);
+        console.error(`Invalid assistant task schedule for ${job.id}`, error);
+        this.onError(error, job.id);
         continue;
       }
       let latestMatch: number | undefined;
@@ -95,7 +103,12 @@ export class ScheduledJobService {
         }
       }
       if (latestMatch !== undefined) {
-        await this.trigger(job, latestMatch);
+        try {
+          await this.trigger(job, latestMatch);
+        } catch (error) {
+          console.error(`Failed to trigger assistant task ${job.id}`, error);
+          this.onError(error, job.id);
+        }
       }
     }
   }
@@ -104,7 +117,8 @@ export class ScheduledJobService {
     let tracked: Promise<void>;
     tracked = this.tick()
       .catch((error: unknown) => {
-        console.error("Scheduled automation check failed", error);
+        console.error("Scheduled assistant task check failed", error);
+        this.onError(error);
       })
       .finally(() => {
         this.activeTicks.delete(tracked);

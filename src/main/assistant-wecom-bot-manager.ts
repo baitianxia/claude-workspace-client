@@ -9,18 +9,18 @@ import {
   type WsFrameHeaders,
 } from "@wecom/aibot-node-sdk";
 import type {
-  AutomationWeComBotProfile,
-  UpsertAutomationWeComBotRequest,
+  AssistantWeComBotProfile,
+  UpsertAssistantWeComBotRequest,
   WeComInboundStatus,
 } from "../shared/contracts";
 import {
-  AutomationStore,
-  type StoredAutomationWeComBot,
-} from "./automation-store";
+  AssistantStore,
+  type StoredAssistantWeComBot,
+} from "./assistant-store";
 import type { SecretProtector } from "./wecom-settings";
 import type { WeComClient, WeComClientFactory } from "./wecom-bridge";
 
-export interface AutomationWeComMessage {
+export interface AssistantWeComMessage {
   botProfileId: string;
   messageId: string;
   chatType: "single" | "group";
@@ -31,22 +31,22 @@ export interface AutomationWeComMessage {
   quoteText: string;
 }
 
-export interface AutomationWeComMessageResult {
+export interface AssistantWeComMessageResult {
   status: "accepted" | "rejected";
   message: string;
 }
 
-export type AutomationWeComMessageHandler = (
-  message: AutomationWeComMessage,
-) => Promise<AutomationWeComMessageResult | null>;
+export type AssistantWeComMessageHandler = (
+  message: AssistantWeComMessage,
+) => Promise<AssistantWeComMessageResult | null>;
 
-interface AutomationWeComBotManagerEvents {
+interface AssistantWeComBotManagerEvents {
   stateChanged: [];
 }
 
 interface BotRuntime {
-  record: StoredAutomationWeComBot;
-  state: AutomationWeComBotProfile;
+  record: StoredAssistantWeComBot;
+  state: AssistantWeComBotProfile;
   client: WeComClient | null;
   authenticatedClient: WeComClient | null;
   supersededClient: WeComClient | null;
@@ -54,7 +54,6 @@ interface BotRuntime {
 }
 
 const MAX_MARKDOWN_BYTES = 18_000;
-const MAX_DELIVERY_ATTEMPTS = 5;
 
 function readableError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -70,8 +69,8 @@ function defaultClientFactory(options: {
     logger: {
       debug: () => undefined,
       info: () => undefined,
-      warn: (message) => console.warn(`[Automation WeCom] ${message}`),
-      error: (message) => console.error(`[Automation WeCom] ${message}`),
+      warn: (message) => console.warn(`[Assistant WeCom] ${message}`),
+      error: (message) => console.error(`[Assistant WeCom] ${message}`),
     },
   });
 }
@@ -180,9 +179,9 @@ function isSupersededConnection(reason: string): boolean {
 }
 
 function profileState(
-  record: StoredAutomationWeComBot,
-  previous?: AutomationWeComBotProfile,
-): AutomationWeComBotProfile {
+  record: StoredAssistantWeComBot,
+  previous?: AssistantWeComBotProfile,
+): AssistantWeComBotProfile {
   return {
     id: record.id,
     name: record.name,
@@ -205,14 +204,14 @@ function profileState(
   };
 }
 
-export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotManagerEvents> {
+export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotManagerEvents> {
   private readonly runtimes = new Map<string, BotRuntime>();
-  private messageHandler: AutomationWeComMessageHandler | null = null;
+  private messageHandler: AssistantWeComMessageHandler | null = null;
   private initialized = false;
   private lastReservedManagementBotId = "";
 
   constructor(
-    private readonly store: AutomationStore,
+    private readonly store: AssistantStore,
     private readonly secretProtector: SecretProtector,
     private readonly getManagementBotId: () => string,
     private readonly clientFactory: WeComClientFactory = defaultClientFactory,
@@ -236,7 +235,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     this.emit("stateChanged");
   }
 
-  listBots(): AutomationWeComBotProfile[] {
+  listBots(): AssistantWeComBotProfile[] {
     return [...this.runtimes.values()]
       .map((runtime) => ({ ...runtime.state }))
       .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
@@ -249,29 +248,29 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     );
   }
 
-  setBusinessMessageHandler(
-    handler: AutomationWeComMessageHandler | null,
+  setMessageHandler(
+    handler: AssistantWeComMessageHandler | null,
   ): void {
     this.messageHandler = handler;
   }
 
   async upsertBot(
-    request: UpsertAutomationWeComBotRequest,
+    request: UpsertAssistantWeComBotRequest,
     now = Date.now(),
-  ): Promise<AutomationWeComBotProfile> {
+  ): Promise<AssistantWeComBotProfile> {
     this.assertInitialized();
     if (!request || typeof request !== "object") {
-      throw new Error("企业微信业务入口请求无效。");
+      throw new Error("企业微信助理入口请求无效。");
     }
     if (typeof request.enabled !== "boolean") {
-      throw new Error("企业微信业务入口启用状态无效。");
+      throw new Error("企业微信助理入口启用状态无效。");
     }
     const id = request.id
       ? requireText(request.id, "机器人配置 ID", 200)
       : randomUUID();
     const existing = this.store.getStoredWeComBot(id);
     if (request.id && !existing) {
-      throw new Error("企业微信业务入口不存在或已经删除。");
+      throw new Error("企业微信助理入口不存在或已经删除。");
     }
     const name = requireText(request.name, "机器人名称", 80);
     const botId = requireText(request.botId, "Bot ID", 200);
@@ -280,7 +279,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     }
     if (existing && existing.botId !== botId) {
       throw new Error(
-        "已保存机器人的 Bot ID 不能修改；请新建机器人配置后再切换任务。",
+        "已保存机器人的 Bot ID 不能修改；请新建机器人配置后再切换助理入口。",
       );
     }
     const duplicateName = this.store.listStoredWeComBots().find(
@@ -289,7 +288,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
         bot.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"),
     );
     if (duplicateName) {
-      throw new Error("已经存在同名企业微信业务入口。");
+      throw new Error("已经存在同名企业微信助理入口。");
     }
     const duplicateBotId = this.store.listStoredWeComBots().find(
       (bot) =>
@@ -298,7 +297,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
           botId.toLocaleLowerCase("en-US"),
     );
     if (duplicateBotId) {
-      throw new Error("这个 Bot ID 已经配置为其他企业微信业务入口。");
+      throw new Error("这个 Bot ID 已经配置为其他企业微信助理入口。");
     }
     if (
       this.getManagementBotId().trim().toLocaleLowerCase("en-US") ===
@@ -324,9 +323,9 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
         .toString("base64");
     }
     if (request.enabled && !encryptedSecret) {
-      throw new Error("启用企业微信业务入口前必须填写 Secret。");
+      throw new Error("启用企业微信助理入口前必须填写 Secret。");
     }
-    const record: StoredAutomationWeComBot = {
+    const record: StoredAssistantWeComBot = {
       id,
       name,
       enabled: request.enabled,
@@ -348,23 +347,6 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     if (externalBlocker) {
       throw new Error(externalBlocker);
     }
-    if (this.store.listJobs().some((job) => job.wecomBotProfileId === id)) {
-      throw new Error("仍有自动化任务使用这个机器人，请先修改或删除相关任务。");
-    }
-    if (
-      this.store.listRuns(500).some((run) =>
-        run.deliveries.some(
-          (delivery) =>
-            delivery.botProfileId === id &&
-            (delivery.status === "pending" ||
-              delivery.status === "sending" ||
-              (delivery.status === "failed" &&
-                delivery.attempts < MAX_DELIVERY_ATTEMPTS)),
-        ),
-      )
-    ) {
-      throw new Error("这个机器人仍有未完成的历史投递，暂时不能删除。");
-    }
     const runtime = this.runtimes.get(id);
     runtime?.client?.disconnect();
     this.runtimes.delete(id);
@@ -384,7 +366,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     }
     const client = runtime.client;
     if (!client || runtime.authenticatedClient !== client) {
-      throw new Error(`企业微信业务入口“${runtime.state.name}”尚未连接。`);
+      throw new Error(`企业微信助理入口“${runtime.state.name}”尚未连接。`);
     }
     try {
       await client.sendMessage(target, {
@@ -430,7 +412,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     this.messageHandler = null;
   }
 
-  private configureRuntime(record: StoredAutomationWeComBot): void {
+  private configureRuntime(record: StoredAssistantWeComBot): void {
     const previous = this.runtimes.get(record.id);
     previous?.client?.disconnect();
     const runtime: BotRuntime = {
@@ -676,13 +658,13 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     try {
       await client.replyStream(
         frame,
-        generateReqId("claude_workspace_automation"),
+        generateReqId("claude_workspace_assistant"),
         content,
         true,
       );
       return true;
     } catch (error) {
-      console.error("Failed to reply to automation WeCom message", error);
+      console.error("Failed to reply to assistant WeCom message", error);
       if (runtime.client !== client) {
         return false;
       }
@@ -698,7 +680,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
         });
         return true;
       } catch (fallbackError) {
-        console.error("Failed to send automation WeCom reply fallback", fallbackError);
+        console.error("Failed to send assistant WeCom reply fallback", fallbackError);
         return false;
       }
     }
@@ -726,14 +708,14 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
   private requireRuntime(botProfileId: string): BotRuntime {
     const runtime = this.runtimes.get(botProfileId);
     if (!runtime) {
-      throw new Error("企业微信业务入口不存在或已经删除。");
+      throw new Error("企业微信助理入口不存在或已经删除。");
     }
     return runtime;
   }
 
   private assertInitialized(): void {
     if (!this.initialized) {
-      throw new Error("Automation WeCom bot manager has not been initialized.");
+      throw new Error("Assistant WeCom bot manager has not been initialized.");
     }
   }
 }

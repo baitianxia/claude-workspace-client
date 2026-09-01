@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AssistantStateChangedEvent,
-  AutomationStateChangedEvent,
   DesktopApi,
   SessionChangedEvent,
   TerminalDataEvent,
@@ -20,20 +19,14 @@ const IPC_CHANNELS: IpcChannelMap = {
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
-  upsertAutomationJob: "workspace:upsert-automation-job",
-  upsertAutomationWeComBot: "workspace:upsert-automation-wecom-bot",
-  deleteAutomationWeComBot: "workspace:delete-automation-wecom-bot",
-  updateAutomationWeComGroupAlias:
-    "workspace:update-automation-wecom-group-alias",
+  upsertAssistantWeComBot: "workspace:upsert-assistant-wecom-bot",
+  deleteAssistantWeComBot: "workspace:delete-assistant-wecom-bot",
   upsertAssistantProfile: "workspace:upsert-assistant-profile",
   deleteAssistantProfile: "workspace:delete-assistant-profile",
   sendAssistantMessage: "workspace:send-assistant-message",
   resetAssistantConversation: "workspace:reset-assistant-conversation",
+  closeAssistantConversation: "workspace:close-assistant-conversation",
   cancelAssistantTurn: "workspace:cancel-assistant-turn",
-  deleteAutomationJob: "workspace:delete-automation-job",
-  runAutomationJob: "workspace:run-automation-job",
-  retryAutomationRun: "workspace:retry-automation-run",
-  cancelAutomationRun: "workspace:cancel-automation-run",
   createSession: "workspace:create-session",
   restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
@@ -50,7 +43,6 @@ const IPC_CHANNELS: IpcChannelMap = {
   terminalData: "workspace:terminal-data",
   sessionChanged: "workspace:session-changed",
   wecomStateChanged: "workspace:wecom-state-changed",
-  automationStateChanged: "workspace:automation-state-changed",
   assistantStateChanged: "workspace:assistant-state-changed",
 };
 
@@ -68,14 +60,10 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.autoDetectClaudeExecutable),
   updateWeComConfig: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.updateWeComConfig, request),
-  upsertAutomationJob: (request) =>
-    ipcRenderer.invoke(IPC_CHANNELS.upsertAutomationJob, request),
-  upsertAutomationWeComBot: (request) =>
-    ipcRenderer.invoke(IPC_CHANNELS.upsertAutomationWeComBot, request),
-  deleteAutomationWeComBot: (botProfileId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.deleteAutomationWeComBot, botProfileId),
-  updateAutomationWeComGroupAlias: (request) =>
-    ipcRenderer.invoke(IPC_CHANNELS.updateAutomationWeComGroupAlias, request),
+  upsertAssistantWeComBot: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.upsertAssistantWeComBot, request),
+  deleteAssistantWeComBot: (botProfileId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.deleteAssistantWeComBot, botProfileId),
   upsertAssistantProfile: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.upsertAssistantProfile, request),
   deleteAssistantProfile: (assistantId) =>
@@ -84,16 +72,10 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.sendAssistantMessage, request),
   resetAssistantConversation: (assistantId) =>
     ipcRenderer.invoke(IPC_CHANNELS.resetAssistantConversation, assistantId),
+  closeAssistantConversation: (assistantId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.closeAssistantConversation, assistantId),
   cancelAssistantTurn: (conversationId) =>
     ipcRenderer.invoke(IPC_CHANNELS.cancelAssistantTurn, conversationId),
-  deleteAutomationJob: (jobId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.deleteAutomationJob, jobId),
-  runAutomationJob: (jobId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.runAutomationJob, jobId),
-  retryAutomationRun: (runId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.retryAutomationRun, runId),
-  cancelAutomationRun: (runId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.cancelAutomationRun, runId),
   createSession: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.createSession, request),
   restartSession: (sessionId) =>
@@ -141,14 +123,6 @@ const api: DesktopApi = {
     ) => listener(payload);
     ipcRenderer.on(IPC_CHANNELS.wecomStateChanged, handler);
     return () => ipcRenderer.off(IPC_CHANNELS.wecomStateChanged, handler);
-  },
-  onAutomationStateChanged: (listener) => {
-    const handler = (
-      _event: Electron.IpcRendererEvent,
-      payload: AutomationStateChangedEvent,
-    ) => listener(payload);
-    ipcRenderer.on(IPC_CHANNELS.automationStateChanged, handler);
-    return () => ipcRenderer.off(IPC_CHANNELS.automationStateChanged, handler);
   },
   onAssistantStateChanged: (listener) => {
     const handler = (

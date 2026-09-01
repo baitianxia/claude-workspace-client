@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { ClaudeLocator } from "./claude-locator";
 import { AssistantService } from "./assistant-service";
 import { AssistantStore } from "./assistant-store";
+import { AssistantTaskService } from "./assistant-task-service";
+import { AssistantTaskStore } from "./assistant-task-store";
+import { AssistantWeComBotManager } from "./assistant-wecom-bot-manager";
 import { ClaudeCodeAssistantRunner } from "./claude-code-assistant-runner";
+import { ClaudeCodeAssistantTaskRunner } from "./claude-code-assistant-task-runner";
 import { ClaudeHookServer } from "./claude-hook-server";
-import { AutomationService } from "./automation-service";
-import { AutomationStore } from "./automation-store";
-import { AutomationWeComBotManager } from "./automation-wecom-bot-manager";
-import { ClaudeCodeJobRunner } from "./claude-code-job-runner";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
 import { SessionManager } from "./session-manager";
@@ -22,8 +22,7 @@ let sessionManager: SessionManager | null = null;
 let removeIpcHandlers: (() => void) | null = null;
 let claudeHookServer: ClaudeHookServer | null = null;
 let wecomBridge: WeComBridge | null = null;
-let businessWeComBots: AutomationWeComBotManager | null = null;
-let automationService: AutomationService | null = null;
+let assistantWeComBots: AssistantWeComBotManager | null = null;
 let assistantService: AssistantService | null = null;
 let allowClose = false;
 let shutdownComplete = false;
@@ -88,11 +87,10 @@ function createWindow(): BrowserWindow {
   });
   window.on("close", (event) => {
     const hasRunningSessions = sessionManager?.hasRunningSessions() ?? false;
-    const hasRunningAutomation = automationService?.hasRunningRuns() ?? false;
-    const hasRunningAssistant = assistantService?.hasRunningTurns() ?? false;
+    const hasRunningAssistant = assistantService?.hasRunningWork() ?? false;
     if (
       allowClose ||
-      (!hasRunningSessions && !hasRunningAutomation && !hasRunningAssistant)
+      (!hasRunningSessions && !hasRunningAssistant)
     ) {
       return;
     }
@@ -100,14 +98,10 @@ function createWindow(): BrowserWindow {
       type: "warning",
       title: "仍有任务正在运行",
       message:
-        "关闭客户端会终止正在运行的 Claude Code 会话、私人助理和后台自动化。",
-      detail: hasRunningAutomation
-        ? hasRunningAssistant
-          ? "私人助理当前轮次将取消并重置上下文；后台自动化结果可能未知，且下次启动不会自动重跑，以避免重复发信。"
-          : "后台自动化的结果可能处于未知状态；下次启动时不会自动重跑，以避免重复发信。"
-        : hasRunningAssistant
-          ? "私人助理当前轮次将取消并重置上下文，下一条消息会从新上下文开始。"
-          : "Claude Code 会保存交互式对话记录，之后仍可通过 /resume 恢复。",
+        "关闭客户端会终止正在运行的 Claude Code 会话、助理聊天和独立定时任务。",
+      detail: hasRunningAssistant
+        ? "聊天上下文会保留供下次恢复；正在运行的定时任务会标记为取消或结果未知，且不会自动重跑，以避免重复副作用。"
+        : "Claude Code 会保存交互式对话记录，之后仍可通过 /resume 恢复。",
       buttons: ["取消", "关闭并终止任务"],
       defaultId: 0,
       cancelId: 0,
@@ -135,12 +129,9 @@ async function startApplication(): Promise<void> {
     join(app.getPath("userData"), "workspace.json"),
   );
   await projectStore.initialize();
-  const automationStore = new AutomationStore(
-    join(app.getPath("userData"), "automation.json"),
-  );
-  await automationStore.initialize();
   const assistantStore = new AssistantStore(
     join(app.getPath("userData"), "assistant.json"),
+    join(app.getPath("userData"), "automation.json"),
   );
   await assistantStore.initialize();
 
@@ -176,8 +167,8 @@ async function startApplication(): Promise<void> {
     undefined,
     hookAvailabilityError,
   );
-  const automationWeComBots = new AutomationWeComBotManager(
-    automationStore,
+  const wecomAssistantEntries = new AssistantWeComBotManager(
+    assistantStore,
     safeStorage,
     () => wecomBridge?.getState().botId ?? "",
     undefined,
@@ -188,47 +179,47 @@ async function startApplication(): Promise<void> {
         : undefined;
     },
   );
-  businessWeComBots = automationWeComBots;
+  assistantWeComBots = wecomAssistantEntries;
   const wecomSettingsService = new WeComSettingsService(
     projectStore,
     wecomBridge,
     safeStorage,
-    (botId) => automationWeComBots.hasBotId(botId),
-    () => automationWeComBots.refreshReservedManagementBotId(),
+    (botId) => wecomAssistantEntries.hasBotId(botId),
+    () => wecomAssistantEntries.refreshReservedManagementBotId(),
   );
   wecomSettingsService.initialize();
   claudeHookServer?.on("hook", (event) =>
     wecomBridge?.handleClaudeHook(event),
   );
 
-  const automationRunner = new ClaudeCodeJobRunner(
+  await wecomAssistantEntries.initialize();
+
+  const assistantTaskStore = new AssistantTaskStore(
+    join(app.getPath("userData"), "assistant-tasks.json"),
+  );
+  const assistantTaskRunner = new ClaudeCodeAssistantTaskRunner(
     () => claudeLocator.requireExecutable(),
-    join(app.getPath("userData"), "automation-runtime"),
   );
-  automationService = new AutomationService(
-    automationStore,
-    automationRunner,
+  const assistantTasks = new AssistantTaskService(
+    assistantTaskStore,
+    assistantTaskRunner,
+    (assistantId) => assistantStore.getProfile(assistantId),
     (projectId) => projectStore.getProject(projectId),
-    automationWeComBots,
+    wecomAssistantEntries,
   );
-  await automationService.initialize();
 
   const assistantRunner = new ClaudeCodeAssistantRunner(
     () => claudeLocator.requireExecutable(),
-    join(app.getPath("userData"), "assistant-runtime"),
   );
   assistantService = new AssistantService(
     assistantStore,
     assistantRunner,
     (projectId) => projectStore.getProject(projectId),
-    automationWeComBots,
+    wecomAssistantEntries,
+    assistantTasks,
   );
   await assistantService.initialize();
-  automationWeComBots.setBusinessMessageHandler(async (message) => {
-    const automationResult = await automationService?.routeWeComMessage(message);
-    if (automationResult) {
-      return automationResult;
-    }
+  wecomAssistantEntries.setMessageHandler(async (message) => {
     if (!assistantService) {
       return null;
     }
@@ -247,7 +238,6 @@ async function startApplication(): Promise<void> {
     temporaryWorkspace,
     wecomBridge,
     wecomSettingsService,
-    automationService,
     assistantService,
   });
 }
@@ -295,17 +285,13 @@ app.on("before-quit", (event) => {
       console.error("Failed to remove IPC handlers during shutdown", error);
     }
     removeIpcHandlers = null;
-    businessWeComBots?.setBusinessMessageHandler(null);
+    assistantWeComBots?.setMessageHandler(null);
     try {
       await assistantService?.dispose();
     } catch (error) {
       console.error("Failed to stop assistant during shutdown", error);
     }
-    try {
-      await automationService?.dispose();
-    } catch (error) {
-      console.error("Failed to stop automation during shutdown", error);
-    }
+    assistantWeComBots?.dispose();
     try {
       wecomBridge?.dispose();
     } catch (error) {

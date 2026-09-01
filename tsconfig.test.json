@@ -16,7 +16,6 @@
     "tests/**/*.ts",
     "src/main/**/*.ts",
     "src/shared/**/*.ts",
-    "src/renderer/automation-schedule.ts",
     "src/renderer/terminal-output-scheduler.ts",
     "src/renderer/workspace-search.ts"
   ]

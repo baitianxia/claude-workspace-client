@@ -15,17 +15,14 @@ import type {
   SessionNotificationRequest,
   SessionRecord,
   TerminalDataEvent,
-  UpdateAutomationWeComGroupAliasRequest,
   UpsertAssistantProfileRequest,
-  UpsertAutomationJobRequest,
-  UpsertAutomationWeComBotRequest,
+  UpsertAssistantWeComBotRequest,
   UpdateWeComConfigRequest,
   UpdateProjectRequest,
   WriteTerminalRequest,
 } from "../shared/contracts";
 import { AssistantService } from "./assistant-service";
 import { IPC_CHANNELS } from "../shared/ipc-channels";
-import type { AutomationService } from "./automation-service";
 import type { ClaudeLocator } from "./claude-locator";
 import type { ProjectStore } from "./project-store";
 import type { SessionManager } from "./session-manager";
@@ -80,7 +77,6 @@ export function registerIpcHandlers(options: {
   temporaryWorkspace: TemporaryWorkspace;
   wecomBridge: WeComBridge;
   wecomSettingsService: WeComSettingsService;
-  automationService: AutomationService;
   assistantService: AssistantService;
 }): () => void {
   const {
@@ -91,7 +87,6 @@ export function registerIpcHandlers(options: {
     temporaryWorkspace,
     wecomBridge,
     wecomSettingsService,
-    automationService,
     assistantService,
   } = options;
   const workspaceFiles = new WorkspaceFiles();
@@ -101,7 +96,6 @@ export function registerIpcHandlers(options: {
     sessions: sessionManager.listSessions(),
     claudeExecutable: claudeLocator.getState(),
     wecom: wecomBridge.getState(),
-    automation: automationService.getSnapshot(),
     assistant: assistantService.getSnapshot(),
   });
 
@@ -148,7 +142,6 @@ export function registerIpcHandlers(options: {
     IPC_CHANNELS.removeProject,
     async (_event, projectId: unknown) => {
       const validatedId = requireIdentifier(projectId, "Project ID");
-      await automationService.disableJobsForProject(validatedId);
       await assistantService.disableProfilesForProject(validatedId);
       sessionManager.removeProjectSessions(validatedId);
       await projectStore.removeProject(validatedId);
@@ -188,29 +181,17 @@ export function registerIpcHandlers(options: {
   );
 
   ipcMain.handle(
-    IPC_CHANNELS.upsertAutomationJob,
-    (_event, request: UpsertAutomationJobRequest) =>
-      automationService.upsertJob(request),
+    IPC_CHANNELS.upsertAssistantWeComBot,
+    (_event, request: UpsertAssistantWeComBotRequest) =>
+      assistantService.upsertWeComBot(request),
   );
 
   ipcMain.handle(
-    IPC_CHANNELS.upsertAutomationWeComBot,
-    (_event, request: UpsertAutomationWeComBotRequest) =>
-      automationService.upsertWeComBot(request),
-  );
-
-  ipcMain.handle(
-    IPC_CHANNELS.deleteAutomationWeComBot,
+    IPC_CHANNELS.deleteAssistantWeComBot,
     (_event, botProfileId: unknown) =>
-      automationService.deleteWeComBot(
-        requireIdentifier(botProfileId, "Automation WeCom bot profile ID"),
+      assistantService.deleteWeComBot(
+        requireIdentifier(botProfileId, "Assistant WeCom bot profile ID"),
       ),
-  );
-
-  ipcMain.handle(
-    IPC_CHANNELS.updateAutomationWeComGroupAlias,
-    (_event, request: UpdateAutomationWeComGroupAliasRequest) =>
-      automationService.updateWeComGroupAlias(request),
   );
 
   ipcMain.handle(
@@ -250,27 +231,11 @@ export function registerIpcHandlers(options: {
   );
 
   ipcMain.handle(
-    IPC_CHANNELS.deleteAutomationJob,
-    (_event, jobId: unknown) =>
-      automationService.deleteJob(requireIdentifier(jobId, "Automation job ID")),
-  );
-
-  ipcMain.handle(
-    IPC_CHANNELS.runAutomationJob,
-    (_event, jobId: unknown) =>
-      automationService.runJob(requireIdentifier(jobId, "Automation job ID")),
-  );
-
-  ipcMain.handle(
-    IPC_CHANNELS.retryAutomationRun,
-    (_event, runId: unknown) =>
-      automationService.retryRun(requireIdentifier(runId, "Automation run ID")),
-  );
-
-  ipcMain.handle(
-    IPC_CHANNELS.cancelAutomationRun,
-    (_event, runId: unknown) =>
-      automationService.cancelRun(requireIdentifier(runId, "Automation run ID")),
+    IPC_CHANNELS.closeAssistantConversation,
+    (_event, assistantId: unknown) =>
+      assistantService.closeOwnerConversation(
+        requireIdentifier(assistantId, "Assistant profile ID"),
+      ),
   );
 
   ipcMain.handle(
@@ -496,13 +461,6 @@ export function registerIpcHandlers(options: {
       });
     }
   };
-  const sendAutomationStateChanged = () => {
-    if (!window.isDestroyed()) {
-      window.webContents.send(IPC_CHANNELS.automationStateChanged, {
-        state: automationService.getSnapshot(),
-      });
-    }
-  };
   const sendAssistantStateChanged = () => {
     if (!window.isDestroyed()) {
       window.webContents.send(IPC_CHANNELS.assistantStateChanged, {
@@ -514,14 +472,12 @@ export function registerIpcHandlers(options: {
   sessionManager.on("data", sendTerminalData);
   sessionManager.on("changed", sendSessionChanged);
   wecomBridge.on("stateChanged", sendWeComStateChanged);
-  automationService.on("stateChanged", sendAutomationStateChanged);
   assistantService.on("stateChanged", sendAssistantStateChanged);
 
   return () => {
     sessionManager.off("data", sendTerminalData);
     sessionManager.off("changed", sendSessionChanged);
     wecomBridge.off("stateChanged", sendWeComStateChanged);
-    automationService.off("stateChanged", sendAutomationStateChanged);
     assistantService.off("stateChanged", sendAssistantStateChanged);
     for (const channel of Object.values(IPC_CHANNELS)) {
       ipcMain.removeHandler(channel);

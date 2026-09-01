@@ -9,14 +9,24 @@ import {
   type AssistantWeComGateway,
 } from "../src/main/assistant-service";
 import { AssistantStore } from "../src/main/assistant-store";
+import {
+  AssistantTaskService,
+  type AssistantTaskRunner,
+} from "../src/main/assistant-task-service";
+import { AssistantTaskStore } from "../src/main/assistant-task-store";
 import type {
   ClaudeCodeAssistantInput,
   ClaudeCodeAssistantResult,
 } from "../src/main/claude-code-assistant-runner";
 import type {
-  AutomationWeComBotProfile,
+  ClaudeCodeAssistantTaskInput,
+  ClaudeCodeAssistantTaskResult,
+} from "../src/main/claude-code-assistant-task-runner";
+import type {
+  AssistantWeComBotProfile,
   ProjectRecord,
   UpsertAssistantProfileRequest,
+  UpsertAssistantWeComBotRequest,
 } from "../src/shared/contracts";
 
 const temporaryDirectories: string[] = [];
@@ -27,10 +37,13 @@ const SECOND_SESSION = "550e8400-e29b-41d4-a716-446655440001";
 class FakeRunner implements AssistantRunner {
   readonly inputs: ClaudeCodeAssistantInput[] = [];
   readonly results: ClaudeCodeAssistantResult[] = [];
+  readonly openAssistantIds = new Set<string>();
+  readonly closedAssistantIds: string[] = [];
   disposed = false;
 
   async run(input: ClaudeCodeAssistantInput): Promise<ClaudeCodeAssistantResult> {
     this.inputs.push(input);
+    this.openAssistantIds.add(input.profile.id);
     return (
       this.results.shift() ?? {
         status: "succeeded",
@@ -44,8 +57,18 @@ class FakeRunner implements AssistantRunner {
     return false;
   }
 
+  async close(assistantId: string): Promise<void> {
+    this.closedAssistantIds.push(assistantId);
+    this.openAssistantIds.delete(assistantId);
+  }
+
+  listOpenAssistantIds(): string[] {
+    return [...this.openAssistantIds];
+  }
+
   dispose(): void {
     this.disposed = true;
+    this.openAssistantIds.clear();
   }
 }
 
@@ -94,7 +117,7 @@ class ControllableRunner extends FakeRunner {
 
 class FakeGateway extends EventEmitter implements AssistantWeComGateway {
   readonly sent: Array<{ botProfileId: string; targetId: string; content: string }> = [];
-  readonly bots: AutomationWeComBotProfile[] = [
+  readonly bots: AssistantWeComBotProfile[] = [
     {
       id: "bot-one",
       name: "主人入口",
@@ -108,8 +131,40 @@ class FakeGateway extends EventEmitter implements AssistantWeComGateway {
     },
   ];
 
-  listBots(): AutomationWeComBotProfile[] {
+  listBots(): AssistantWeComBotProfile[] {
     return this.bots.map((bot) => ({ ...bot }));
+  }
+
+  async upsertBot(
+    request: UpsertAssistantWeComBotRequest,
+  ): Promise<AssistantWeComBotProfile> {
+    const existing = request.id
+      ? this.bots.find((bot) => bot.id === request.id)
+      : undefined;
+    const record: AssistantWeComBotProfile = {
+      id: existing?.id ?? `bot-${this.bots.length + 1}`,
+      name: request.name,
+      enabled: request.enabled,
+      configured: Boolean(request.secret || existing?.hasSecret),
+      hasSecret: Boolean(request.secret || existing?.hasSecret),
+      botId: request.botId,
+      status: request.enabled ? "connected" : "disabled",
+      createdAt: existing?.createdAt ?? 1,
+      updatedAt: 2,
+    };
+    if (existing) {
+      this.bots[this.bots.indexOf(existing)] = record;
+    } else {
+      this.bots.push(record);
+    }
+    return { ...record };
+  }
+
+  async deleteBot(botProfileId: string): Promise<void> {
+    const index = this.bots.findIndex((bot) => bot.id === botProfileId);
+    if (index >= 0) {
+      this.bots.splice(index, 1);
+    }
   }
 
   async sendMarkdown(
@@ -121,6 +176,20 @@ class FakeGateway extends EventEmitter implements AssistantWeComGateway {
   }
 }
 
+class FakeTaskRunner implements AssistantTaskRunner {
+  async run(
+    _input: ClaudeCodeAssistantTaskInput,
+  ): Promise<ClaudeCodeAssistantTaskResult> {
+    return { status: "succeeded", response: "任务完成" };
+  }
+
+  cancel(): boolean {
+    return false;
+  }
+
+  dispose(): void {}
+}
+
 function request(
   overrides: Partial<UpsertAssistantProfileRequest> = {},
 ): UpsertAssistantProfileRequest {
@@ -129,8 +198,6 @@ function request(
     enabled: true,
     projectId: "project-one",
     instructions: "先给结论。",
-    mcpConfigPath: ".mcp.json",
-    allowedMcpServers: ["mail"],
     ownerWeComUserId: "zhangsan",
     wecomBotProfileId: "bot-one",
     timeoutMinutes: 20,
@@ -172,6 +239,18 @@ async function fixture(runner: FakeRunner = new FakeRunner()) {
   };
   const store = new AssistantStore(join(root, "assistant.json"));
   const gateway = new FakeGateway();
+  const tasks = new AssistantTaskService(
+    new AssistantTaskStore(join(root, "assistant-tasks.json")),
+    new FakeTaskRunner(),
+    (assistantId) => store.getProfile(assistantId),
+    (projectId) =>
+      projectId === project.id
+        ? project
+        : projectId === secondProject.id
+          ? secondProject
+          : undefined,
+    gateway,
+  );
   const service = new AssistantService(
     store,
     runner,
@@ -182,6 +261,7 @@ async function fixture(runner: FakeRunner = new FakeRunner()) {
           ? secondProject
           : undefined,
     gateway,
+    tasks,
   );
   services.push(service);
   await service.initialize();
@@ -236,6 +316,7 @@ describe("AssistantService", () => {
       }),
     ]);
     expect(service.getSnapshot().conversations[0]?.claudeSessionId).toBeUndefined();
+    expect(service.getSnapshot().resumableConversationIds).toContain(profile.id);
     expect(gateway.sent[0]).toMatchObject({
       botProfileId: "bot-one",
       targetId: "zhangsan",
@@ -295,7 +376,7 @@ describe("AssistantService", () => {
     await service.handleWeComMessage(message);
     await waitFor(() => runner.inputs.length === 1);
     const duplicate = await service.handleWeComMessage(message);
-    expect(duplicate?.message).toContain("已经处理");
+    expect(duplicate?.message).toContain("已经接收");
     expect(runner.inputs).toHaveLength(1);
 
     await expect(
@@ -387,7 +468,7 @@ describe("AssistantService", () => {
     );
   });
 
-  it("clears the resumable session after an unsuccessful turn", async () => {
+  it("keeps the resumable session after an unsuccessful turn", async () => {
     const { service, runner } = await fixture();
     const profile = await service.upsertProfile(request());
     runner.results.push(
@@ -416,6 +497,31 @@ describe("AssistantService", () => {
     }
 
     expect(runner.inputs[1].sessionId).toBe(FIRST_SESSION);
-    expect(runner.inputs[2].sessionId).toBeUndefined();
+    expect(runner.inputs[2].sessionId).toBe(FIRST_SESSION);
+  });
+
+  it("closes the live process without clearing context and resumes on the next message", async () => {
+    const { service, runner } = await fixture();
+    const profile = await service.upsertProfile(request());
+    runner.results.push({
+      status: "succeeded",
+      response: "第一轮完成",
+      sessionId: FIRST_SESSION,
+    });
+
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第一轮" });
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    expect(service.getSnapshot().openConversationIds).toContain(profile.id);
+
+    await service.closeOwnerConversation(profile.id);
+    expect(service.getSnapshot().openConversationIds).not.toContain(profile.id);
+    expect(service.getSnapshot().conversations[0]?.claudeSessionId).toBeUndefined();
+    expect(service.getSnapshot().resumableConversationIds).toContain(profile.id);
+
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "关闭后继续" });
+    await waitFor(() => runner.inputs.length === 2);
+    expect(runner.inputs[1].sessionId).toBe(FIRST_SESSION);
   });
 });

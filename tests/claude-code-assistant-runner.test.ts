@@ -1,19 +1,15 @@
-import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  buildClaudeAssistantArgs,
+  buildAssistantSdkOptions,
   ClaudeCodeAssistantRunner,
-  parseClaudeAssistantOutput,
-  type AssistantChildProcess,
   type ClaudeCodeAssistantInput,
+  type ClaudeSdkQueryFactory,
 } from "../src/main/claude-code-assistant-runner";
 import type { AssistantProfileRecord } from "../src/shared/contracts";
 
-const temporaryDirectories: string[] = [];
 const SESSION_ID = "550e8400-e29b-41d4-a716-446655440000";
+const FIRST_TURN = "550e8400-e29b-41d4-a716-446655440010";
+const SECOND_TURN = "550e8400-e29b-41d4-a716-446655440011";
 
 function profile(
   overrides: Partial<AssistantProfileRecord> = {},
@@ -24,8 +20,6 @@ function profile(
     enabled: true,
     projectId: "project-one",
     instructions: "先给结论。",
-    mcpConfigPath: ".mcp.json",
-    allowedMcpServers: ["mail"],
     ownerWeComUserId: "zhangsan",
     timeoutMinutes: 20,
     maxTurns: 20,
@@ -39,7 +33,7 @@ function input(
   overrides: Partial<ClaudeCodeAssistantInput> = {},
 ): ClaudeCodeAssistantInput {
   return {
-    turnId: "turn-one",
+    turnId: FIRST_TURN,
     profile: profile(),
     projectRoot: "/project",
     prompt: "整理今天的重点",
@@ -47,181 +41,210 @@ function input(
   };
 }
 
-class FakeChildProcess extends EventEmitter implements AssistantChildProcess {
-  readonly stdout = new EventEmitter();
-  readonly stderr = new EventEmitter();
-  killed = false;
+class FakeQuery {
+  readonly userMessages: Array<{ uuid?: string; message?: unknown }> = [];
+  interruptCalls = 0;
+  closeCalls = 0;
+  private readonly values: unknown[] = [];
+  private readonly waiters: Array<(value: IteratorResult<unknown>) => void> = [];
+  private ended = false;
 
-  kill(): boolean {
-    this.killed = true;
-    queueMicrotask(() => this.emit("close", 143, "SIGTERM"));
-    return true;
+  push(value: unknown): void {
+    if (this.ended) {
+      return;
+    }
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter({ value, done: false });
+    } else {
+      this.values.push(value);
+    }
+  }
+
+  async interrupt(): Promise<void> {
+    this.interruptCalls += 1;
+  }
+
+  close(): void {
+    this.closeCalls += 1;
+    if (this.ended) {
+      return;
+    }
+    this.ended = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter({ value: undefined, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<unknown> {
+    return {
+      next: () => {
+        const value = this.values.shift();
+        if (value !== undefined) {
+          return Promise.resolve({ value, done: false });
+        }
+        if (this.ended) {
+          return Promise.resolve({ value: undefined, done: true });
+        }
+        return new Promise((resolve) => this.waiters.push(resolve));
+      },
+    };
   }
 }
 
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
+function successResult(turnId: string, response: string) {
+  return {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: response,
+    session_id: SESSION_ID,
+    user_message_uuid: turnId,
+  };
+}
+
+function automaticFactory(state: {
+  calls: Array<Parameters<ClaudeSdkQueryFactory>[0]>;
+  queries: FakeQuery[];
+}): ClaudeSdkQueryFactory {
+  return ((parameters: Parameters<ClaudeSdkQueryFactory>[0]) => {
+    state.calls.push(parameters);
+    const query = new FakeQuery();
+    state.queries.push(query);
+    const stream = parameters.prompt;
+    if (typeof stream === "string") {
+      throw new Error("owner chat must use streaming input");
+    }
+    query.push({
+      type: "system",
+      subtype: "init",
+      session_id: SESSION_ID,
+    });
+    void (async () => {
+      let index = 0;
+      for await (const message of stream) {
+        const entry = message as { uuid?: string; message?: unknown };
+        query.userMessages.push(entry);
+        index += 1;
+        query.push(successResult(entry.uuid ?? "", `回复 ${index}`));
+      }
+    })();
+    return query as unknown as ReturnType<ClaudeSdkQueryFactory>;
+  }) as ClaudeSdkQueryFactory;
+}
 
 describe("ClaudeCodeAssistantRunner", () => {
-  it("keeps sessions persistent and resumes a fixed session with restricted tools", () => {
-    const firstArgs = buildClaudeAssistantArgs(input());
-    expect(firstArgs).toContain("--print");
-    expect(firstArgs).toContain("--strict-mcp-config");
-    expect(firstArgs[firstArgs.indexOf("--tools") + 1]).toBe("");
-    expect(firstArgs[firstArgs.indexOf("--allowedTools") + 1]).toBe(
-      "mcp__mail__*",
+  it("uses the owner's complete local Claude Code capability set", () => {
+    const taskServer = {} as never;
+    const options = buildAssistantSdkOptions(
+      input({ taskMcpServer: taskServer }),
+      "/usr/bin/claude",
     );
-    const systemPrompt =
-      firstArgs[firstArgs.indexOf("--append-system-prompt") + 1];
-    expect(systemPrompt.indexOf("助理专属指令")).toBeLessThan(
-      systemPrompt.indexOf("以下安全边界优先于"),
-    );
-    expect(firstArgs).not.toContain("--no-session-persistence");
-    expect(firstArgs).not.toContain("--resume");
 
-    const resumedArgs = buildClaudeAssistantArgs(
-      input({ sessionId: SESSION_ID }),
-    );
-    expect(resumedArgs.slice(resumedArgs.indexOf("--resume"), -2)).toEqual([
-      "--resume",
-      SESSION_ID,
-    ]);
+    expect(options).toMatchObject({
+      cwd: "/project",
+      pathToClaudeCodeExecutable: "/usr/bin/claude",
+      settingSources: ["user", "project", "local"],
+      tools: { type: "preset", preset: "claude_code" },
+      skills: "all",
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      persistSession: true,
+      mcpServers: { assistant_tasks: taskServer },
+    });
+    expect(options).not.toHaveProperty("resume");
+    expect(options).not.toHaveProperty("maxTurns");
+    expect(JSON.stringify(options)).not.toContain("allowedMcpServers");
+    expect(JSON.stringify(options)).not.toContain("disallowedTools");
   });
 
-  it("parses a bounded text reply and requires a valid Claude session id", () => {
-    expect(
-      parseClaudeAssistantOutput(
-        JSON.stringify({ result: "主人，已整理完成。", session_id: SESSION_ID }),
-      ),
-    ).toEqual({ response: "主人，已整理完成。", sessionId: SESSION_ID });
-    expect(() =>
-      parseClaudeAssistantOutput(
-        JSON.stringify({ result: "ok", session_id: "not-a-session" }),
-      ),
-    ).toThrow("有效的会话 ID");
-  });
+  it("keeps one live streaming query for consecutive owner messages", async () => {
+    const state: {
+      calls: Array<Parameters<ClaudeSdkQueryFactory>[0]>;
+      queries: FakeQuery[];
+    } = { calls: [], queries: [] };
+    const savedSessionIds: string[] = [];
+    const runner = new ClaudeCodeAssistantRunner(
+      () => "/usr/bin/claude",
+      automaticFactory(state),
+    );
 
-  it("loads only explicitly allowed MCP servers", async () => {
-    const root = await mkdtemp(join(tmpdir(), "assistant-runner-"));
-    temporaryDirectories.push(root);
-    const projectRoot = join(root, "project");
-    const runtimeRoot = join(root, "runtime");
-    await mkdir(projectRoot);
-    await writeFile(
-      join(projectRoot, ".mcp.json"),
-      JSON.stringify({
-        mcpServers: {
-          mail: { command: "mail-server", env: { TOKEN: "private" } },
-          unrelated: { command: "other-server" },
+    const first = await runner.run(
+      input({
+        onSessionId: (sessionId) => {
+          savedSessionIds.push(sessionId);
         },
       }),
-      "utf8",
     );
-    let filtered: unknown;
-    const runner = new ClaudeCodeAssistantRunner(
-      () => "/usr/bin/claude",
-      runtimeRoot,
-      (_executable, args) => {
-        const child = new FakeChildProcess();
-        const configPath = args[args.indexOf("--mcp-config") + 1];
-        void readFile(configPath, "utf8").then((raw) => {
-          filtered = JSON.parse(raw) as unknown;
-          child.stdout.emit(
-            "data",
-            JSON.stringify({ result: "完成", session_id: SESSION_ID }),
-          );
-          child.emit("close", 0, null);
-        });
-        return child;
-      },
-      "darwin",
+    const second = await runner.run(
+      input({ turnId: SECOND_TURN, prompt: "继续处理" }),
     );
 
-    const result = await runner.run(
-      input({ projectRoot, profile: profile({ allowedMcpServers: ["mail"] }) }),
-    );
-
-    expect(result).toMatchObject({
+    expect(first).toMatchObject({
       status: "succeeded",
-      response: "完成",
+      response: "回复 1",
       sessionId: SESSION_ID,
     });
-    expect(filtered).toEqual({
-      mcpServers: {
-        mail: { command: "mail-server", env: { TOKEN: "private" } },
-      },
+    expect(second).toMatchObject({
+      status: "succeeded",
+      response: "回复 2",
+      sessionId: SESSION_ID,
     });
+    expect(state.calls).toHaveLength(1);
+    expect(state.queries[0].userMessages.map((message) => message.uuid)).toEqual([
+      FIRST_TURN,
+      SECOND_TURN,
+    ]);
+    expect(savedSessionIds).toEqual([SESSION_ID]);
+    expect(runner.listOpenAssistantIds()).toEqual(["assistant-one"]);
+
+    await runner.close("assistant-one");
   });
 
-  it("supports pure chat without reading a project MCP file", async () => {
-    const root = await mkdtemp(join(tmpdir(), "assistant-runner-empty-"));
-    temporaryDirectories.push(root);
-    const projectRoot = join(root, "project");
-    await mkdir(projectRoot);
-    let filtered: unknown;
+  it("resumes only after the live owner query has been explicitly closed", async () => {
+    const state: {
+      calls: Array<Parameters<ClaudeSdkQueryFactory>[0]>;
+      queries: FakeQuery[];
+    } = { calls: [], queries: [] };
     const runner = new ClaudeCodeAssistantRunner(
       () => "/usr/bin/claude",
-      join(root, "runtime"),
-      (_executable, args) => {
-        const child = new FakeChildProcess();
-        const configPath = args[args.indexOf("--mcp-config") + 1];
-        void readFile(configPath, "utf8").then((raw) => {
-          filtered = JSON.parse(raw) as unknown;
-          child.stdout.emit(
-            "data",
-            JSON.stringify({ result: "纯对话", session_id: SESSION_ID }),
-          );
-          child.emit("close", 0, null);
-        });
-        return child;
-      },
-      "darwin",
+      automaticFactory(state),
     );
 
-    const result = await runner.run(
+    await runner.run(input());
+    await runner.close("assistant-one");
+    await runner.run(
       input({
-        projectRoot,
-        profile: profile({ mcpConfigPath: "", allowedMcpServers: [] }),
+        turnId: SECOND_TURN,
+        prompt: "关闭后继续",
+        sessionId: SESSION_ID,
       }),
     );
 
-    expect(result.status).toBe("succeeded");
-    expect(filtered).toEqual({ mcpServers: {} });
+    expect(state.calls).toHaveLength(2);
+    expect(state.calls[0].options).not.toHaveProperty("resume");
+    expect(state.calls[1].options).toMatchObject({ resume: SESSION_ID });
+    expect(state.queries[0].closeCalls).toBeGreaterThan(0);
+
+    await runner.close("assistant-one");
   });
 
-  it("cancels the active Claude Code process for a turn", async () => {
-    const root = await mkdtemp(join(tmpdir(), "assistant-runner-cancel-"));
-    temporaryDirectories.push(root);
-    const projectRoot = join(root, "project");
-    await mkdir(projectRoot);
-    let child: FakeChildProcess | undefined;
-    const runner = new ClaudeCodeAssistantRunner(
-      () => "/usr/bin/claude",
-      join(root, "runtime"),
-      () => {
-        child = new FakeChildProcess();
-        return child;
-      },
-      "darwin",
+  it("rejects an invalid persisted resume id before starting Claude Code", () => {
+    expect(() =>
+      buildAssistantSdkOptions(
+        input({ sessionId: "not-a-session-id" }),
+        "/usr/bin/claude",
+      ),
+    ).toThrow("会话 ID 格式无效");
+  });
+
+  it("wraps Windows script installations instead of asking the SDK to spawn them directly", () => {
+    const options = buildAssistantSdkOptions(
+      input(),
+      "C:\\Users\\developer\\AppData\\Roaming\\npm\\claude.cmd",
+      "win32",
     );
 
-    const pending = runner.run(
-      input({
-        projectRoot,
-        profile: profile({ mcpConfigPath: "", allowedMcpServers: [] }),
-      }),
-    );
-    for (let attempt = 0; !child && attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-
-    expect(runner.cancel("turn-one")).toBe(true);
-    await expect(pending).resolves.toMatchObject({ status: "cancelled" });
-    expect(child?.killed).toBe(true);
+    expect(options.spawnClaudeCodeProcess).toBeTypeOf("function");
   });
 });

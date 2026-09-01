@@ -24,8 +24,6 @@ function profile(): AssistantProfileRecord {
     enabled: true,
     projectId: "project-one",
     instructions: "先给结论。",
-    mcpConfigPath: ".mcp.json",
-    allowedMcpServers: ["mail"],
     ownerWeComUserId: "zhangsan",
     wecomBotProfileId: "bot-one",
     timeoutMinutes: 20,
@@ -88,7 +86,9 @@ describe("AssistantStore", () => {
         finishedAt: 100,
       }),
     ]);
-    expect(restored.getConversation("assistant-one")?.claudeSessionId).toBeUndefined();
+    expect(restored.getConversation("assistant-one")?.claudeSessionId).toBe(
+      "550e8400-e29b-41d4-a716-446655440000",
+    );
     expect(restored.getConversation("assistant-one")?.lastMessageAt).toBe(2);
     expect(restored.findProfileByWeComBot("bot-one")?.name).toBe("小岚");
   });
@@ -139,6 +139,73 @@ describe("AssistantStore", () => {
     expect(persisted.conversations[0]).toMatchObject({
       claudeSessionId: nextSession,
     });
+  });
+
+  it("keeps the last saved session when a failed turn has no new session id", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-store-failed-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantStore(join(root, "assistant.json"));
+    await store.initialize();
+    await store.putProfile(profile());
+    await store.putConversation(conversation());
+    await store.appendTurn(turn());
+
+    await store.completeTurn(
+      {
+        ...turn(),
+        status: "failed",
+        error: "工具执行失败",
+        finishedAt: 10,
+      },
+      undefined,
+      10,
+    );
+
+    expect(store.getConversation("assistant-one")?.claudeSessionId).toBe(
+      "550e8400-e29b-41d4-a716-446655440000",
+    );
+  });
+
+  it("imports only legacy WeCom entries once and leaves legacy tasks untouched", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-store-import-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant.json");
+    const legacyPath = join(root, "automation.json");
+    await writeFile(
+      legacyPath,
+      JSON.stringify({
+        version: 4,
+        jobs: [{ id: "legacy-job", prompt: "不得迁移" }],
+        runs: [{ id: "legacy-run", status: "succeeded" }],
+        wecomBots: [
+          {
+            id: "legacy-bot",
+            name: "旧助理入口",
+            enabled: true,
+            botId: "legacy-aibot",
+            encryptedSecret: "encrypted-secret",
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new AssistantStore(storePath, legacyPath);
+    await store.initialize();
+
+    expect(store.listStoredWeComBots()).toEqual([
+      expect.objectContaining({
+        id: "legacy-bot",
+        botId: "legacy-aibot",
+        encryptedSecret: "encrypted-secret",
+      }),
+    ]);
+    const persisted = await readFile(storePath, "utf8");
+    expect(persisted).toContain('"legacyWeComBotsImported": true');
+    expect(persisted).not.toContain("legacy-job");
+    expect(await readFile(legacyPath, "utf8")).toContain("legacy-job");
   });
 
   it("rejects persisted non-owner conversations as corrupt data", async () => {

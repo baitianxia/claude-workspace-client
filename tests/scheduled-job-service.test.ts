@@ -1,24 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { ScheduledJobService } from "../src/main/scheduled-job-service";
-import type { AutomationJobRecord } from "../src/shared/contracts";
+import {
+  ScheduledJobService,
+  type ScheduledItem,
+} from "../src/main/scheduled-job-service";
 
-function job(schedule: string): AutomationJobRecord {
+function job(
+  schedule: string,
+  overrides: Partial<ScheduledItem> = {},
+): ScheduledItem {
   return {
     id: "job-one",
-    name: "任务一",
     enabled: true,
-    projectId: "project-one",
     schedule,
-    mcpConfigPath: ".mcp.json",
-    allowedMcpServers: ["web"],
-    prompt: "检查网页",
-    emailRecipients: [],
-    wecomTargetIds: [],
-    allowedWecomUserIds: [],
-    timeoutMinutes: 20,
-    maxTurns: 20,
-    createdAt: 1,
-    updatedAt: 1,
+    ...overrides,
   };
 }
 
@@ -70,5 +64,31 @@ describe("ScheduledJobService", () => {
     await service.tick(new Date(2026, 7, 31, 9, 0).getTime());
 
     expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it("reports a task trigger failure and continues checking other tasks", async () => {
+    const first = job("* * * * *", { id: "task-failing" });
+    const second = job("* * * * *", { id: "task-healthy" });
+    const trigger = vi.fn(async (item: ScheduledItem) => {
+      if (item.id === first.id) {
+        throw new Error("cannot persist queued run");
+      }
+    });
+    const onError = vi.fn();
+    const service = new ScheduledJobService(
+      () => [first, second],
+      trigger,
+      () => undefined,
+      Date.now,
+      onError,
+    );
+
+    await service.tick(new Date(2026, 7, 31, 9, 0).getTime());
+
+    expect(trigger).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "cannot persist queued run" }),
+      "task-failing",
+    );
   });
 });

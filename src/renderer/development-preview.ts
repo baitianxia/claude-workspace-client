@@ -3,9 +3,7 @@ import type {
   AssistantProfileRecord,
   AssistantStateChangedEvent,
   AssistantTurnRecord,
-  AutomationJobRecord,
-  AutomationRunRecord,
-  AutomationStateChangedEvent,
+  AssistantWeComBotProfile,
   DesktopApi,
   SessionChangedEvent,
   SessionRecord,
@@ -100,113 +98,6 @@ const previewSnapshot: AppSnapshot = {
     targetUserId: "developer",
     status: "connected",
   },
-  automation: {
-    wecomBots: [
-      {
-        id: "automation-news-bot",
-        name: "资讯推送机器人",
-        enabled: true,
-        configured: true,
-        hasSecret: true,
-        botId: "aibot-preview-news",
-        status: "connected",
-        createdAt: now - 300_000,
-        updatedAt: now - 300_000,
-      },
-      {
-        id: "automation-ops-bot",
-        name: "运营播报机器人",
-        enabled: true,
-        configured: true,
-        hasSecret: true,
-        botId: "aibot-preview-ops",
-        status: "connected",
-        createdAt: now - 260_000,
-        updatedAt: now - 260_000,
-      },
-    ],
-    discoveredWeComGroups: [
-      {
-        botProfileId: "automation-news-bot",
-        chatId: "wr-preview-group",
-        alias: "每日资讯群",
-        discoveredAt: now - 240_000,
-        lastSeenAt: now - 18_000,
-      },
-      {
-        botProfileId: "automation-news-bot",
-        chatId: "wr-product-watch",
-        alias: "产品观察群",
-        discoveredAt: now - 180_000,
-        lastSeenAt: now - 45_000,
-      },
-      {
-        botProfileId: "automation-ops-bot",
-        chatId: "wr-unnamed-preview-group",
-        discoveredAt: now - 120_000,
-        lastSeenAt: now - 72_000,
-      },
-    ],
-    jobs: [
-      {
-        id: "daily-industry-news",
-        name: "每日行业资讯",
-        enabled: true,
-        projectId: "mall-service",
-        schedule: "0 9 * * 1-5",
-        mcpConfigPath: ".mcp.json",
-        allowedMcpServers: ["web", "mail"],
-        prompt: "读取配置中的行业网页，只整理新出现且与业务相关的信息。",
-        emailRecipients: ["owner@example.com"],
-        wecomBotProfileId: "automation-news-bot",
-        wecomTargetIds: ["wr-preview-group"],
-        allowedWecomUserIds: ["developer"],
-        timeoutMinutes: 20,
-        maxTurns: 20,
-        createdAt: now - 90_000,
-        updatedAt: now - 90_000,
-      },
-    ],
-    runs: [
-      {
-        id: "preview-run",
-        reportCode: "A1B2C3D4E5",
-        jobId: "daily-industry-news",
-        jobName: "每日行业资讯",
-        trigger: "scheduled",
-        status: "succeeded",
-        attempt: 1,
-        createdAt: now - 40_000,
-        startedAt: now - 39_000,
-        finishedAt: now - 12_000,
-        result: {
-          outcome: "notify",
-          summary: "发现 2 条新的行业信息，并已生成群摘要。",
-          wecomMarkdown: "## 今日行业资讯\n\n发现 2 条新信息。",
-          evidence: [
-            { title: "示例来源", url: "https://example.com/news" },
-          ],
-          email: {
-            status: "sent",
-            recipients: ["owner@example.com"],
-            detail: "邮件 MCP 返回发送成功。",
-          },
-        },
-        deliveries: [
-          {
-            botProfileId: "automation-news-bot",
-            targetId: "wr-preview-group",
-            status: "sent",
-            attempts: 1,
-            sentAt: now - 11_000,
-          },
-        ],
-      },
-    ],
-    runningJobIds: [],
-    schedulerActive: true,
-    lastSchedulerCheckAt: now,
-  },
   assistant: {
     profiles: [
       {
@@ -215,10 +106,8 @@ const previewSnapshot: AppSnapshot = {
         enabled: true,
         projectId: "mall-service",
         instructions: "作为我的私人研究助理，先给结论，再补充关键依据。",
-        mcpConfigPath: ".mcp.json",
-        allowedMcpServers: ["web", "mail"],
         ownerWeComUserId: "developer",
-        wecomBotProfileId: "automation-news-bot",
+        wecomBotProfileId: "assistant-shadow-bot",
         timeoutMinutes: 20,
         maxTurns: 20,
         createdAt: now - 360_000,
@@ -243,7 +132,7 @@ const previewSnapshot: AppSnapshot = {
         source: "desktop",
         request: "今天有哪些事情值得我优先关注？",
         status: "succeeded",
-        response: "今天建议优先关注两件事：\n\n1. **商城登录超时修复**已经进入验证阶段。\n2. 下午的产品评审前，先确认自动化日报里的两条行业变化。",
+        response: "今天建议优先关注两件事：\n\n1. **商城登录超时修复**已经进入验证阶段。\n2. 下午的产品评审前，先确认助理定时任务整理出的两条行业变化。",
         createdAt: now - 62_000,
         startedAt: now - 61_000,
         finishedAt: now - 48_000,
@@ -254,7 +143,7 @@ const previewSnapshot: AppSnapshot = {
         conversationId: "assistant-shadow",
         source: "wecom",
         messageId: "preview-wecom-owner-message",
-        botProfileId: "automation-news-bot",
+        botProfileId: "assistant-shadow-bot",
         userId: "developer",
         request: "把产品评审相关的上下文整理成三个要点。",
         status: "succeeded",
@@ -264,7 +153,80 @@ const previewSnapshot: AppSnapshot = {
         finishedAt: now - 25_000,
       },
     ],
+    wecomBots: [
+      {
+        id: "assistant-shadow-bot",
+        name: "小岚 · 企业微信入口",
+        enabled: true,
+        configured: true,
+        hasSecret: true,
+        botId: "aibot-preview-shadow",
+        status: "connected",
+        createdAt: now - 300_000,
+        updatedAt: now - 300_000,
+      },
+    ],
+    tasks: [
+      {
+        id: "daily-industry-news",
+        assistantId: "assistant-shadow",
+        name: "工作日行业动态",
+        enabled: true,
+        schedule: "0 9 * * 1-5",
+        prompt: "整理今天新出现且与商城业务相关的行业动态，并把结论通知我。",
+        timeoutMinutes: 20,
+        maxTurns: 20,
+        createdAt: now - 90_000,
+        updatedAt: now - 90_000,
+      },
+      {
+        id: "weekly-mail-review",
+        assistantId: "assistant-shadow",
+        name: "每周邮件回顾",
+        enabled: true,
+        schedule: "30 17 * * 5",
+        prompt: "回顾本周需要我跟进的个人邮件并生成待办摘要。",
+        timeoutMinutes: 20,
+        maxTurns: 20,
+        createdAt: now - 80_000,
+        updatedAt: now - 80_000,
+      },
+    ],
+    taskRuns: [
+      {
+        id: "preview-task-run-success",
+        taskId: "daily-industry-news",
+        assistantId: "assistant-shadow",
+        taskName: "工作日行业动态",
+        trigger: "scheduled",
+        status: "succeeded",
+        createdAt: now - 70_000,
+        startedAt: now - 69_000,
+        finishedAt: now - 40_000,
+        scheduledFor: now - 70_000,
+        response: "今天新增两条值得关注的行业动态，均已核对来源。",
+      },
+      {
+        id: "preview-task-run-failed",
+        taskId: "weekly-mail-review",
+        assistantId: "assistant-shadow",
+        taskName: "每周邮件回顾",
+        trigger: "scheduled",
+        status: "failed",
+        createdAt: now - 34_000,
+        startedAt: now - 33_000,
+        finishedAt: now - 25_000,
+        scheduledFor: now - 34_000,
+        error: "邮箱 MCP 连接已失效，Claude Code 无法读取邮件；任务未静默跳过。",
+        deliveryError: "企业微信入口暂时离线，失败通知未送达。",
+      },
+    ],
     runningConversationIds: [],
+    openConversationIds: ["assistant-shadow"],
+    resumableConversationIds: ["assistant-shadow"],
+    runningTaskIds: [],
+    schedulerActive: true,
+    lastSchedulerCheckAt: now,
   },
 };
 
@@ -363,9 +325,6 @@ export function installDevelopmentPreview(): void {
   const sessionListeners = new Set<(event: SessionChangedEvent) => void>();
   const terminalListeners = new Set<(event: TerminalDataEvent) => void>();
   const wecomListeners = new Set<(event: WeComStateChangedEvent) => void>();
-  const automationListeners = new Set<
-    (event: AutomationStateChangedEvent) => void
-  >();
   const assistantListeners = new Set<
     (event: AssistantStateChangedEvent) => void
   >();
@@ -383,12 +342,6 @@ export function installDevelopmentPreview(): void {
   const publishWeCom = () => {
     for (const listener of wecomListeners) {
       listener({ state: { ...snapshot.wecom } });
-    }
-  };
-
-  const publishAutomation = () => {
-    for (const listener of automationListeners) {
-      listener({ state: structuredClone(snapshot.automation) });
     }
   };
 
@@ -440,11 +393,11 @@ export function installDevelopmentPreview(): void {
     updateWeComConfig: async (request) => {
       if (
         request.botId.trim() &&
-        snapshot.automation.wecomBots.some(
+        snapshot.assistant.wecomBots.some(
           (bot) => bot.botId === request.botId.trim(),
         )
       ) {
-        throw new Error("这个 Bot ID 已用于企业微信业务入口。");
+        throw new Error("这个 Bot ID 已用于企业微信助理入口。");
       }
       snapshot.wecom = {
         enabled: request.enabled,
@@ -461,49 +414,23 @@ export function installDevelopmentPreview(): void {
       publishWeCom();
       return { ...snapshot.wecom };
     },
-    upsertAutomationJob: async (request) => {
-      if (
-        request.wecomTargetIds.length > 0 &&
-        !snapshot.automation.wecomBots.some(
-          (bot) => bot.id === request.wecomBotProfileId,
-        )
-      ) {
-        throw new Error("请选择有效的企业微信业务入口。");
-      }
+    upsertAssistantWeComBot: async (request) => {
       const existing = request.id
-        ? snapshot.automation.jobs.find((job) => job.id === request.id)
-        : undefined;
-      const timestamp = Date.now();
-      const job: AutomationJobRecord = {
-        ...request,
-        id: existing?.id ?? crypto.randomUUID(),
-        createdAt: existing?.createdAt ?? timestamp,
-        updatedAt: timestamp,
-      };
-      snapshot.automation.jobs = [
-        ...snapshot.automation.jobs.filter((candidate) => candidate.id !== job.id),
-        job,
-      ];
-      publishAutomation();
-      return structuredClone(job);
-    },
-    upsertAutomationWeComBot: async (request) => {
-      const existing = request.id
-        ? snapshot.automation.wecomBots.find((bot) => bot.id === request.id)
+        ? snapshot.assistant.wecomBots.find((bot) => bot.id === request.id)
         : undefined;
       if (existing && existing.botId !== request.botId.trim()) {
         throw new Error("已保存机器人的 Bot ID 不能修改。");
       }
       if (
         request.botId.trim() === snapshot.wecom.botId ||
-        snapshot.automation.wecomBots.some(
+        snapshot.assistant.wecomBots.some(
           (bot) => bot.id !== existing?.id && bot.botId === request.botId.trim(),
         )
       ) {
         throw new Error("这个 Bot ID 已被其他机器人使用。");
       }
       const timestamp = Date.now();
-      const bot = {
+      const bot: AssistantWeComBotProfile = {
         id: existing?.id ?? crypto.randomUUID(),
         name: request.name.trim(),
         enabled: request.enabled,
@@ -516,16 +443,16 @@ export function installDevelopmentPreview(): void {
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
       };
-      snapshot.automation.wecomBots = [
-        ...snapshot.automation.wecomBots.filter(
+      snapshot.assistant.wecomBots = [
+        ...snapshot.assistant.wecomBots.filter(
           (candidate) => candidate.id !== bot.id,
         ),
         bot,
       ];
-      publishAutomation();
+      publishAssistant();
       return structuredClone(bot);
     },
-    deleteAutomationWeComBot: async (botProfileId) => {
+    deleteAssistantWeComBot: async (botProfileId) => {
       if (
         snapshot.assistant.profiles.some(
           (profile) => profile.wecomBotProfileId === botProfileId,
@@ -533,21 +460,10 @@ export function installDevelopmentPreview(): void {
       ) {
         throw new Error("仍有私人助理绑定这个企业微信入口。");
       }
-      if (
-        snapshot.automation.jobs.some(
-          (job) => job.wecomBotProfileId === botProfileId,
-        )
-      ) {
-        throw new Error("仍有自动化任务使用这个机器人。");
-      }
-      snapshot.automation.wecomBots = snapshot.automation.wecomBots.filter(
+      snapshot.assistant.wecomBots = snapshot.assistant.wecomBots.filter(
         (bot) => bot.id !== botProfileId,
       );
-      snapshot.automation.discoveredWeComGroups =
-        snapshot.automation.discoveredWeComGroups.filter(
-          (group) => group.botProfileId !== botProfileId,
-        );
-      publishAutomation();
+      publishAssistant();
     },
     upsertAssistantProfile: async (request) => {
       const existing = request.id
@@ -602,6 +518,16 @@ export function installDevelopmentPreview(): void {
       snapshot.assistant.turns = snapshot.assistant.turns.filter(
         (turn) => turn.assistantId !== assistantId,
       );
+      snapshot.assistant.tasks = snapshot.assistant.tasks.filter(
+        (task) => task.assistantId !== assistantId,
+      );
+      snapshot.assistant.taskRuns = snapshot.assistant.taskRuns.filter(
+        (run) => run.assistantId !== assistantId,
+      );
+      snapshot.assistant.openConversationIds =
+        snapshot.assistant.openConversationIds.filter(
+          (candidate) => candidate !== assistantId,
+        );
       publishAssistant();
     },
     sendAssistantMessage: async ({ assistantId, text }) => {
@@ -631,6 +557,9 @@ export function installDevelopmentPreview(): void {
         conversation.lastMessageAt = timestamp;
       }
       snapshot.assistant.runningConversationIds = [assistantId];
+      if (!snapshot.assistant.openConversationIds.includes(assistantId)) {
+        snapshot.assistant.openConversationIds.push(assistantId);
+      }
       publishAssistant();
       window.setTimeout(() => {
         turn.status = "succeeded";
@@ -653,8 +582,19 @@ export function installDevelopmentPreview(): void {
       snapshot.assistant.turns = snapshot.assistant.turns.filter(
         (turn) => turn.assistantId !== assistantId,
       );
+      snapshot.assistant.openConversationIds =
+        snapshot.assistant.openConversationIds.filter(
+          (candidate) => candidate !== assistantId,
+        );
       publishAssistant();
       return structuredClone(conversation);
+    },
+    closeAssistantConversation: async (assistantId) => {
+      snapshot.assistant.openConversationIds =
+        snapshot.assistant.openConversationIds.filter(
+          (candidate) => candidate !== assistantId,
+        );
+      publishAssistant();
     },
     cancelAssistantTurn: async (conversationId) => {
       const turn = snapshot.assistant.turns.find(
@@ -672,86 +612,6 @@ export function installDevelopmentPreview(): void {
           (candidate) => candidate !== conversationId,
         );
       publishAssistant();
-    },
-    updateAutomationWeComGroupAlias: async ({
-      botProfileId,
-      chatId,
-      alias,
-    }) => {
-      const group = snapshot.automation.discoveredWeComGroups.find(
-        (candidate) =>
-          candidate.botProfileId === botProfileId &&
-          candidate.chatId === chatId,
-      );
-      if (!group) {
-        throw new Error("Preview WeCom group does not exist.");
-      }
-      const normalizedAlias = alias.trim();
-      if (normalizedAlias) {
-        group.alias = normalizedAlias;
-      } else {
-        delete group.alias;
-      }
-      publishAutomation();
-      return structuredClone(group);
-    },
-    deleteAutomationJob: async (jobId) => {
-      snapshot.automation.jobs = snapshot.automation.jobs.filter(
-        (job) => job.id !== jobId,
-      );
-      publishAutomation();
-    },
-    runAutomationJob: async (jobId) => {
-      const job = snapshot.automation.jobs.find((candidate) => candidate.id === jobId);
-      if (!job) {
-        throw new Error("Preview automation job does not exist.");
-      }
-      const run: AutomationRunRecord = {
-        id: crypto.randomUUID(),
-        reportCode: "F0E1D2C3B4",
-        jobId: job.id,
-        jobName: job.name,
-        trigger: "manual",
-        status: "running",
-        attempt: 1,
-        createdAt: Date.now(),
-        startedAt: Date.now(),
-        deliveries: job.wecomTargetIds.map((targetId) => ({
-          botProfileId: job.wecomBotProfileId,
-          targetId,
-          status: "pending",
-          attempts: 0,
-        })),
-      };
-      snapshot.automation.runs.unshift(run);
-      snapshot.automation.runningJobIds = [job.id];
-      publishAutomation();
-      return structuredClone(run);
-    },
-    retryAutomationRun: async (runId) => {
-      const run = snapshot.automation.runs.find((candidate) => candidate.id === runId);
-      if (!run) {
-        throw new Error("Preview automation run does not exist.");
-      }
-      run.status = "running";
-      run.attempt += 1;
-      run.startedAt = Date.now();
-      delete run.finishedAt;
-      delete run.error;
-      snapshot.automation.runningJobIds = [run.jobId];
-      publishAutomation();
-      return structuredClone(run);
-    },
-    cancelAutomationRun: async (runId) => {
-      const run = snapshot.automation.runs.find((candidate) => candidate.id === runId);
-      if (run) {
-        run.status = "cancelled";
-        run.finishedAt = Date.now();
-        snapshot.automation.runningJobIds = snapshot.automation.runningJobIds.filter(
-          (jobId) => jobId !== run.jobId,
-        );
-        publishAutomation();
-      }
     },
     createSession: async (request) => {
       const project =
@@ -881,10 +741,6 @@ export function installDevelopmentPreview(): void {
     onWeComStateChanged: (listener) => {
       wecomListeners.add(listener);
       return () => wecomListeners.delete(listener);
-    },
-    onAutomationStateChanged: (listener) => {
-      automationListeners.add(listener);
-      return () => automationListeners.delete(listener);
     },
     onAssistantStateChanged: (listener) => {
       assistantListeners.add(listener);

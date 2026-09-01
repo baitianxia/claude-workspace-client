@@ -7,7 +7,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute } from "node:path";
+import { dirname } from "node:path";
 import type {
   AssistantConversationRecord,
   AssistantProfileRecord,
@@ -15,26 +15,40 @@ import type {
   AssistantTurnStatus,
 } from "../shared/contracts";
 
+export interface StoredAssistantWeComBot {
+  id: string;
+  name: string;
+  enabled: boolean;
+  botId: string;
+  encryptedSecret: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface AssistantStoreData {
-  version: 1;
+  version: 2;
   profiles: AssistantProfileRecord[];
   conversations: AssistantConversationRecord[];
   turns: AssistantTurnRecord[];
+  wecomBots: StoredAssistantWeComBot[];
+  legacyWeComBotsImported: boolean;
 }
 
 const EMPTY_STORE: AssistantStoreData = {
-  version: 1,
+  version: 2,
   profiles: [],
   conversations: [],
   turns: [],
+  wecomBots: [],
+  legacyWeComBotsImported: false,
 };
 
 const MAX_ASSISTANT_PROFILES = 20;
 const MAX_ASSISTANT_CONVERSATIONS = MAX_ASSISTANT_PROFILES;
 const MAX_ASSISTANT_TURNS = 500;
 const MAX_ACTIVE_TURNS_PER_CONVERSATION = 10;
+const MAX_ASSISTANT_WECOM_BOTS = 20;
 const MAX_ASSISTANT_FILE_BYTES = 128 * 1024 * 1024;
-const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
 const TURN_STATUSES = new Set<AssistantTurnStatus>([
   "queued",
   "running",
@@ -56,10 +70,6 @@ function optionalNumber(value: unknown): value is number | undefined {
   return value === undefined || (typeof value === "number" && Number.isFinite(value));
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
-}
-
 function validIdentifier(value: string, allowEmpty = false): boolean {
   return (
     (allowEmpty || Boolean(value)) &&
@@ -75,19 +85,6 @@ function validMultilineText(value: string, maximum: number): boolean {
   );
 }
 
-function validMcpConfigPath(value: string, allowEmpty: boolean): boolean {
-  if (!value) {
-    return allowEmpty;
-  }
-  return (
-    [...value].length <= 500 &&
-    !/\p{Cc}/u.test(value) &&
-    !isAbsolute(value) &&
-    !value.split(/[\\/]+/u).some((segment) => segment === "..") &&
-    value.toLocaleLowerCase("en-US").endsWith(".json")
-  );
-}
-
 function normalizeProfile(value: unknown): AssistantProfileRecord | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -99,8 +96,6 @@ function normalizeProfile(value: unknown): AssistantProfileRecord | null {
     typeof candidate.enabled !== "boolean" ||
     typeof candidate.projectId !== "string" ||
     typeof candidate.instructions !== "string" ||
-    typeof candidate.mcpConfigPath !== "string" ||
-    !isStringArray(candidate.allowedMcpServers) ||
     typeof candidate.ownerWeComUserId !== "string" ||
     !optionalString(candidate.wecomBotProfileId) ||
     typeof candidate.timeoutMinutes !== "number" ||
@@ -115,19 +110,6 @@ function normalizeProfile(value: unknown): AssistantProfileRecord | null {
     /\p{Cc}/u.test(candidate.name) ||
     !validIdentifier(candidate.projectId) ||
     !validMultilineText(candidate.instructions, 4_000) ||
-    candidate.allowedMcpServers.length > 30 ||
-    candidate.allowedMcpServers.some(
-      (server) => !MCP_SERVER_NAME_PATTERN.test(server),
-    ) ||
-    new Set(
-      candidate.allowedMcpServers.map((server) =>
-        server.toLocaleLowerCase("en-US"),
-      ),
-    ).size !== candidate.allowedMcpServers.length ||
-    !validMcpConfigPath(
-      candidate.mcpConfigPath,
-      candidate.allowedMcpServers.length === 0,
-    ) ||
     !validIdentifier(candidate.ownerWeComUserId, true) ||
     (candidate.wecomBotProfileId !== undefined &&
       !validIdentifier(candidate.wecomBotProfileId)) ||
@@ -140,7 +122,21 @@ function normalizeProfile(value: unknown): AssistantProfileRecord | null {
   ) {
     return null;
   }
-  return clone(candidate as AssistantProfileRecord);
+  return {
+    id: candidate.id,
+    name: candidate.name,
+    enabled: candidate.enabled,
+    projectId: candidate.projectId,
+    instructions: candidate.instructions,
+    ownerWeComUserId: candidate.ownerWeComUserId,
+    ...(candidate.wecomBotProfileId
+      ? { wecomBotProfileId: candidate.wecomBotProfileId }
+      : {}),
+    timeoutMinutes: candidate.timeoutMinutes,
+    maxTurns: candidate.maxTurns,
+    createdAt: candidate.createdAt,
+    updatedAt: candidate.updatedAt,
+  };
 }
 
 function normalizeConversation(
@@ -244,15 +240,47 @@ function normalizeTurn(value: unknown): AssistantTurnRecord | null {
   return clone(candidate as AssistantTurnRecord);
 }
 
+function normalizeStoredWeComBot(
+  value: unknown,
+): StoredAssistantWeComBot | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Partial<StoredAssistantWeComBot>;
+  if (
+    typeof candidate.id !== "string" ||
+    !validIdentifier(candidate.id) ||
+    typeof candidate.name !== "string" ||
+    !candidate.name.trim() ||
+    candidate.name !== candidate.name.trim() ||
+    [...candidate.name].length > 80 ||
+    /\p{Cc}/u.test(candidate.name) ||
+    typeof candidate.enabled !== "boolean" ||
+    typeof candidate.botId !== "string" ||
+    !validIdentifier(candidate.botId) ||
+    typeof candidate.encryptedSecret !== "string" ||
+    [...candidate.encryptedSecret].length > 10_000 ||
+    typeof candidate.createdAt !== "number" ||
+    !Number.isFinite(candidate.createdAt) ||
+    typeof candidate.updatedAt !== "number" ||
+    !Number.isFinite(candidate.updatedAt)
+  ) {
+    return null;
+  }
+  return clone(candidate as StoredAssistantWeComBot);
+}
+
 function parseStore(raw: string): AssistantStoreData {
   const parsed = JSON.parse(raw) as {
     version?: unknown;
     profiles?: unknown;
     conversations?: unknown;
     turns?: unknown;
+    wecomBots?: unknown;
+    legacyWeComBotsImported?: unknown;
   };
   if (
-    parsed.version !== 1 ||
+    (parsed.version !== 1 && parsed.version !== 2) ||
     !Array.isArray(parsed.profiles) ||
     !Array.isArray(parsed.conversations) ||
     !Array.isArray(parsed.turns)
@@ -262,16 +290,25 @@ function parseStore(raw: string): AssistantStoreData {
   const profiles = parsed.profiles.map(normalizeProfile);
   const conversations = parsed.conversations.map(normalizeConversation);
   const turns = parsed.turns.map(normalizeTurn);
+  const wecomBots =
+    parsed.version === 1 && parsed.wecomBots === undefined
+      ? []
+      : Array.isArray(parsed.wecomBots)
+        ? parsed.wecomBots.map(normalizeStoredWeComBot)
+        : null;
   if (
     profiles.some((entry) => entry === null) ||
     conversations.some((entry) => entry === null) ||
-    turns.some((entry) => entry === null)
+    turns.some((entry) => entry === null) ||
+    wecomBots === null ||
+    wecomBots.some((entry) => entry === null)
   ) {
     throw new Error("Assistant data contains an invalid record.");
   }
   if (
     profiles.length > MAX_ASSISTANT_PROFILES ||
-    conversations.length > MAX_ASSISTANT_CONVERSATIONS
+    conversations.length > MAX_ASSISTANT_CONVERSATIONS ||
+    wecomBots.length > MAX_ASSISTANT_WECOM_BOTS
   ) {
     throw new Error("Assistant data exceeds its configured record limits.");
   }
@@ -282,7 +319,9 @@ function parseStore(raw: string): AssistantStoreData {
       (conversations as AssistantConversationRecord[]).map((entry) => entry.id),
     ).size !== conversations.length ||
     new Set((turns as AssistantTurnRecord[]).map((entry) => entry.id)).size !==
-      turns.length
+      turns.length ||
+    new Set((wecomBots as StoredAssistantWeComBot[]).map((entry) => entry.id))
+      .size !== wecomBots.length
   ) {
     throw new Error("Assistant data contains duplicate record IDs.");
   }
@@ -327,10 +366,13 @@ function parseStore(raw: string): AssistantStoreData {
     }
   }
   return {
-    version: 1,
+    version: 2,
     profiles: profileRecords,
     conversations: conversationRecords,
     turns: turnRecords,
+    wecomBots: wecomBots as StoredAssistantWeComBot[],
+    legacyWeComBotsImported:
+      parsed.version === 2 && parsed.legacyWeComBotsImported === true,
   };
 }
 
@@ -339,7 +381,10 @@ export class AssistantStore {
   private initialized = false;
   private persistQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly storePath: string) {}
+  constructor(
+    private readonly storePath: string,
+    private readonly legacyAutomationStorePath?: string,
+  ) {}
 
   async initialize(): Promise<void> {
     if (this.initialized) {
@@ -359,6 +404,107 @@ export class AssistantStore {
       this.data = clone(EMPTY_STORE);
     }
     this.initialized = true;
+    await this.importLegacyWeComBots();
+  }
+
+  private async importLegacyWeComBots(): Promise<void> {
+    if (this.data.legacyWeComBotsImported) {
+      return;
+    }
+    try {
+      if (this.legacyAutomationStorePath) {
+        const legacyStat = await stat(this.legacyAutomationStorePath);
+        if (!legacyStat.isFile() || legacyStat.size > MAX_ASSISTANT_FILE_BYTES) {
+          throw new Error("Legacy automation data is not a regular file or is too large.");
+        }
+        const legacy = JSON.parse(
+          await readFile(this.legacyAutomationStorePath, "utf8"),
+        ) as { wecomBots?: unknown };
+        if (Array.isArray(legacy.wecomBots)) {
+          for (const value of legacy.wecomBots) {
+            const bot = normalizeStoredWeComBot(value);
+            if (!bot || this.data.wecomBots.length >= MAX_ASSISTANT_WECOM_BOTS) {
+              continue;
+            }
+            const nameKey = bot.name.toLocaleLowerCase("zh-CN");
+            const botIdKey = bot.botId.toLocaleLowerCase("en-US");
+            if (
+              this.data.wecomBots.some(
+                (existing) =>
+                  existing.id === bot.id ||
+                  existing.name.toLocaleLowerCase("zh-CN") === nameKey ||
+                  existing.botId.toLocaleLowerCase("en-US") === botIdKey,
+              )
+            ) {
+              continue;
+            }
+            this.data.wecomBots.push(bot);
+          }
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error("Failed to import legacy assistant WeCom entries", error);
+      }
+    }
+    this.data.legacyWeComBotsImported = true;
+    await this.persist();
+  }
+
+  listStoredWeComBots(): StoredAssistantWeComBot[] {
+    this.assertInitialized();
+    return this.data.wecomBots
+      .map((bot) => clone(bot))
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  }
+
+  getStoredWeComBot(
+    botProfileId: string,
+  ): StoredAssistantWeComBot | undefined {
+    this.assertInitialized();
+    const bot = this.data.wecomBots.find(
+      (candidate) => candidate.id === botProfileId,
+    );
+    return bot ? clone(bot) : undefined;
+  }
+
+  async putStoredWeComBot(bot: StoredAssistantWeComBot): Promise<void> {
+    this.assertInitialized();
+    const normalized = normalizeStoredWeComBot(bot);
+    if (!normalized) {
+      throw new Error("企业微信助理入口格式无效。");
+    }
+    const index = this.data.wecomBots.findIndex(
+      (candidate) => candidate.id === normalized.id,
+    );
+    if (index < 0) {
+      if (this.data.wecomBots.length >= MAX_ASSISTANT_WECOM_BOTS) {
+        throw new Error(`企业微信助理入口最多可以配置 ${MAX_ASSISTANT_WECOM_BOTS} 个。`);
+      }
+      this.data.wecomBots.push(normalized);
+    } else {
+      this.data.wecomBots[index] = normalized;
+    }
+    await this.persist();
+  }
+
+  async removeStoredWeComBot(botProfileId: string): Promise<void> {
+    this.assertInitialized();
+    if (
+      this.data.profiles.some(
+        (profile) => profile.wecomBotProfileId === botProfileId,
+      )
+    ) {
+      throw new Error("仍有私人助理绑定这个企业微信入口，请先解除绑定。");
+    }
+    const next = this.data.wecomBots.filter(
+      (candidate) => candidate.id !== botProfileId,
+    );
+    if (next.length === this.data.wecomBots.length) {
+      throw new Error("企业微信助理入口不存在或已经删除。");
+    }
+    this.data.wecomBots = next;
+    await this.persist();
   }
 
   listProfiles(): AssistantProfileRecord[] {
@@ -576,9 +722,30 @@ export class AssistantStore {
     this.replaceTurnInMemory(turn);
     if (claudeSessionId) {
       conversation.claudeSessionId = claudeSessionId;
-    } else {
-      delete conversation.claudeSessionId;
     }
+    conversation.updatedAt = Math.max(conversation.updatedAt, now);
+    await this.persist();
+  }
+
+  async setConversationSessionId(
+    conversationId: string,
+    claudeSessionId: string,
+    now = Date.now(),
+  ): Promise<void> {
+    this.assertInitialized();
+    if (!validIdentifier(claudeSessionId)) {
+      throw new Error("Claude Code 会话 ID 格式无效。");
+    }
+    const conversation = this.data.conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    if (!conversation) {
+      throw new Error("私人助理会话不存在。");
+    }
+    if (conversation.claudeSessionId === claudeSessionId) {
+      return;
+    }
+    conversation.claudeSessionId = claudeSessionId;
     conversation.updatedAt = Math.max(conversation.updatedAt, now);
     await this.persist();
   }
@@ -636,13 +803,12 @@ export class AssistantStore {
       }
       turn.status = "failed";
       turn.finishedAt = now;
-      turn.error = "客户端上次退出时这一轮尚未完成，结果未知；会话上下文已安全重置。";
+      turn.error = "客户端上次退出时这一轮尚未完成，结果未知；下一条消息将从已保存的会话恢复。";
       affectedConversationIds.add(turn.conversationId);
       recovered += 1;
     }
     for (const conversation of this.data.conversations) {
       if (affectedConversationIds.has(conversation.id)) {
-        delete conversation.claudeSessionId;
         conversation.updatedAt = now;
       }
     }

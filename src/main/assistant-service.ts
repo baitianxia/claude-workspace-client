@@ -1,30 +1,33 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { isAbsolute } from "node:path";
 import type {
   AssistantConversationRecord,
   AssistantProfileRecord,
   AssistantSnapshot,
   AssistantTurnRecord,
-  AutomationWeComBotProfile,
+  AssistantWeComBotProfile,
   ProjectRecord,
   SendAssistantMessageRequest,
   UpsertAssistantProfileRequest,
+  UpsertAssistantWeComBotRequest,
 } from "../shared/contracts";
 import type {
-  AutomationWeComMessage,
-  AutomationWeComMessageResult,
-} from "./automation-wecom-bot-manager";
+  AssistantWeComMessage,
+  AssistantWeComMessageResult,
+} from "./assistant-wecom-bot-manager";
 import { AssistantStore } from "./assistant-store";
+import type { AssistantTaskService } from "./assistant-task-service";
 import type {
+  AssistantTaskMcpServer,
   ClaudeCodeAssistantInput,
   ClaudeCodeAssistantResult,
 } from "./claude-code-assistant-runner";
+import { withTimeout } from "./promise-timeout";
 
 const MAX_QUEUED_TURNS_PER_ASSISTANT = 10;
 const MAX_ASSISTANT_MESSAGE_CHARACTERS = 4_000;
 const MAX_ASSISTANT_INSTRUCTION_CHARACTERS = 4_000;
-const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u;
+const WECOM_DELIVERY_TIMEOUT_MILLISECONDS = 15_000;
 
 interface AssistantServiceEvents {
   stateChanged: [state: AssistantSnapshot];
@@ -34,16 +37,26 @@ export interface AssistantRunner {
   initialize?(): Promise<void>;
   run(input: ClaudeCodeAssistantInput): Promise<ClaudeCodeAssistantResult>;
   cancel(turnId: string): boolean;
+  close(assistantId: string): Promise<void>;
+  listOpenAssistantIds(): string[];
   dispose(): void;
+  on?(event: "stateChanged", listener: () => void): unknown;
+  off?(event: "stateChanged", listener: () => void): unknown;
 }
 
 export interface AssistantWeComGateway {
-  listBots(): AutomationWeComBotProfile[];
+  listBots(): AssistantWeComBotProfile[];
+  upsertBot(
+    request: UpsertAssistantWeComBotRequest,
+  ): Promise<AssistantWeComBotProfile>;
+  deleteBot(botProfileId: string): Promise<void>;
   sendMarkdown(
     botProfileId: string,
     targetId: string,
     content: string,
   ): Promise<void>;
+  on?(event: "stateChanged", listener: () => void): unknown;
+  off?(event: "stateChanged", listener: () => void): unknown;
 }
 
 function readableError(error: unknown): string {
@@ -95,48 +108,8 @@ function requireInteger(
   return value;
 }
 
-function requireMcpServers(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > 30) {
-    throw new Error("允许的 MCP 服务器列表格式无效。");
-  }
-  const result: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of value) {
-    if (typeof raw !== "string") {
-      throw new Error("允许的 MCP 服务器列表包含非字符串值。");
-    }
-    const name = raw.trim();
-    const key = name.toLocaleLowerCase("en-US");
-    if (!MCP_SERVER_NAME_PATTERN.test(name)) {
-      throw new Error(`MCP 服务器名称“${name || "空值"}”格式无效。`);
-    }
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(name);
-    }
-  }
-  return result;
-}
-
-function validateMcpConfigPath(value: unknown, hasServers: boolean): string {
-  const path = requireText(value, "MCP 配置路径", 500, {
-    allowEmpty: !hasServers,
-  });
-  if (!path) {
-    return "";
-  }
-  if (
-    isAbsolute(path) ||
-    path.split(/[\\/]+/u).some((segment) => segment === "..") ||
-    !path.toLocaleLowerCase("en-US").endsWith(".json")
-  ) {
-    throw new Error("MCP 配置必须是工程内的相对 JSON 路径。");
-  }
-  return path;
-}
-
 function validWeComUserId(value: string): boolean {
-  return Boolean(value) && !/\s/u.test(value) && [...value].length <= 200;
+  return !/\s|\p{Cc}/u.test(value) && [...value].length <= 200;
 }
 
 function isActiveTurn(turn: AssistantTurnRecord): boolean {
@@ -168,14 +141,14 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
   private initialized = false;
   private shuttingDown = false;
   private disposePromise: Promise<void> | null = null;
+  private readonly onNestedStateChanged = () => this.emitStateChanged();
 
   constructor(
     private readonly store: AssistantStore,
     private readonly runner: AssistantRunner,
-    private readonly getProject: (
-      projectId: string,
-    ) => ProjectRecord | undefined,
+    private readonly getProject: (projectId: string) => ProjectRecord | undefined,
     private readonly wecomBots: AssistantWeComGateway,
+    private readonly tasks: AssistantTaskService,
     private readonly now: () => number = Date.now,
   ) {
     super();
@@ -185,27 +158,73 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     if (this.initialized) {
       return;
     }
-    await this.runner.initialize?.();
     await this.store.initialize();
     await this.store.recoverInterruptedTurns(this.now());
+    await this.runner.initialize?.();
+    await this.tasks.initialize();
+    this.runner.on?.("stateChanged", this.onNestedStateChanged);
+    this.wecomBots.on?.("stateChanged", this.onNestedStateChanged);
+    this.tasks.on("stateChanged", this.onNestedStateChanged);
     this.initialized = true;
+    this.emitStateChanged();
   }
 
   getSnapshot(): AssistantSnapshot {
+    const conversations = this.store.listConversations();
+    const schedulerError = this.tasks.getSchedulerError();
+    const schedulerErrorAt = this.tasks.getSchedulerErrorAt();
+    const lastSchedulerCheckAt = this.tasks.getLastSchedulerCheckAt();
     return {
       profiles: this.store.listProfiles(),
-      conversations: this.store.listConversations().map((conversation) => {
+      conversations: conversations.map((conversation) => {
         const publicConversation = { ...conversation };
         delete publicConversation.claudeSessionId;
         return publicConversation;
       }),
       turns: this.store.listTurns(),
+      wecomBots: this.wecomBots.listBots(),
+      tasks: this.tasks.listTasks(),
+      taskRuns: this.tasks.listRuns(),
       runningConversationIds: [...this.workers.keys()],
+      openConversationIds: this.runner.listOpenAssistantIds(),
+      resumableConversationIds: conversations
+        .filter((conversation) => Boolean(conversation.claudeSessionId))
+        .map((conversation) => conversation.assistantId),
+      runningTaskIds: this.tasks.listRunningTaskIds(),
+      schedulerActive: this.tasks.isSchedulerActive(),
+      ...(lastSchedulerCheckAt === undefined ? {} : { lastSchedulerCheckAt }),
+      ...(schedulerError ? { schedulerError } : {}),
+      ...(schedulerErrorAt === undefined ? {} : { schedulerErrorAt }),
     };
   }
 
   hasRunningTurns(): boolean {
-    return this.workers.size > 0;
+    return this.store.listTurns().some(isActiveTurn);
+  }
+
+  hasRunningWork(): boolean {
+    return this.hasRunningTurns() || this.tasks.hasRunningRuns();
+  }
+
+  findBotDeletionBlocker(botProfileId: string): string | undefined {
+    const profile = this.store.findProfileByWeComBot(botProfileId);
+    return profile
+      ? `私人助理“${profile.name}”仍绑定这个企业微信入口，请先解除绑定或删除助理。`
+      : undefined;
+  }
+
+  async upsertWeComBot(
+    request: UpsertAssistantWeComBotRequest,
+  ): Promise<AssistantWeComBotProfile> {
+    return this.wecomBots.upsertBot(request);
+  }
+
+  async deleteWeComBot(botProfileId: string): Promise<void> {
+    const blocker = this.findBotDeletionBlocker(botProfileId);
+    if (blocker) {
+      throw new Error(blocker);
+    }
+    await this.wecomBots.deleteBot(botProfileId);
   }
 
   async upsertProfile(
@@ -217,70 +236,65 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     if (typeof request.enabled !== "boolean") {
       throw new Error("私人助理启用状态无效。");
     }
-    const id = request.id
-      ? requireText(request.id, "私人助理 ID", 200)
-      : randomUUID();
-    const existing = this.store.getProfile(id);
+    const existing = request.id ? this.store.getProfile(request.id) : undefined;
     if (request.id && !existing) {
       throw new Error("私人助理不存在或已经删除。");
     }
-    if (this.hasActiveTurns(id)) {
-      throw new Error("私人助理仍有对话正在处理，暂时不能修改配置。");
+    const id = existing?.id ?? randomUUID();
+    if (this.hasActiveTurns(id) || this.tasks.hasRunningRunsForAssistant(id)) {
+      throw new Error("私人助理正在处理消息或任务，暂时不能修改配置。");
     }
-    const name = requireText(request.name, "私人助理名称", 80);
-    const duplicateName = this.store.listProfiles().find(
-      (profile) =>
-        profile.id !== id &&
-        profile.name.toLocaleLowerCase("zh-CN") ===
-          name.toLocaleLowerCase("zh-CN"),
-    );
-    if (duplicateName) {
+    const name = requireText(request.name, "助理名称", 80);
+    if (
+      this.store
+        .listProfiles()
+        .some(
+          (profile) =>
+            profile.id !== id &&
+            profile.name.toLocaleLowerCase("zh-CN") ===
+              name.toLocaleLowerCase("zh-CN"),
+        )
+    ) {
       throw new Error("已经存在同名私人助理。");
     }
-    const projectId = requireText(request.projectId, "运行工程 ID", 200);
+    const projectId = requireText(request.projectId, "运行工程", 200);
     if (!this.getProject(projectId)) {
       throw new Error("私人助理关联的工程不存在。");
     }
-    const hasHistory = Boolean(
+    if (
       existing &&
-        this.store.getConversation(existing.id)?.lastMessageAt !== undefined,
-    );
-    if (existing && projectId !== existing.projectId && hasHistory) {
-      throw new Error(
-        "已有主人对话后不能更换运行工程；请新建助理，避免跨工程恢复私人上下文。",
-      );
+      existing.projectId !== projectId &&
+      (this.store.listTurnsForConversation(id).length > 0 ||
+        this.tasks.hasAssistantData(id))
+    ) {
+      throw new Error("私人助理产生过聊天或定时任务后不能更换运行工程，请新建助理。");
     }
     const ownerWeComUserId = requireText(
       request.ownerWeComUserId,
-      "主人企业微信 userid",
+      "主人 userid",
       200,
       { allowEmpty: true },
     );
-    if (ownerWeComUserId && !validWeComUserId(ownerWeComUserId)) {
-      throw new Error("主人企业微信 userid 格式无效。");
+    if (!validWeComUserId(ownerWeComUserId)) {
+      throw new Error("主人 userid 格式无效。");
     }
     if (
       existing?.ownerWeComUserId &&
       ownerWeComUserId !== existing.ownerWeComUserId
     ) {
-      throw new Error(
-        "主人 userid 保存后不能更换；请新建助理，避免身份切换期间把私人上下文转交给其他人。",
-      );
+      throw new Error("主人 userid 保存后不能更换，请新建私人助理。");
     }
-    const wecomBotProfileId = request.wecomBotProfileId?.trim();
+    const wecomBotProfileId = request.wecomBotProfileId
+      ? requireText(request.wecomBotProfileId, "企业微信入口", 200)
+      : undefined;
     if (wecomBotProfileId) {
       if (!ownerWeComUserId) {
-        throw new Error("绑定企业微信入口前必须填写主人的 userid。");
+        throw new Error("绑定企业微信入口前必须填写主人 userid。");
       }
       if (!this.wecomBots.listBots().some((bot) => bot.id === wecomBotProfileId)) {
-        throw new Error("选择的企业微信入口不存在或已经删除。");
-      }
-      const duplicateBot = this.store.findProfileByWeComBot(wecomBotProfileId);
-      if (duplicateBot && duplicateBot.id !== id) {
-        throw new Error("这个企业微信入口已经绑定到其他私人助理。");
+        throw new Error("选择的企业微信助理入口不存在。");
       }
     }
-    const allowedMcpServers = requireMcpServers(request.allowedMcpServers);
     const timestamp = this.now();
     const profile: AssistantProfileRecord = {
       id,
@@ -293,35 +307,35 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         MAX_ASSISTANT_INSTRUCTION_CHARACTERS,
         { allowEmpty: true, multiline: true },
       ),
-      mcpConfigPath: validateMcpConfigPath(
-        request.mcpConfigPath,
-        allowedMcpServers.length > 0,
-      ),
-      allowedMcpServers,
       ownerWeComUserId,
       ...(wecomBotProfileId ? { wecomBotProfileId } : {}),
-      timeoutMinutes: requireInteger(
-        request.timeoutMinutes,
-        "单轮超时分钟数",
-        1,
-        120,
-      ),
-      maxTurns: requireInteger(request.maxTurns, "最大 Agent 轮数", 1, 100),
+      timeoutMinutes: requireInteger(request.timeoutMinutes, "超时分钟", 1, 120),
+      maxTurns: requireInteger(request.maxTurns, "最大轮数", 1, 100),
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
     };
+    if (existing) {
+      await this.runner.close(id);
+    }
     await this.store.putProfile(profile);
-    await this.ensureOwnerConversation(profile.id);
+    if (!profile.enabled) {
+      await this.tasks.disableTasksForAssistant(profile.id);
+    }
     this.emitStateChanged();
     return profile;
   }
 
   async deleteProfile(assistantId: string): Promise<void> {
-    const id = requireText(assistantId, "私人助理 ID", 200);
-    if (this.hasActiveTurns(id)) {
-      throw new Error("私人助理仍有对话正在处理，请先停止后再删除。");
+    this.requireProfile(assistantId);
+    if (this.hasActiveTurns(assistantId)) {
+      throw new Error("私人助理仍有消息正在处理，暂时不能删除。");
     }
-    await this.store.removeProfile(id);
+    if (this.tasks.hasRunningRunsForAssistant(assistantId)) {
+      throw new Error("私人助理仍有定时任务正在运行，暂时不能删除。");
+    }
+    await this.runner.close(assistantId);
+    await this.tasks.removeAssistant(assistantId);
+    await this.store.removeProfile(assistantId);
     this.emitStateChanged();
   }
 
@@ -331,123 +345,170 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     if (!request || typeof request !== "object") {
       throw new Error("私人助理消息请求无效。");
     }
-    const assistantId = requireText(request.assistantId, "私人助理 ID", 200);
-    const text = requireText(
-      request.text,
-      "消息",
-      MAX_ASSISTANT_MESSAGE_CHARACTERS,
-      { multiline: true },
+    const profile = this.requireEnabledProfile(
+      requireText(request.assistantId, "助理 ID", 200),
     );
-    const profile = this.requireEnabledProfile(assistantId);
     return this.enqueueTurn(profile, {
       source: "desktop",
-      request: text,
+      request: requireText(
+        request.text,
+        "消息",
+        MAX_ASSISTANT_MESSAGE_CHARACTERS,
+        { multiline: true },
+      ),
     });
   }
 
   async resetOwnerConversation(
     assistantId: string,
   ): Promise<AssistantConversationRecord> {
-    const profile = this.requireProfile(
-      requireText(assistantId, "私人助理 ID", 200),
-    );
-    if (this.hasActiveTurns(profile.id)) {
-      throw new Error("当前仍有消息正在处理，请先停止或等待完成。");
+    this.requireProfile(assistantId);
+    if (this.hasActiveTurns(assistantId)) {
+      throw new Error("仍有消息正在处理，暂时不能开始新对话。");
     }
-    const conversation = await this.ensureOwnerConversation(profile.id);
-    const reset = await this.store.resetConversation(conversation.id, this.now());
+    await this.ensureOwnerConversation(assistantId);
+    await this.runner.close(assistantId);
+    const conversation = await this.store.resetConversation(
+      assistantId,
+      this.now(),
+    );
     this.emitStateChanged();
-    return reset;
+    return conversation;
+  }
+
+  async closeOwnerConversation(assistantId: string): Promise<void> {
+    this.requireProfile(assistantId);
+    if (this.hasActiveTurns(assistantId)) {
+      throw new Error("仍有消息正在处理，暂时不能关闭会话。");
+    }
+    await this.runner.close(assistantId);
+    this.emitStateChanged();
   }
 
   async cancelTurn(conversationId: string): Promise<void> {
-    const id = requireText(conversationId, "私人助理会话 ID", 200);
-    const running = this.store
-      .listTurnsForConversation(id)
-      .find((turn) => turn.status === "running");
-    if (!running || !this.runner.cancel(running.id)) {
-      throw new Error("当前会话没有正在运行的轮次。");
-    }
-  }
-
-  async disableProfilesForProject(projectId: string): Promise<void> {
-    const affected = this.store
-      .listProfiles()
-      .filter((profile) => profile.projectId === projectId);
-    await this.store.disableProfilesForProject(projectId, this.now());
-    for (const profile of affected) {
-      const running = this.store
-        .listTurnsForConversation(profile.id)
-        .find((turn) => turn.status === "running");
-      if (running) {
-        this.runner.cancel(running.id);
+    this.requireProfile(conversationId);
+    const turns = this.store.listTurnsForConversation(conversationId);
+    const running = turns.find((turn) => turn.status === "running");
+    if (running) {
+      if (!this.runner.cancel(running.id)) {
+        throw new Error("当前对话轮次已经结束或无法中断。");
       }
+      return;
     }
-    await Promise.allSettled(
-      affected.flatMap((profile) => {
-        const worker = this.workers.get(profile.id);
-        return worker ? [worker] : [];
-      }),
+    const queued = turns.find((turn) => turn.status === "queued");
+    if (!queued) {
+      throw new Error("当前没有可停止的助理消息。");
+    }
+    await this.store.completeTurn(
+      {
+        ...queued,
+        status: "cancelled",
+        finishedAt: this.now(),
+        error: "主人在执行前取消了这条消息。",
+      },
+      undefined,
+      this.now(),
     );
     this.emitStateChanged();
   }
 
-  readonly handleWeComMessage = async (
-    message: AutomationWeComMessage,
-  ): Promise<AutomationWeComMessageResult | null> => {
-    if (message.chatType !== "single") {
-      return null;
+  async disableProfilesForProject(projectId: string): Promise<void> {
+    const profiles = this.store
+      .listProfiles()
+      .filter((profile) => profile.projectId === projectId);
+    if (
+      profiles.some(
+        (profile) =>
+          this.hasActiveTurns(profile.id) ||
+          this.tasks.hasRunningRunsForAssistant(profile.id),
+      )
+    ) {
+      throw new Error("工程仍有私人助理聊天或定时任务正在运行。");
     }
+    for (const profile of profiles) {
+      await this.runner.close(profile.id);
+      await this.tasks.disableTasksForAssistant(profile.id);
+    }
+    await this.store.disableProfilesForProject(projectId, this.now());
+    this.emitStateChanged();
+  }
+
+  handleWeComMessage = async (
+    message: AssistantWeComMessage,
+  ): Promise<AssistantWeComMessageResult | null> => {
     const profile = this.store.findProfileByWeComBot(message.botProfileId);
     if (
       !profile ||
+      message.chatType !== "single" ||
       !profile.ownerWeComUserId ||
       message.userId !== profile.ownerWeComUserId
     ) {
       return null;
-    }
-    if (!profile.enabled) {
-      return {
-        status: "rejected",
-        message: `私人助理“${profile.name}”当前已停用。`,
-      };
     }
     const duplicate = this.store.findTurnByMessageId(
       message.botProfileId,
       message.messageId,
     );
     if (duplicate) {
-      return {
-        status: "accepted",
-        message: `这条消息已经处理，当前状态：${turnStatusLabel(duplicate)}。`,
-      };
+      return { status: "accepted", message: "这条消息已经接收，不会重复执行。" };
+    }
+    if (!profile.enabled) {
+      return { status: "rejected", message: "私人助理当前已停用。" };
     }
     const command = message.text.trim().toLocaleLowerCase("en-US");
     if (command === "/help") {
       return {
         status: "accepted",
-        message: "可用命令：/new 新对话、/status 查看状态、/stop 停止当前轮次。其他文字会进入与桌面共享的主人会话。",
+        message:
+          "可用命令：/status 查看状态，/stop 停止当前轮次，/close 关闭常驻会话并保留上下文，/new 开始全新对话。其他文字会直接交给私人助理，也可以自然语言创建和管理定时任务。",
       };
     }
     if (command === "/status") {
-      const latest = this.store.listTurnsForConversation(profile.id).at(-1);
+      const turns = this.store.listTurnsForConversation(profile.id);
+      const latest = turns.at(-1);
+      const tasks = this.tasks.listTasks(profile.id);
+      const recentRuns = this.tasks.listRuns({ assistantId: profile.id, limit: 20 });
+      const failedRuns = recentRuns.filter(
+        (run) => run.status === "failed" || run.status === "timed-out",
+      ).length;
+      const online = this.runner.listOpenAssistantIds().includes(profile.id);
       return {
         status: "accepted",
-        message: `${profile.name}：${turnStatusLabel(latest)}。桌面与当前主人单聊共享上下文。`,
+        message: [
+          `助理：${profile.name}`,
+          `主人会话：${online ? "在线" : "已关闭，下条消息将恢复"}`,
+          `聊天：${turnStatusLabel(latest)}`,
+          `定时任务：${tasks.filter((task) => task.enabled).length}/${tasks.length} 个启用`,
+          `最近任务失败：${failedRuns} 次`,
+          ...(this.tasks.getSchedulerError()
+            ? [`调度异常：${this.tasks.getSchedulerError()}`]
+            : []),
+        ].join("\n"),
       };
-    }
-    if (command === "/new") {
-      try {
-        await this.resetOwnerConversation(profile.id);
-        return { status: "accepted", message: "已开始一段新的主人会话。" };
-      } catch (error) {
-        return { status: "rejected", message: readableError(error) };
-      }
     }
     if (command === "/stop") {
       try {
         await this.cancelTurn(profile.id);
-        return { status: "accepted", message: "已请求停止当前轮次。" };
+        return { status: "accepted", message: "已请求停止当前助理轮次。" };
+      } catch (error) {
+        return { status: "rejected", message: readableError(error) };
+      }
+    }
+    if (command === "/close") {
+      try {
+        await this.closeOwnerConversation(profile.id);
+        return {
+          status: "accepted",
+          message: "主人会话进程已关闭；上下文已保留，下条消息会恢复。",
+        };
+      } catch (error) {
+        return { status: "rejected", message: readableError(error) };
+      }
+    }
+    if (command === "/new") {
+      try {
+        await this.resetOwnerConversation(profile.id);
+        return { status: "accepted", message: "已开始全新的主人对话。" };
       } catch (error) {
         return { status: "rejected", message: readableError(error) };
       }
@@ -466,21 +527,22 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     });
     return {
       status: "accepted",
-      message: `已交给 ${profile.name}，当前排队编号 ${turn.id.slice(0, 8)}。完成后会在本单聊回复。`,
+      message: `已交给 ${profile.name}，排队编号 ${turn.id.slice(0, 8)}；完成后会在本单聊回复。`,
     };
   };
 
   dispose(): Promise<void> {
-    if (this.disposePromise) {
-      return this.disposePromise;
-    }
-    this.disposePromise = this.disposeInternal();
+    this.disposePromise ??= this.disposeInternal();
     return this.disposePromise;
   }
 
   private async disposeInternal(): Promise<void> {
     this.shuttingDown = true;
+    this.runner.off?.("stateChanged", this.onNestedStateChanged);
+    this.wecomBots.off?.("stateChanged", this.onNestedStateChanged);
+    this.tasks.off("stateChanged", this.onNestedStateChanged);
     this.runner.dispose();
+    await this.tasks.dispose();
     await Promise.allSettled([...this.workers.values()]);
     const timestamp = this.now();
     for (const turn of this.store.listTurns().filter(isActiveTurn)) {
@@ -489,7 +551,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
           ...turn,
           status: "cancelled",
           finishedAt: timestamp,
-          error: "客户端关闭，本轮对话已取消。",
+          error: "客户端关闭，本轮对话已取消；已保存的会话仍可恢复。",
         },
         undefined,
         timestamp,
@@ -612,12 +674,14 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       }
       let profile: AssistantProfileRecord;
       let project: ProjectRecord | undefined;
+      let taskMcpServer: AssistantTaskMcpServer;
       try {
         profile = this.requireEnabledProfile(turn.assistantId);
         project = this.getProject(profile.projectId);
         if (!project) {
           throw new Error("私人助理关联的工程已经被移除。");
         }
+        taskMcpServer = await this.tasks.createMcpServer(profile.id);
       } catch (error) {
         await this.finishTurn(turn, {
           status: "failed",
@@ -640,6 +704,15 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
           profile,
           projectRoot: project.rootPath,
           prompt: running.request,
+          taskMcpServer,
+          onSessionId: async (sessionId) => {
+            await this.store.setConversationSessionId(
+              running.conversationId,
+              sessionId,
+              this.now(),
+            );
+            this.emitStateChanged();
+          },
           ...(conversation.claudeSessionId
             ? { sessionId: conversation.claudeSessionId }
             : {}),
@@ -661,6 +734,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       (!result.response || !result.sessionId)
         ? {
             status: "failed",
+            sessionId: result.sessionId,
             error: "私人助理没有返回完整的回复或会话 ID。",
           }
         : result;
@@ -675,13 +749,10 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     };
     await this.store.completeTurn(
       completed,
-      normalizedResult.status === "succeeded"
-        ? normalizedResult.sessionId
-        : undefined,
+      normalizedResult.sessionId,
       timestamp,
     );
     this.emitStateChanged();
-
     if (turn.source !== "wecom" || !turn.botProfileId || !turn.userId) {
       return;
     }
@@ -690,7 +761,11 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         ? normalizedResult.response
         : `本轮处理未完成：${normalizedResult.error ?? "未知错误"}`;
     try {
-      await this.wecomBots.sendMarkdown(turn.botProfileId, turn.userId, content);
+      await withTimeout(
+        this.wecomBots.sendMarkdown(turn.botProfileId, turn.userId, content),
+        WECOM_DELIVERY_TIMEOUT_MILLISECONDS,
+        "企业微信回复超过 15 秒仍未完成。",
+      );
     } catch (error) {
       await this.store.replaceTurn({
         ...completed,

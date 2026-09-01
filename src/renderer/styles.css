@@ -3627,7 +3627,7 @@ button:disabled {
 }
 
 .assistant-header-actions button,
-.assistant-config-actions button:not(.primary-button):not(.automation-danger-button),
+.assistant-config-actions button:not(.primary-button):not(.automation-danger-button):not(.danger-button),
 .assistant-channel-controls button {
   padding: 7px 10px;
   border: 1px solid #454039;
@@ -3639,7 +3639,7 @@ button:disabled {
 }
 
 .assistant-header-actions button:hover:not(:disabled),
-.assistant-config-actions button:not(.primary-button):not(.automation-danger-button):hover:not(:disabled),
+.assistant-config-actions button:not(.primary-button):not(.automation-danger-button):not(.danger-button):hover:not(:disabled),
 .assistant-channel-controls button:hover:not(:disabled) {
   border-color: #76513f;
   color: #ecddd3;
@@ -4008,6 +4008,321 @@ button:disabled {
   border-top: 1px solid #302c27;
 }
 
+.assistant-config-form--profile {
+  min-height: 0;
+  padding: 18px 22px;
+  overflow: auto;
+  gap: 14px;
+}
+
+.assistant-config-intro,
+.assistant-permission-warning,
+.assistant-task-heading > div,
+.assistant-task-alert,
+.assistant-task-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.assistant-config-intro {
+  padding: 12px 13px;
+  border: 1px solid #443a33;
+  border-radius: 10px;
+  color: #b9afa5;
+  background: rgba(81, 54, 42, 0.2);
+}
+
+.assistant-config-intro strong,
+.assistant-permission-warning strong {
+  color: #ead8cc;
+  font-size: 11px;
+}
+
+.assistant-config-intro span,
+.assistant-permission-warning span {
+  color: #8e857d;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.assistant-channel-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 12px;
+}
+
+.assistant-channel-card > label {
+  grid-column: 1 / -1;
+}
+
+.assistant-channel-card > button,
+.assistant-session-actions button {
+  padding: 7px 10px;
+  border: 1px solid #51473f;
+  border-radius: 7px;
+  color: #c9beb4;
+  background: #29241f;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.assistant-advanced-settings {
+  border: 1px solid #3d3731;
+  border-radius: 9px;
+  color: #9c938a;
+  background: rgba(24, 22, 19, 0.64);
+}
+
+.assistant-advanced-settings > summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.assistant-advanced-settings > .assistant-config-grid {
+  padding: 0 12px 12px;
+}
+
+.assistant-toggle {
+  flex-direction: row !important;
+  align-items: center;
+}
+
+.assistant-toggle input {
+  width: auto !important;
+}
+
+.assistant-permission-warning {
+  padding: 11px 12px;
+  border: 1px solid rgba(174, 123, 71, 0.45);
+  border-radius: 9px;
+  background: rgba(105, 69, 31, 0.2);
+}
+
+.assistant-config-form--profile > .assistant-config-actions {
+  margin: auto -22px -18px;
+}
+
+.danger-button {
+  padding: 7px 10px;
+  border: 1px solid #68443c;
+  border-radius: 7px;
+  color: #d79a8d;
+  background: #34231f;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.assistant-tabs {
+  display: flex;
+  padding: 0 20px;
+  border-bottom: 1px solid #302c27;
+  gap: 4px;
+}
+
+.assistant-tab {
+  padding: 10px 12px 9px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #827a72;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.assistant-tab span {
+  margin-left: 4px;
+  color: #a58b7e;
+}
+
+.assistant-tab--active {
+  border-bottom-color: #c47757;
+  color: #e5d9cf;
+}
+
+.assistant-session-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 8px 20px 0;
+  gap: 7px;
+}
+
+.assistant-session-actions > span {
+  margin-right: auto;
+  color: #827a72;
+  font-size: 9px;
+}
+
+.assistant-task-view {
+  min-height: 0;
+  flex: 1;
+  padding: 20px max(24px, 5vw) 28px;
+  overflow: auto;
+}
+
+.assistant-task-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 18px;
+}
+
+.assistant-task-heading h3 {
+  margin: 0;
+  color: #e7ddd4;
+  font-size: 14px;
+}
+
+.assistant-task-heading p,
+.assistant-task-empty span {
+  margin: 0;
+  color: #827a72;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.assistant-task-alert {
+  margin-bottom: 14px;
+  padding: 11px 12px;
+  border: 1px solid #75483d;
+  border-radius: 9px;
+  color: #dea093;
+  background: rgba(91, 43, 35, 0.3);
+  font-size: 10px;
+}
+
+.assistant-task-alert small { color: #9b7269; }
+
+.assistant-scheduler-health {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  margin: 0 0 12px;
+  padding: 6px 9px;
+  border: 1px solid rgba(111, 132, 92, 0.34);
+  border-radius: 999px;
+  color: #aebc9f;
+  background: rgba(54, 68, 43, 0.18);
+  gap: 6px;
+}
+
+.assistant-scheduler-health strong { font-size: 9px; font-weight: 600; }
+.assistant-scheduler-health small { color: #777f6f; font-size: 8px; }
+
+.assistant-scheduler-health--stopped {
+  border-color: rgba(130, 91, 79, 0.42);
+  color: #c79487;
+  background: rgba(83, 46, 39, 0.2);
+}
+
+.assistant-task-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.assistant-task-card {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid #403a34;
+  border-radius: 11px;
+  background: #201d19;
+}
+
+.assistant-task-card--failed {
+  border-color: #74473c;
+  box-shadow: inset 0 0 0 1px rgba(171, 75, 59, 0.1);
+}
+
+.assistant-task-card > header,
+.assistant-task-card > footer,
+.assistant-task-card > header > div {
+  display: flex;
+  align-items: center;
+}
+
+.assistant-task-card > header,
+.assistant-task-card > footer {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.assistant-task-card > header > div { min-width: 0; gap: 7px; }
+.assistant-task-card > header strong { overflow: hidden; color: #ddd3ca; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-task-card > header code { color: #b78872; font-size: 9px; }
+.assistant-task-card > p { min-height: 34px; margin: 10px 0; color: #a49a91; font-size: 10px; line-height: 1.55; }
+.assistant-task-card > footer { color: #7d756e; font-size: 9px; }
+
+.assistant-task-run-state--failed,
+.assistant-task-run-state--timed-out,
+.assistant-task-run-state--cancelled { color: #dc8c80; }
+.assistant-task-run-state--running,
+.assistant-task-run-state--queued { color: #d2a05f; }
+.assistant-task-run-state--succeeded { color: #a9c27f; }
+
+.assistant-task-run-error {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+  padding: 8px 9px;
+  border-left: 2px solid #b95e50;
+  color: #bd8277;
+  background: rgba(92, 43, 36, 0.25);
+  font-size: 9px;
+  line-height: 1.5;
+  gap: 3px;
+}
+
+.assistant-task-card details { margin-top: 10px; color: #8f867d; font-size: 9px; }
+.assistant-task-card details .markdown-preview { margin-top: 8px; padding: 8px; font-size: 10px; }
+.assistant-task-empty { padding: 40px 18px; border: 1px dashed #423b35; border-radius: 11px; color: #b4aaa1; text-align: center; }
+
+.assistant-entry-dialog {
+  width: min(850px, calc(100vw - 60px));
+  max-height: min(650px, calc(100vh - 60px));
+  overflow: hidden;
+  border: 1px solid #55483f;
+  border-radius: 15px;
+  background: #1b1815;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.7);
+}
+
+.assistant-entry-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: 360px;
+}
+
+.assistant-entry-list {
+  padding: 12px;
+  border-right: 1px solid #37312c;
+  background: #181512;
+}
+
+.assistant-entry-list > button:not(.assistant-new-button) {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  width: 100%;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  color: #b8aea4;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+  gap: 8px;
+}
+
+.assistant-entry-list > button > span:last-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.assistant-entry-list small { overflow: hidden; color: #7e766f; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-entry-dialog .assistant-config-form { display: flex; flex-direction: column; padding: 18px; overflow: auto; gap: 12px; }
+.assistant-entry-dialog .assistant-config-form label { display: flex; flex-direction: column; color: #b7ada3; font-size: 10px; gap: 6px; }
+.assistant-entry-dialog .assistant-config-form input { padding: 8px 9px; border: 1px solid #443e37; border-radius: 7px; color: #e7ded5; background: #1e1b18; }
+.assistant-empty-copy { color: #817970; font-size: 10px; }
+
 @media (max-width: 1080px) {
   .app-shell {
     grid-template-columns: 272px minmax(0, 1fr);
@@ -4055,5 +4370,7 @@ button:disabled {
   .assistant-backdrop { padding: 10px; }
   .assistant-dialog { grid-template-columns: 170px minmax(0, 1fr); width: 100%; height: 100%; }
   .assistant-config-grid { grid-template-columns: 1fr; }
+  .assistant-task-list { grid-template-columns: 1fr; }
+  .assistant-entry-layout { grid-template-columns: 190px minmax(0, 1fr); }
   .assistant-messages { padding-right: 20px; padding-left: 20px; }
 }

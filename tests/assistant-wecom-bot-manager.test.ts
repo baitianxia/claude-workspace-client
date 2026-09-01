@@ -9,8 +9,8 @@ import type {
   WsFrameHeaders,
 } from "@wecom/aibot-node-sdk";
 import { afterEach, describe, expect, it } from "vitest";
-import { AutomationStore } from "../src/main/automation-store";
-import { AutomationWeComBotManager } from "../src/main/automation-wecom-bot-manager";
+import { AssistantStore } from "../src/main/assistant-store";
+import { AssistantWeComBotManager } from "../src/main/assistant-wecom-bot-manager";
 import type { SecretProtector } from "../src/main/wecom-settings";
 import type { WeComClient } from "../src/main/wecom-bridge";
 
@@ -89,7 +89,7 @@ async function waitFor(check: () => boolean): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
-  throw new Error("Timed out waiting for automation bot state.");
+  throw new Error("Timed out waiting for assistant bot state.");
 }
 
 afterEach(async () => {
@@ -100,15 +100,15 @@ afterEach(async () => {
   );
 });
 
-describe("AutomationWeComBotManager", () => {
+describe("AssistantWeComBotManager", () => {
   it("keeps multiple enabled bots online and routes with the selected identity", async () => {
-    const root = await mkdtemp(join(tmpdir(), "automation-wecom-bots-"));
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-"));
     temporaryDirectories.push(root);
-    const storePath = join(root, "automation.json");
-    const store = new AutomationStore(storePath);
+    const storePath = join(root, "assistant.json");
+    const store = new AssistantStore(storePath);
     await store.initialize();
     const clients = new Map<string, FakeClient>();
-    const manager = new AutomationWeComBotManager(
+    const manager = new AssistantWeComBotManager(
       store,
       protector,
       () => "claude-management-bot",
@@ -149,7 +149,7 @@ describe("AutomationWeComBotManager", () => {
     expect(clients.get("operations-bot")?.sent).toHaveLength(0);
 
     const inbound: Array<{ botProfileId: string; chatType: string; chatId: string }> = [];
-    manager.setBusinessMessageHandler(async (message) => {
+    manager.setMessageHandler(async (message) => {
       inbound.push({
         botProfileId: message.botProfileId,
         chatType: message.chatType,
@@ -194,11 +194,11 @@ describe("AutomationWeComBotManager", () => {
   });
 
   it("rejects a Bot ID reserved for Claude Code management", async () => {
-    const root = await mkdtemp(join(tmpdir(), "automation-wecom-bots-"));
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-"));
     temporaryDirectories.push(root);
-    const store = new AutomationStore(join(root, "automation.json"));
+    const store = new AssistantStore(join(root, "assistant.json"));
     await store.initialize();
-    const manager = new AutomationWeComBotManager(
+    const manager = new AssistantWeComBotManager(
       store,
       protector,
       () => "claude-management-bot",

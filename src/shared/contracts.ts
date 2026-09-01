@@ -58,115 +58,7 @@ export interface WeComState {
   lastInboundDetail?: string;
 }
 
-export interface AutomationJobRecord {
-  id: string;
-  name: string;
-  enabled: boolean;
-  projectId: string;
-  /** Five-field cron expression evaluated in the computer's local timezone. */
-  schedule: string;
-  /** Project-relative path to the MCP JSON loaded for this job. */
-  mcpConfigPath: string;
-  allowedMcpServers: string[];
-  prompt: string;
-  emailRecipients: string[];
-  /** Automation bot profile used for all WeCom targets on this job. */
-  wecomBotProfileId?: string;
-  wecomTargetIds: string[];
-  /** User IDs allowed to start follow-up runs; "*" explicitly allows the group. */
-  allowedWecomUserIds: string[];
-  timeoutMinutes: number;
-  maxTurns: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export type AutomationRunTrigger = "scheduled" | "manual" | "wecom";
-
-export type AutomationRunStatus =
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "timed-out"
-  | "cancelled"
-  | "skipped";
-
-export type AutomationDeliveryStatus =
-  | "pending"
-  | "sending"
-  | "sent"
-  | "failed"
-  | "skipped";
-
-export interface AutomationDeliveryRecord {
-  /** Missing only on legacy records created before automation bot profiles. */
-  botProfileId?: string;
-  targetId: string;
-  status: AutomationDeliveryStatus;
-  attempts: number;
-  sentAt?: number;
-  nextAttemptAt?: number;
-  error?: string;
-}
-
-export interface AutomationEvidence {
-  title: string;
-  url: string;
-}
-
-export type AutomationEmailStatus =
-  | "not-requested"
-  | "sent"
-  | "failed";
-
-export interface AutomationRunOutput {
-  outcome: "notify" | "no-change";
-  summary: string;
-  wecomMarkdown: string;
-  evidence: AutomationEvidence[];
-  email: {
-    status: AutomationEmailStatus;
-    recipients: string[];
-    detail: string;
-  };
-}
-
-export interface AutomationRunRecord {
-  id: string;
-  reportCode: string;
-  jobId: string;
-  jobName: string;
-  trigger: AutomationRunTrigger;
-  status: AutomationRunStatus;
-  attempt: number;
-  createdAt: number;
-  startedAt?: number;
-  finishedAt?: number;
-  scheduledFor?: number;
-  triggerMessageId?: string;
-  sourceRunId?: string;
-  requestedBy?: string;
-  requestText?: string;
-  quoteText?: string;
-  sessionId?: string;
-  exitCode?: number;
-  result?: AutomationRunOutput;
-  error?: string;
-  diagnostic?: string;
-  deliveries: AutomationDeliveryRecord[];
-}
-
-export interface DiscoveredWeComGroup {
-  /** Missing only on legacy records discovered through the management bot. */
-  botProfileId?: string;
-  chatId: string;
-  alias?: string;
-  discoveredAt: number;
-  lastSeenAt: number;
-}
-
-export interface AutomationWeComBotProfile {
+export interface AssistantWeComBotProfile {
   id: string;
   name: string;
   enabled: boolean;
@@ -182,25 +74,12 @@ export interface AutomationWeComBotProfile {
   updatedAt: number;
 }
 
-export interface AutomationSnapshot {
-  jobs: AutomationJobRecord[];
-  runs: AutomationRunRecord[];
-  wecomBots: AutomationWeComBotProfile[];
-  discoveredWeComGroups: DiscoveredWeComGroup[];
-  runningJobIds: string[];
-  schedulerActive: boolean;
-  lastSchedulerCheckAt?: number;
-}
-
 export interface AssistantProfileRecord {
   id: string;
   name: string;
   enabled: boolean;
   projectId: string;
   instructions: string;
-  /** Project-relative MCP JSON path. May be empty when no MCP servers are allowed. */
-  mcpConfigPath: string;
-  allowedMcpServers: string[];
   /** The owner whose WeCom single-chat shares the local desktop conversation. */
   ownerWeComUserId: string;
   /** Optional WeCom business bot used only as a remote entry channel. */
@@ -252,11 +131,62 @@ export interface AssistantTurnRecord {
   finishedAt?: number;
 }
 
+export interface AssistantTaskRecord {
+  id: string;
+  assistantId: string;
+  name: string;
+  enabled: boolean;
+  /** Five-field cron expression evaluated in the computer's local timezone. */
+  schedule: string;
+  prompt: string;
+  timeoutMinutes: number;
+  maxTurns: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type AssistantTaskRunTrigger = "scheduled" | "manual";
+
+export type AssistantTaskRunStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "timed-out"
+  | "cancelled"
+  | "skipped";
+
+export interface AssistantTaskRunRecord {
+  id: string;
+  taskId: string;
+  assistantId: string;
+  taskName: string;
+  trigger: AssistantTaskRunTrigger;
+  status: AssistantTaskRunStatus;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  scheduledFor?: number;
+  response?: string;
+  error?: string;
+  deliveryError?: string;
+}
+
 export interface AssistantSnapshot {
   profiles: AssistantProfileRecord[];
   conversations: AssistantConversationRecord[];
   turns: AssistantTurnRecord[];
+  wecomBots: AssistantWeComBotProfile[];
+  tasks: AssistantTaskRecord[];
+  taskRuns: AssistantTaskRunRecord[];
   runningConversationIds: string[];
+  openConversationIds: string[];
+  resumableConversationIds: string[];
+  runningTaskIds: string[];
+  schedulerActive: boolean;
+  lastSchedulerCheckAt?: number;
+  schedulerError?: string;
+  schedulerErrorAt?: number;
 }
 
 export interface AppSnapshot {
@@ -264,7 +194,6 @@ export interface AppSnapshot {
   sessions: SessionRecord[];
   claudeExecutable: ClaudeExecutableState;
   wecom: WeComState;
-  automation: AutomationSnapshot;
   assistant: AssistantSnapshot;
 }
 
@@ -332,10 +261,6 @@ export interface WeComStateChangedEvent {
   state: WeComState;
 }
 
-export interface AutomationStateChangedEvent {
-  state: AutomationSnapshot;
-}
-
 export interface AssistantStateChangedEvent {
   state: AssistantSnapshot;
 }
@@ -376,24 +301,7 @@ export interface UpdateWeComConfigRequest {
   secret?: string;
 }
 
-export interface UpsertAutomationJobRequest {
-  id?: string;
-  name: string;
-  enabled: boolean;
-  projectId: string;
-  schedule: string;
-  mcpConfigPath: string;
-  allowedMcpServers: string[];
-  prompt: string;
-  emailRecipients: string[];
-  wecomBotProfileId?: string;
-  wecomTargetIds: string[];
-  allowedWecomUserIds: string[];
-  timeoutMinutes: number;
-  maxTurns: number;
-}
-
-export interface UpsertAutomationWeComBotRequest {
+export interface UpsertAssistantWeComBotRequest {
   id?: string;
   name: string;
   enabled: boolean;
@@ -402,21 +310,12 @@ export interface UpsertAutomationWeComBotRequest {
   secret?: string;
 }
 
-export interface UpdateAutomationWeComGroupAliasRequest {
-  botProfileId: string;
-  chatId: string;
-  /** Empty text clears the locally assigned alias. */
-  alias: string;
-}
-
 export interface UpsertAssistantProfileRequest {
   id?: string;
   name: string;
   enabled: boolean;
   projectId: string;
   instructions: string;
-  mcpConfigPath: string;
-  allowedMcpServers: string[];
   ownerWeComUserId: string;
   wecomBotProfileId?: string;
   timeoutMinutes: number;
@@ -447,16 +346,10 @@ export interface DesktopApi {
   selectClaudeExecutable(): Promise<ClaudeExecutableState | null>;
   autoDetectClaudeExecutable(): Promise<ClaudeExecutableState>;
   updateWeComConfig(request: UpdateWeComConfigRequest): Promise<WeComState>;
-  upsertAutomationJob(
-    request: UpsertAutomationJobRequest,
-  ): Promise<AutomationJobRecord>;
-  upsertAutomationWeComBot(
-    request: UpsertAutomationWeComBotRequest,
-  ): Promise<AutomationWeComBotProfile>;
-  deleteAutomationWeComBot(botProfileId: string): Promise<void>;
-  updateAutomationWeComGroupAlias(
-    request: UpdateAutomationWeComGroupAliasRequest,
-  ): Promise<DiscoveredWeComGroup>;
+  upsertAssistantWeComBot(
+    request: UpsertAssistantWeComBotRequest,
+  ): Promise<AssistantWeComBotProfile>;
+  deleteAssistantWeComBot(botProfileId: string): Promise<void>;
   upsertAssistantProfile(
     request: UpsertAssistantProfileRequest,
   ): Promise<AssistantProfileRecord>;
@@ -467,11 +360,8 @@ export interface DesktopApi {
   resetAssistantConversation(
     assistantId: string,
   ): Promise<AssistantConversationRecord>;
+  closeAssistantConversation(assistantId: string): Promise<void>;
   cancelAssistantTurn(conversationId: string): Promise<void>;
-  deleteAutomationJob(jobId: string): Promise<void>;
-  runAutomationJob(jobId: string): Promise<AutomationRunRecord>;
-  retryAutomationRun(runId: string): Promise<AutomationRunRecord>;
-  cancelAutomationRun(runId: string): Promise<void>;
   createSession(request: CreateSessionRequest): Promise<SessionRecord>;
   restartSession(sessionId: string): Promise<SessionRecord>;
   renameSession(request: RenameSessionRequest): Promise<SessionRecord>;
@@ -491,9 +381,6 @@ export interface DesktopApi {
   onSessionChanged(listener: (event: SessionChangedEvent) => void): () => void;
   onWeComStateChanged(
     listener: (event: WeComStateChangedEvent) => void,
-  ): () => void;
-  onAutomationStateChanged(
-    listener: (event: AutomationStateChangedEvent) => void,
   ): () => void;
   onAssistantStateChanged(
     listener: (event: AssistantStateChangedEvent) => void,
