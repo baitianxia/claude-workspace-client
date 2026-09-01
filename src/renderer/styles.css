@@ -2680,6 +2680,137 @@ button:disabled {
   resize: vertical;
 }
 
+.automation-wecom-group-picker,
+.automation-wecom-alias-editor,
+.automation-wecom-manual-target > div {
+  display: grid;
+  align-items: center;
+  gap: 7px;
+}
+
+.automation-wecom-group-picker {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.automation-wecom-alias-editor,
+.automation-wecom-manual-target > div {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.automation-wecom-alias-editor {
+  padding: 8px;
+  border: 1px solid #463c35;
+  border-radius: 8px;
+  background: rgba(41, 34, 29, 0.72);
+}
+
+.automation-wecom-group-picker > button,
+.automation-wecom-alias-editor > button,
+.automation-wecom-manual-target button {
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid #574a41;
+  border-radius: 7px;
+  color: #d8cec5;
+  background: #302923;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.automation-wecom-group-picker > button:hover:not(:disabled),
+.automation-wecom-alias-editor > button:hover:not(:disabled),
+.automation-wecom-manual-target button:hover:not(:disabled) {
+  border-color: #87604f;
+  color: #f1e7dd;
+  background: #3b3029;
+}
+
+.automation-wecom-group-picker > button:disabled,
+.automation-wecom-alias-editor > button:disabled,
+.automation-wecom-manual-target button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.automation-wecom-target-list {
+  display: flex;
+  min-height: 38px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 6px;
+  border: 1px dashed #443c35;
+  border-radius: 8px;
+  background: rgba(22, 20, 17, 0.58);
+  gap: 6px;
+}
+
+.automation-wecom-target-chip {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid #604b40;
+  border-radius: 999px;
+  color: #d8cdc3;
+  background: rgba(91, 61, 48, 0.34);
+  font-size: 10px;
+}
+
+.automation-wecom-target-chip > span {
+  overflow: hidden;
+  padding: 5px 3px 5px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-wecom-target-chip > button {
+  display: grid;
+  width: 23px;
+  height: 25px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  color: #a79589;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.automation-wecom-target-chip > button:hover {
+  color: #f0d7ca;
+  background: rgba(119, 70, 52, 0.4);
+}
+
+.automation-wecom-target-empty {
+  padding: 2px 4px;
+  color: #766f68;
+  font-size: 10px;
+}
+
+.automation-wecom-manual-target {
+  overflow: hidden;
+  border: 1px solid #3e3832;
+  border-radius: 8px;
+  background: rgba(25, 23, 20, 0.58);
+}
+
+.automation-wecom-manual-target > summary {
+  padding: 7px 9px;
+  color: #8f877f;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.automation-wecom-manual-target > summary:hover {
+  color: #cfc4ba;
+}
+
+.automation-wecom-manual-target > div {
+  padding: 0 8px 8px;
+}
+
 .automation-advanced-settings {
   margin-top: 15px;
   overflow: hidden;
@@ -3009,5 +3140,13 @@ button:disabled {
   .automation-schedule-controls,
   .automation-destination-grid {
     grid-template-columns: 1fr;
+  }
+
+  .automation-wecom-group-picker {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .automation-wecom-group-picker > button:last-child {
+    grid-column: 1 / -1;
   }
 }

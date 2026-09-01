@@ -7,7 +7,9 @@ import type {
   AutomationRunRecord,
   AutomationRunTrigger,
   AutomationSnapshot,
+  DiscoveredWeComGroup,
   ProjectRecord,
+  UpdateAutomationWeComGroupAliasRequest,
   UpsertAutomationJobRequest,
 } from "../shared/contracts";
 import { AutomationStore } from "./automation-store";
@@ -278,6 +280,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     return {
       jobs: this.store.listJobs(),
       runs: this.store.listRuns(),
+      discoveredWeComGroups: this.store.listDiscoveredWeComGroups(),
       runningJobIds: [...this.runningJobs.keys()],
       schedulerActive: this.scheduler.isActive(),
       ...(this.scheduler.getLastCheckedAt() === undefined
@@ -384,6 +387,31 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     await this.store.putJob(job);
     this.emitStateChanged();
     return job;
+  }
+
+  async updateWeComGroupAlias(
+    request: UpdateAutomationWeComGroupAliasRequest,
+  ): Promise<DiscoveredWeComGroup> {
+    if (!request || typeof request !== "object") {
+      throw new Error("企业微信群名称请求无效。");
+    }
+    const chatId = requireText(request.chatId, "企业微信群 ID", 200);
+    if (chatId === "*" || !validWeComIdentifier(chatId)) {
+      throw new Error("企业微信群 ID 格式无效。");
+    }
+    if (typeof request.alias !== "string") {
+      throw new Error("群名称必须是字符串。");
+    }
+    const alias = request.alias.trim();
+    if ([...alias].length > 80 || /\p{Cc}/u.test(alias)) {
+      throw new Error("群名称格式无效。");
+    }
+    const group = await this.store.updateDiscoveredWeComGroupAlias(
+      chatId,
+      alias,
+    );
+    this.emitStateChanged();
+    return group;
   }
 
   async deleteJob(jobId: string): Promise<void> {
@@ -718,10 +746,15 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
   private readonly handleWeComMessage = async (
     message: WeComBusinessMessage,
   ): Promise<WeComBusinessMessageResult> => {
+    if (
+      await this.store.touchDiscoveredWeComGroup(message.chatId, this.now())
+    ) {
+      this.emitStateChanged();
+    }
     if (/(?:^|\s)\/chatid(?:\s|$)/iu.test(message.text)) {
       return {
         status: "accepted",
-        message: `本群 chatid：\`${message.chatId}\`。可将它填入自动化任务的企业微信投递目标。`,
+        message: `本群 chatid：\`${message.chatId}\`。客户端已自动记录，可在自动化任务中直接选择。`,
       };
     }
     const duplicate = this.store.findRunByTriggerMessageId(message.messageId);

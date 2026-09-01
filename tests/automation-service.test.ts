@@ -193,6 +193,22 @@ describe("AutomationService", () => {
       quoteText: "",
     });
     expect(chatIdResult.message).toContain("group-one");
+    expect(service.getSnapshot().discoveredWeComGroups).toEqual([
+      expect.objectContaining({ chatId: "group-one" }),
+    ]);
+
+    await expect(
+      service.updateWeComGroupAlias({
+        chatId: "group-one",
+        alias: "每日资讯群",
+      }),
+    ).resolves.toMatchObject({
+      chatId: "group-one",
+      alias: "每日资讯群",
+    });
+    expect(service.getSnapshot().discoveredWeComGroups[0].alias).toBe(
+      "每日资讯群",
+    );
 
     const unauthorized = await gateway.handler!({
       messageId: "unauthorized",

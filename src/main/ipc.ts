@@ -14,6 +14,7 @@ import type {
   SessionNotificationRequest,
   SessionRecord,
   TerminalDataEvent,
+  UpdateAutomationWeComGroupAliasRequest,
   UpsertAutomationJobRequest,
   UpdateWeComConfigRequest,
   UpdateProjectRequest,
@@ -182,6 +183,12 @@ export function registerIpcHandlers(options: {
     IPC_CHANNELS.upsertAutomationJob,
     (_event, request: UpsertAutomationJobRequest) =>
       automationService.upsertJob(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.updateAutomationWeComGroupAlias,
+    (_event, request: UpdateAutomationWeComGroupAliasRequest) =>
+      automationService.updateWeComGroupAlias(request),
   );
 
   ipcMain.handle(

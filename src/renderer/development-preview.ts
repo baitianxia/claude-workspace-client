@@ -98,6 +98,25 @@ const previewSnapshot: AppSnapshot = {
     status: "disabled",
   },
   automation: {
+    discoveredWeComGroups: [
+      {
+        chatId: "wr-preview-group",
+        alias: "每日资讯群",
+        discoveredAt: now - 240_000,
+        lastSeenAt: now - 18_000,
+      },
+      {
+        chatId: "wr-product-watch",
+        alias: "产品观察群",
+        discoveredAt: now - 180_000,
+        lastSeenAt: now - 45_000,
+      },
+      {
+        chatId: "wr-unnamed-preview-group",
+        discoveredAt: now - 120_000,
+        lastSeenAt: now - 72_000,
+      },
+    ],
     jobs: [
       {
         id: "daily-industry-news",
@@ -351,6 +370,22 @@ export function installDevelopmentPreview(): void {
       ];
       publishAutomation();
       return structuredClone(job);
+    },
+    updateAutomationWeComGroupAlias: async ({ chatId, alias }) => {
+      const group = snapshot.automation.discoveredWeComGroups.find(
+        (candidate) => candidate.chatId === chatId,
+      );
+      if (!group) {
+        throw new Error("Preview WeCom group does not exist.");
+      }
+      const normalizedAlias = alias.trim();
+      if (normalizedAlias) {
+        group.alias = normalizedAlias;
+      } else {
+        delete group.alias;
+      }
+      publishAutomation();
+      return structuredClone(group);
     },
     deleteAutomationJob: async (jobId) => {
       snapshot.automation.jobs = snapshot.automation.jobs.filter(

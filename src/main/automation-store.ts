@@ -14,20 +14,25 @@ import type {
   AutomationRunRecord,
   AutomationRunStatus,
   AutomationRunTrigger,
+  DiscoveredWeComGroup,
 } from "../shared/contracts";
 
 interface AutomationStoreData {
   version: 1;
   jobs: AutomationJobRecord[];
   runs: AutomationRunRecord[];
+  discoveredWeComGroups: DiscoveredWeComGroup[];
 }
 
 const EMPTY_STORE: AutomationStoreData = {
   version: 1,
   jobs: [],
   runs: [],
+  discoveredWeComGroups: [],
 };
 const MAX_STORED_RUNS = 500;
+const MAX_DISCOVERED_WECOM_GROUPS = 200;
+const WECOM_GROUP_LAST_SEEN_WRITE_INTERVAL_MILLISECONDS = 60_000;
 
 const RUN_STATUSES = new Set<AutomationRunStatus>([
   "queued",
@@ -193,11 +198,41 @@ function normalizeRun(value: unknown): AutomationRunRecord | null {
   };
 }
 
+function normalizeDiscoveredWeComGroup(
+  value: unknown,
+): DiscoveredWeComGroup | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Partial<DiscoveredWeComGroup>;
+  if (
+    typeof candidate.chatId !== "string" ||
+    !candidate.chatId ||
+    candidate.chatId !== candidate.chatId.trim() ||
+    /\s/u.test(candidate.chatId) ||
+    [...candidate.chatId].length > 200 ||
+    (candidate.alias !== undefined &&
+      (typeof candidate.alias !== "string" ||
+        !candidate.alias ||
+        candidate.alias !== candidate.alias.trim() ||
+        /\p{Cc}/u.test(candidate.alias) ||
+        [...candidate.alias].length > 80)) ||
+    typeof candidate.discoveredAt !== "number" ||
+    !Number.isFinite(candidate.discoveredAt) ||
+    typeof candidate.lastSeenAt !== "number" ||
+    !Number.isFinite(candidate.lastSeenAt)
+  ) {
+    return null;
+  }
+  return clone(candidate as DiscoveredWeComGroup);
+}
+
 function parseStore(raw: string): AutomationStoreData {
   const parsed = JSON.parse(raw) as {
     version?: unknown;
     jobs?: unknown;
     runs?: unknown;
+    discoveredWeComGroups?: unknown;
   };
   if (
     parsed.version !== 1 ||
@@ -208,9 +243,17 @@ function parseStore(raw: string): AutomationStoreData {
   }
   const jobs = parsed.jobs.map(normalizeJob);
   const runs = parsed.runs.map(normalizeRun);
+  const discoveredWeComGroups =
+    parsed.discoveredWeComGroups === undefined
+      ? []
+      : Array.isArray(parsed.discoveredWeComGroups)
+        ? parsed.discoveredWeComGroups.map(normalizeDiscoveredWeComGroup)
+        : null;
   if (
     jobs.some((entry) => entry === null) ||
-    runs.some((entry) => entry === null)
+    runs.some((entry) => entry === null) ||
+    discoveredWeComGroups === null ||
+    discoveredWeComGroups.some((entry) => entry === null)
   ) {
     throw new Error("Automation data contains an invalid record.");
   }
@@ -218,6 +261,11 @@ function parseStore(raw: string): AutomationStoreData {
     version: 1,
     jobs: jobs as AutomationJobRecord[],
     runs: (runs as AutomationRunRecord[]).slice(-MAX_STORED_RUNS),
+    discoveredWeComGroups: (
+      discoveredWeComGroups as DiscoveredWeComGroup[]
+    )
+      .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
+      .slice(0, MAX_DISCOVERED_WECOM_GROUPS),
   };
 }
 
@@ -242,6 +290,89 @@ export class AutomationStore {
       this.data = clone(EMPTY_STORE);
     }
     this.initialized = true;
+  }
+
+  listDiscoveredWeComGroups(): DiscoveredWeComGroup[] {
+    this.assertInitialized();
+    return this.data.discoveredWeComGroups
+      .map((group) => clone(group))
+      .sort(
+        (left, right) =>
+          right.lastSeenAt - left.lastSeenAt ||
+          (left.alias ?? left.chatId).localeCompare(
+            right.alias ?? right.chatId,
+            "zh-CN",
+          ),
+      );
+  }
+
+  async touchDiscoveredWeComGroup(
+    chatId: string,
+    now = Date.now(),
+  ): Promise<boolean> {
+    this.assertInitialized();
+    const normalizedChatId = chatId.trim();
+    if (
+      !normalizedChatId ||
+      /\s/u.test(normalizedChatId) ||
+      [...normalizedChatId].length > 200 ||
+      !Number.isFinite(now)
+    ) {
+      throw new Error("企业微信群 ID 格式无效。");
+    }
+    const existing = this.data.discoveredWeComGroups.find(
+      (group) => group.chatId === normalizedChatId,
+    );
+    if (existing) {
+      if (
+        now <= existing.lastSeenAt ||
+        now - existing.lastSeenAt <
+          WECOM_GROUP_LAST_SEEN_WRITE_INTERVAL_MILLISECONDS
+      ) {
+        return false;
+      }
+      existing.lastSeenAt = now;
+      await this.persist();
+      return true;
+    }
+    const group: DiscoveredWeComGroup = {
+      chatId: normalizedChatId,
+      discoveredAt: now,
+      lastSeenAt: now,
+    };
+    this.data.discoveredWeComGroups.push(group);
+    this.data.discoveredWeComGroups = this.data.discoveredWeComGroups
+      .sort((left, right) => right.lastSeenAt - left.lastSeenAt)
+      .slice(0, MAX_DISCOVERED_WECOM_GROUPS);
+    await this.persist();
+    return true;
+  }
+
+  async updateDiscoveredWeComGroupAlias(
+    chatId: string,
+    alias: string,
+  ): Promise<DiscoveredWeComGroup> {
+    this.assertInitialized();
+    const group = this.data.discoveredWeComGroups.find(
+      (candidate) => candidate.chatId === chatId,
+    );
+    if (!group) {
+      throw new Error("这个企业微信群尚未被客户端发现。");
+    }
+    const normalizedAlias = alias.trim();
+    if (
+      [...normalizedAlias].length > 80 ||
+      /\p{Cc}/u.test(normalizedAlias)
+    ) {
+      throw new Error("群名称格式无效。");
+    }
+    if (normalizedAlias) {
+      group.alias = normalizedAlias;
+    } else {
+      delete group.alias;
+    }
+    await this.persist();
+    return clone(group);
   }
 
   listJobs(): AutomationJobRecord[] {

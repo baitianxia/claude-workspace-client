@@ -8,6 +8,7 @@ import type {
   AutomationJobRecord,
   AutomationRunRecord,
   AutomationSnapshot,
+  DiscoveredWeComGroup,
   ProjectRecord,
   UpsertAutomationJobRequest,
 } from "../shared/contracts";
@@ -60,6 +61,16 @@ function parseList(value: string): string[] {
     .split(/[,，;；\n]+/u)
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function shortWeComTargetId(value: string): string {
+  return value.length <= 18
+    ? value
+    : `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
+function discoveredGroupLabel(group: DiscoveredWeComGroup): string {
+  return `${group.alias || "未命名群"} · ${shortWeComTargetId(group.chatId)}`;
 }
 
 function deliveryChannelsForJob(
@@ -215,7 +226,22 @@ export function AutomationPanel({
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedDiscoveredGroupId, setSelectedDiscoveredGroupId] =
+    useState("");
+  const [editingGroupAlias, setEditingGroupAlias] = useState(false);
+  const [groupAliasDraft, setGroupAliasDraft] = useState("");
+  const [manualWeComTarget, setManualWeComTarget] = useState("");
+  const [manualWeComTargetOpen, setManualWeComTargetOpen] = useState(
+    !automation.discoveredWeComGroups.length,
+  );
   const selectedJob = automation.jobs.find((job) => job.id === selectedJobId);
+  const selectedWeComTargetIds = useMemo(
+    () => parseList(draft.wecomTargetIds),
+    [draft.wecomTargetIds],
+  );
+  const selectedDiscoveredGroup = automation.discoveredWeComGroups.find(
+    (group) => group.chatId === selectedDiscoveredGroupId,
+  );
   const runsByJob = useMemo(() => {
     const grouped = new Map<string, AutomationRunRecord[]>();
     for (const run of automation.runs) {
@@ -253,13 +279,84 @@ export function AutomationPanel({
   const selectJob = (job: AutomationJobRecord) => {
     setSelectedJobId(job.id);
     setDraft(draftForJob(job, projects, defaultWeComUserId));
+    setSelectedDiscoveredGroupId("");
+    setEditingGroupAlias(false);
+    setManualWeComTarget("");
+    setManualWeComTargetOpen(!automation.discoveredWeComGroups.length);
     setError(null);
   };
 
   const createJob = () => {
     setSelectedJobId(null);
     setDraft(draftForJob(undefined, projects, defaultWeComUserId));
+    setSelectedDiscoveredGroupId("");
+    setEditingGroupAlias(false);
+    setManualWeComTarget("");
+    setManualWeComTargetOpen(!automation.discoveredWeComGroups.length);
     setError(null);
+  };
+
+  const addWeComTargets = (targetIds: string[]) => {
+    setDraft((current) => {
+      const next = parseList(current.wecomTargetIds);
+      const known = new Set(
+        next.map((targetId) => targetId.toLocaleLowerCase("en-US")),
+      );
+      for (const targetId of targetIds) {
+        const normalized = targetId.trim();
+        const key = normalized.toLocaleLowerCase("en-US");
+        if (normalized && !known.has(key)) {
+          known.add(key);
+          next.push(normalized);
+        }
+      }
+      return { ...current, wecomTargetIds: listText(next) };
+    });
+  };
+
+  const removeWeComTarget = (targetId: string) => {
+    setDraft((current) => ({
+      ...current,
+      wecomTargetIds: listText(
+        parseList(current.wecomTargetIds).filter(
+          (candidate) => candidate !== targetId,
+        ),
+      ),
+    }));
+  };
+
+  const addSelectedDiscoveredGroup = () => {
+    if (selectedDiscoveredGroupId) {
+      addWeComTargets([selectedDiscoveredGroupId]);
+    }
+  };
+
+  const addManualWeComTargets = () => {
+    const targetIds = parseList(manualWeComTarget);
+    if (!targetIds.length) {
+      setError("请先填写企业微信 userid 或群 chatid。");
+      return;
+    }
+    addWeComTargets(targetIds);
+    setManualWeComTarget("");
+    setError(null);
+  };
+
+  const saveGroupAlias = () => {
+    if (!selectedDiscoveredGroup) {
+      return;
+    }
+    void runAction(() =>
+      window.claudeWorkspace.updateAutomationWeComGroupAlias({
+        chatId: selectedDiscoveredGroup.chatId,
+        alias: groupAliasDraft,
+      }),
+    ).then((saved) => {
+      if (saved) {
+        setGroupAliasDraft(saved.alias ?? "");
+        setEditingGroupAlias(false);
+      }
+    });
   };
 
   const toggleDeliveryChannel = (channel: DeliveryChannel) => {
@@ -273,6 +370,14 @@ export function AutomationPanel({
 
   const saveJob = (event: FormEvent) => {
     event.preventDefault();
+    const wecomTargetIds = parseList(draft.wecomTargetIds);
+    if (
+      draft.deliveryChannels.includes("wecom") &&
+      wecomTargetIds.length === 0
+    ) {
+      setError("请选择至少一个企业微信接收群，或手动添加接收目标。");
+      return;
+    }
     const request: UpsertAutomationJobRequest = {
       ...(selectedJobId ? { id: selectedJobId } : {}),
       name: draft.name,
@@ -290,7 +395,7 @@ export function AutomationPanel({
         ? parseList(draft.emailRecipients)
         : [],
       wecomTargetIds: draft.deliveryChannels.includes("wecom")
-        ? parseList(draft.wecomTargetIds)
+        ? wecomTargetIds
         : [],
       allowedWecomUserIds: draft.deliveryChannels.includes("wecom")
         ? parseList(draft.allowedWecomUserIds)
@@ -606,23 +711,150 @@ export function AutomationPanel({
                 {draft.deliveryChannels.length ? (
                   <div className="automation-destination-grid">
                     {draft.deliveryChannels.includes("wecom") ? (
-                      <label className="automation-field">
-                        <span>企业微信接收人或群</span>
-                        <textarea
-                          className="automation-compact-list-input"
-                          rows={1}
-                          value={draft.wecomTargetIds}
-                          placeholder="userid 或群 chatid，多个用逗号分隔"
-                          required
-                          onChange={(event) =>
-                            setDraft({
-                              ...draft,
-                              wecomTargetIds: event.currentTarget.value,
+                      <div className="automation-field automation-wecom-target-field">
+                        <span>企业微信接收群</span>
+                        <div className="automation-wecom-group-picker">
+                          <select
+                            aria-label="选择已发现的企业微信群"
+                            value={selectedDiscoveredGroupId}
+                            disabled={!automation.discoveredWeComGroups.length}
+                            onChange={(event) => {
+                              const chatId = event.currentTarget.value;
+                              const group = automation.discoveredWeComGroups.find(
+                                (candidate) => candidate.chatId === chatId,
+                              );
+                              setSelectedDiscoveredGroupId(chatId);
+                              setGroupAliasDraft(group?.alias ?? "");
+                              setEditingGroupAlias(false);
+                            }}
+                          >
+                            <option value="">
+                              {automation.discoveredWeComGroups.length
+                                ? "选择已发现的群"
+                                : "还没有发现群"}
+                            </option>
+                            {automation.discoveredWeComGroups.map((group) => (
+                              <option value={group.chatId} key={group.chatId}>
+                                {discoveredGroupLabel(group)}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={addSelectedDiscoveredGroup}
+                            disabled={
+                              busy ||
+                              !selectedDiscoveredGroupId ||
+                              selectedWeComTargetIds.includes(
+                                selectedDiscoveredGroupId,
+                              )
+                            }
+                          >
+                            添加
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingGroupAlias(true)}
+                            disabled={busy || !selectedDiscoveredGroup}
+                          >
+                            设置名称
+                          </button>
+                        </div>
+
+                        {editingGroupAlias && selectedDiscoveredGroup ? (
+                          <div className="automation-wecom-alias-editor">
+                            <input
+                              aria-label="企业微信群名称"
+                              value={groupAliasDraft}
+                              maxLength={80}
+                              placeholder="例如：每日资讯群"
+                              onChange={(event) =>
+                                setGroupAliasDraft(event.currentTarget.value)
+                              }
+                            />
+                            <button
+                              type="button"
+                              onClick={saveGroupAlias}
+                              disabled={busy}
+                            >
+                              保存名称
+                            </button>
+                          </div>
+                        ) : null}
+
+                        <div
+                          className="automation-wecom-target-list"
+                          aria-label="已选企业微信接收目标"
+                        >
+                          {selectedWeComTargetIds.length ? (
+                            selectedWeComTargetIds.map((targetId) => {
+                              const group = automation.discoveredWeComGroups.find(
+                                (candidate) => candidate.chatId === targetId,
+                              );
+                              return (
+                                <span
+                                  className="automation-wecom-target-chip"
+                                  key={targetId}
+                                  title={targetId}
+                                >
+                                  <span>
+                                    {group
+                                      ? discoveredGroupLabel(group)
+                                      : shortWeComTargetId(targetId)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    aria-label={`移除企业微信接收目标 ${targetId}`}
+                                    onClick={() => removeWeComTarget(targetId)}
+                                  >
+                                    ×
+                                  </button>
+                                </span>
+                              );
                             })
+                          ) : (
+                            <span className="automation-wecom-target-empty">
+                              尚未选择接收群
+                            </span>
+                          )}
+                        </div>
+
+                        <details
+                          className="automation-wecom-manual-target"
+                          open={manualWeComTargetOpen}
+                          onToggle={(event) =>
+                            setManualWeComTargetOpen(event.currentTarget.open)
                           }
-                        />
-                        <small>在目标群 @机器人发送 `/chatid` 可查询群 ID。</small>
-                      </label>
+                        >
+                          <summary>手动填写 userid 或群 chatid</summary>
+                          <div>
+                            <input
+                              aria-label="手动填写企业微信接收目标"
+                              value={manualWeComTarget}
+                              placeholder="多个目标可用逗号分隔"
+                              onChange={(event) =>
+                                setManualWeComTarget(event.currentTarget.value)
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  addManualWeComTargets();
+                                }
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={addManualWeComTargets}
+                              disabled={busy}
+                            >
+                              添加
+                            </button>
+                          </div>
+                        </details>
+                        <small>
+                          目标群首次 @机器人发送 `/chatid` 后会自动出现；群名称只保存在本机。
+                        </small>
+                      </div>
                     ) : null}
                     {draft.deliveryChannels.includes("email") ? (
                       <label className="automation-field">

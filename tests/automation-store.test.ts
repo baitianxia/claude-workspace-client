@@ -74,14 +74,60 @@ describe("AutomationStore", () => {
     await store.initialize();
     await store.putJob(job());
     await store.addRun(run("succeeded"));
+    await store.touchDiscoveredWeComGroup("group-one", 4);
+    await store.updateDiscoveredWeComGroupAlias("group-one", "每日资讯群");
 
     const reloaded = new AutomationStore(storePath);
     await reloaded.initialize();
 
     expect(reloaded.listJobs()).toEqual([job()]);
     expect(reloaded.listRuns()).toEqual([run("succeeded")]);
+    expect(reloaded.listDiscoveredWeComGroups()).toEqual([
+      {
+        chatId: "group-one",
+        alias: "每日资讯群",
+        discoveredAt: 4,
+        lastSeenAt: 4,
+      },
+    ]);
     expect(JSON.parse(await readFile(storePath, "utf8"))).toMatchObject({
       version: 1,
+    });
+  });
+
+  it("loads existing version-one data that predates group discovery", async () => {
+    const root = await temporaryDirectory();
+    const storePath = join(root, "automation.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({ version: 1, jobs: [], runs: [] }),
+      "utf8",
+    );
+    const store = new AutomationStore(storePath);
+
+    await store.initialize();
+
+    expect(store.listDiscoveredWeComGroups()).toEqual([]);
+  });
+
+  it("throttles last-seen writes while still refreshing active groups", async () => {
+    const root = await temporaryDirectory();
+    const store = new AutomationStore(join(root, "automation.json"));
+    await store.initialize();
+
+    await expect(store.touchDiscoveredWeComGroup("group-one", 1)).resolves.toBe(
+      true,
+    );
+    await expect(
+      store.touchDiscoveredWeComGroup("group-one", 30_000),
+    ).resolves.toBe(false);
+    await expect(
+      store.touchDiscoveredWeComGroup("group-one", 60_001),
+    ).resolves.toBe(true);
+
+    expect(store.listDiscoveredWeComGroups()[0]).toMatchObject({
+      discoveredAt: 1,
+      lastSeenAt: 60_001,
     });
   });
 

@@ -153,9 +153,17 @@ export interface AutomationRunRecord {
   deliveries: AutomationDeliveryRecord[];
 }
 
+export interface DiscoveredWeComGroup {
+  chatId: string;
+  alias?: string;
+  discoveredAt: number;
+  lastSeenAt: number;
+}
+
 export interface AutomationSnapshot {
   jobs: AutomationJobRecord[];
   runs: AutomationRunRecord[];
+  discoveredWeComGroups: DiscoveredWeComGroup[];
   runningJobIds: string[];
   schedulerActive: boolean;
   lastSchedulerCheckAt?: number;
@@ -289,6 +297,12 @@ export interface UpsertAutomationJobRequest {
   maxTurns: number;
 }
 
+export interface UpdateAutomationWeComGroupAliasRequest {
+  chatId: string;
+  /** Empty text clears the locally assigned alias. */
+  alias: string;
+}
+
 export interface ResizeTerminalRequest {
   sessionId: string;
   columns: number;
@@ -311,6 +325,9 @@ export interface DesktopApi {
   upsertAutomationJob(
     request: UpsertAutomationJobRequest,
   ): Promise<AutomationJobRecord>;
+  updateAutomationWeComGroupAlias(
+    request: UpdateAutomationWeComGroupAliasRequest,
+  ): Promise<DiscoveredWeComGroup>;
   deleteAutomationJob(jobId: string): Promise<void>;
   runAutomationJob(jobId: string): Promise<AutomationRunRecord>;
   retryAutomationRun(runId: string): Promise<AutomationRunRecord>;
