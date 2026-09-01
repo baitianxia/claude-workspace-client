@@ -378,7 +378,7 @@ export class AutomationStore {
     );
     if (index < 0) {
       if (this.data.wecomBots.length >= MAX_AUTOMATION_WECOM_BOTS) {
-        throw new Error(`自动化机器人最多可以配置 ${MAX_AUTOMATION_WECOM_BOTS} 个。`);
+        throw new Error(`企业微信业务入口最多可以配置 ${MAX_AUTOMATION_WECOM_BOTS} 个。`);
       }
       this.data.wecomBots.push(clone(bot));
     } else {
@@ -393,7 +393,7 @@ export class AutomationStore {
       (candidate) => candidate.id !== botProfileId,
     );
     if (next.length === this.data.wecomBots.length) {
-      throw new Error("自动化机器人不存在或已经删除。");
+      throw new Error("企业微信业务入口不存在或已经删除。");
     }
     this.data.wecomBots = next;
     this.data.discoveredWeComGroups = this.data.discoveredWeComGroups.filter(

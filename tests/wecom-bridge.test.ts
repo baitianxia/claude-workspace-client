@@ -774,7 +774,7 @@ describe("WeComBridge", () => {
     );
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "ignored",
-      lastInboundDetail: expect.stringContaining("自动化推送机器人"),
+      lastInboundDetail: expect.stringContaining("企业微信业务入口"),
     });
     expect(client.replies).toEqual([]);
     expect(client.sent).toEqual([]);

@@ -23,6 +23,8 @@ import type { WeComClient, WeComClientFactory } from "./wecom-bridge";
 export interface AutomationWeComMessage {
   botProfileId: string;
   messageId: string;
+  chatType: "single" | "group";
+  /** Group chatid for group messages, or sender userid for single chat. */
   chatId: string;
   userId: string;
   text: string;
@@ -36,7 +38,7 @@ export interface AutomationWeComMessageResult {
 
 export type AutomationWeComMessageHandler = (
   message: AutomationWeComMessage,
-) => Promise<AutomationWeComMessageResult>;
+) => Promise<AutomationWeComMessageResult | null>;
 
 interface AutomationWeComBotManagerEvents {
   stateChanged: [];
@@ -87,6 +89,14 @@ function requireText(value: unknown, label: string, maximum: number): string {
     throw new Error(`${label}格式无效。`);
   }
   return normalized;
+}
+
+function validInboundIdentifier(value: string): boolean {
+  return (
+    Boolean(value) &&
+    [...value].length <= 200 &&
+    !/\p{Cc}|\s/u.test(value)
+  );
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -206,6 +216,9 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     private readonly secretProtector: SecretProtector,
     private readonly getManagementBotId: () => string,
     private readonly clientFactory: WeComClientFactory = defaultClientFactory,
+    private readonly getDeletionBlocker: (
+      botProfileId: string,
+    ) => string | undefined = () => undefined,
   ) {
     super();
   }
@@ -248,17 +261,17 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
   ): Promise<AutomationWeComBotProfile> {
     this.assertInitialized();
     if (!request || typeof request !== "object") {
-      throw new Error("自动化机器人请求无效。");
+      throw new Error("企业微信业务入口请求无效。");
     }
     if (typeof request.enabled !== "boolean") {
-      throw new Error("自动化机器人启用状态无效。");
+      throw new Error("企业微信业务入口启用状态无效。");
     }
     const id = request.id
       ? requireText(request.id, "机器人配置 ID", 200)
       : randomUUID();
     const existing = this.store.getStoredWeComBot(id);
     if (request.id && !existing) {
-      throw new Error("自动化机器人不存在或已经删除。");
+      throw new Error("企业微信业务入口不存在或已经删除。");
     }
     const name = requireText(request.name, "机器人名称", 80);
     const botId = requireText(request.botId, "Bot ID", 200);
@@ -276,7 +289,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
         bot.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"),
     );
     if (duplicateName) {
-      throw new Error("已经存在同名自动化机器人。");
+      throw new Error("已经存在同名企业微信业务入口。");
     }
     const duplicateBotId = this.store.listStoredWeComBots().find(
       (bot) =>
@@ -285,7 +298,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
           botId.toLocaleLowerCase("en-US"),
     );
     if (duplicateBotId) {
-      throw new Error("这个 Bot ID 已经配置为其他自动化机器人。");
+      throw new Error("这个 Bot ID 已经配置为其他企业微信业务入口。");
     }
     if (
       this.getManagementBotId().trim().toLocaleLowerCase("en-US") ===
@@ -311,7 +324,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
         .toString("base64");
     }
     if (request.enabled && !encryptedSecret) {
-      throw new Error("启用自动化机器人前必须填写 Secret。");
+      throw new Error("启用企业微信业务入口前必须填写 Secret。");
     }
     const record: StoredAutomationWeComBot = {
       id,
@@ -331,6 +344,10 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
   async deleteBot(botProfileId: string): Promise<void> {
     this.assertInitialized();
     const id = requireText(botProfileId, "机器人配置 ID", 200);
+    const externalBlocker = this.getDeletionBlocker(id);
+    if (externalBlocker) {
+      throw new Error(externalBlocker);
+    }
     if (this.store.listJobs().some((job) => job.wecomBotProfileId === id)) {
       throw new Error("仍有自动化任务使用这个机器人，请先修改或删除相关任务。");
     }
@@ -367,7 +384,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     }
     const client = runtime.client;
     if (!client || runtime.authenticatedClient !== client) {
-      throw new Error(`自动化机器人“${runtime.state.name}”尚未连接。`);
+      throw new Error(`企业微信业务入口“${runtime.state.name}”尚未连接。`);
     }
     try {
       await client.sendMessage(target, {
@@ -572,46 +589,76 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
     frame: WsFrame<BaseMessage>,
   ): Promise<void> {
     const message = frame.body;
-    if (!message || runtime.processedMessageIds.has(message.msgid)) {
+    if (!message) {
       return;
     }
-    runtime.processedMessageIds.add(message.msgid);
+    const messageId = message.msgid?.trim();
+    if (!messageId || !validInboundIdentifier(messageId)) {
+      this.recordInbound(
+        runtime,
+        "ignored",
+        "消息缺少可信的消息 ID，已静默忽略。",
+      );
+      return;
+    }
+    if (runtime.processedMessageIds.has(messageId)) {
+      return;
+    }
+    runtime.processedMessageIds.add(messageId);
     if (runtime.processedMessageIds.size > 2_000) {
       const oldest = runtime.processedMessageIds.values().next().value;
       if (typeof oldest === "string") {
         runtime.processedMessageIds.delete(oldest);
       }
     }
-    if (message.chattype !== "group") {
+    if (message.chattype !== "group" && message.chattype !== "single") {
       this.recordInbound(
         runtime,
         "ignored",
-        "自动化机器人只处理群聊消息；Claude Code 远程回复请使用管理机器人。",
+        "暂不支持这种企业微信会话类型。",
       );
       return;
     }
     const text = incomingMessageText(message).trim();
-    const chatId = message.chatid?.trim();
     const userId = message.from?.userid?.trim();
-    if (!text || !chatId || !userId) {
-      const detail = "群聊消息缺少文本、chatid 或发送者 userid，无法安全路由。";
-      this.recordInbound(runtime, "rejected", detail);
-      await this.replyToMessage(runtime, client, frame, detail);
+    const chatId =
+      message.chattype === "group" ? message.chatid?.trim() : userId;
+    if (
+      !text ||
+      !chatId ||
+      !userId ||
+      !validInboundIdentifier(chatId) ||
+      !validInboundIdentifier(userId)
+    ) {
+      this.recordInbound(
+        runtime,
+        "ignored",
+        "消息缺少可信文本或身份字段，已静默忽略。",
+      );
       return;
     }
     if (!this.messageHandler) {
       this.recordInbound(runtime, "ignored", "自动化业务路由尚未启动。");
       return;
     }
-    this.recordInbound(runtime, "received", "已收到群聊请求，正在匹配自动化任务。");
+    this.recordInbound(runtime, "received", "已收到消息，正在匹配业务路由。");
     const result = await this.messageHandler({
       botProfileId: runtime.record.id,
-      messageId: message.msgid,
+      messageId,
+      chatType: message.chattype,
       chatId,
       userId,
       text,
       quoteText: quoteText(message).trim(),
     });
+    if (!result) {
+      this.recordInbound(
+        runtime,
+        "ignored",
+        "消息未匹配已启用的业务路由，已静默忽略。",
+      );
+      return;
+    }
     this.recordInbound(
       runtime,
       result.status === "accepted" ? "routed" : "rejected",
@@ -679,7 +726,7 @@ export class AutomationWeComBotManager extends EventEmitter<AutomationWeComBotMa
   private requireRuntime(botProfileId: string): BotRuntime {
     const runtime = this.runtimes.get(botProfileId);
     if (!runtime) {
-      throw new Error("自动化机器人不存在或已经删除。");
+      throw new Error("企业微信业务入口不存在或已经删除。");
     }
     return runtime;
   }

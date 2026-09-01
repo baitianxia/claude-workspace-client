@@ -1,21 +1,15 @@
 import { spawn, type SpawnOptions } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import {
-  mkdir,
-  readFile,
-  realpath,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { mkdir, rm } from "node:fs/promises";
 import type {
   AutomationJobRecord,
   AutomationRunOutput,
 } from "../shared/contracts";
 import { createClaudeLaunchSpec } from "./claude-executable";
+import {
+  prepareRestrictedMcpConfig,
+  type PreparedRestrictedMcpConfig,
+} from "./restricted-mcp-config";
 
-const MAX_MCP_CONFIG_BYTES = 2 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_DIAGNOSTIC_CHARACTERS = 8_000;
 
@@ -92,11 +86,6 @@ export interface ClaudeCodeJobResult {
   output?: AutomationRunOutput;
   error?: string;
   diagnostic?: string;
-}
-
-interface PreparedMcpConfig {
-  path: string;
-  cleanup(): Promise<void>;
 }
 
 interface ClaudeJsonEnvelope {
@@ -315,66 +304,6 @@ export function buildClaudeAutomationArgs(input: ClaudeCodeJobInput): string[] {
   ];
 }
 
-async function prepareMcpConfig(
-  input: ClaudeCodeJobInput,
-  runtimeDirectory: string,
-): Promise<PreparedMcpConfig> {
-  if (isAbsolute(input.job.mcpConfigPath)) {
-    throw new Error("MCP 配置必须使用工程内的相对路径。");
-  }
-  const projectRoot = await realpath(input.projectRoot);
-  const requestedPath = resolve(projectRoot, input.job.mcpConfigPath);
-  const sourcePath = await realpath(requestedPath);
-  const sourceRelativePath = relative(projectRoot, sourcePath);
-  if (
-    !sourceRelativePath ||
-    sourceRelativePath.startsWith("..") ||
-    isAbsolute(sourceRelativePath)
-  ) {
-    throw new Error("MCP 配置必须是工程目录内的普通 JSON 文件。");
-  }
-  const sourceStat = await stat(sourcePath);
-  if (!sourceStat.isFile() || sourceStat.size > MAX_MCP_CONFIG_BYTES) {
-    throw new Error("MCP 配置不是普通文件或超过 2 MB 限制。");
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readFile(sourcePath, "utf8")) as unknown;
-  } catch {
-    throw new Error("MCP 配置不是有效的 JSON 文件。");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("MCP 配置根节点必须是 JSON 对象。");
-  }
-  const allServers = (parsed as { mcpServers?: unknown }).mcpServers;
-  if (!allServers || typeof allServers !== "object" || Array.isArray(allServers)) {
-    throw new Error("MCP 配置必须包含 mcpServers 对象。");
-  }
-  const serverMap = allServers as Record<string, unknown>;
-  const selectedServers: Record<string, unknown> = {};
-  for (const serverName of input.job.allowedMcpServers) {
-    if (!Object.hasOwn(serverMap, serverName)) {
-      throw new Error(`MCP 配置中没有名为 ${serverName} 的服务器。`);
-    }
-    selectedServers[serverName] = serverMap[serverName];
-  }
-
-  await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  const runtimePath = join(
-    runtimeDirectory,
-    `${input.runId}-${randomUUID()}.mcp.json`,
-  );
-  await writeFile(
-    runtimePath,
-    `${JSON.stringify({ mcpServers: selectedServers }, null, 2)}\n`,
-    { encoding: "utf8", mode: 0o600 },
-  );
-  return {
-    path: runtimePath,
-    cleanup: () => rm(runtimePath, { force: true }),
-  };
-}
-
 function defaultSpawner(
   executable: string,
   args: string[],
@@ -434,9 +363,15 @@ export class ClaudeCodeJobRunner {
         preparationTermination ??= reason;
       },
     });
-    let mcpConfig: PreparedMcpConfig | null = null;
+    let mcpConfig: PreparedRestrictedMcpConfig | null = null;
     try {
-      mcpConfig = await prepareMcpConfig(input, this.runtimeDirectory);
+      mcpConfig = await prepareRestrictedMcpConfig({
+        projectRoot: input.projectRoot,
+        mcpConfigPath: input.job.mcpConfigPath,
+        allowedMcpServers: input.job.allowedMcpServers,
+        runtimeDirectory: this.runtimeDirectory,
+        runtimeId: input.runId,
+      });
       if (preparationTermination) {
         return {
           status: preparationTermination,

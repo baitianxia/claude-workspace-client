@@ -245,7 +245,7 @@ function botDraftFor(bot?: AutomationWeComBotProfile): BotDraft {
   };
 }
 
-function AutomationWeComBotDialog({
+export function WeComBusinessBotDialog({
   bots,
   onClose,
   onSaved,
@@ -302,7 +302,7 @@ function AutomationWeComBotDialog({
     if (
       !selected ||
       !window.confirm(
-        `确认删除自动化机器人“${selected.name}”？使用它的任务或未完成投递会阻止删除。`,
+        `确认删除企业微信入口“${selected.name}”？使用它的助理、任务或未完成投递会阻止删除。`,
       )
     ) {
       return;
@@ -328,9 +328,9 @@ function AutomationWeComBotDialog({
       >
         <header>
           <div>
-            <span className="automation-eyebrow">AUTOMATION BOTS</span>
-            <h3 id="automation-bot-dialog-title">自动化推送机器人</h3>
-            <p>已启用的机器人会各自保持在线，可同时承担不同任务。</p>
+            <span className="automation-eyebrow">WECOM CHANNELS</span>
+            <h3 id="automation-bot-dialog-title">企业微信业务入口</h3>
+            <p>已启用的入口会各自保持在线，可连接私人助理或承担自动化推送。</p>
           </div>
           <button type="button" aria-label="关闭机器人管理" onClick={onClose}>
             ×
@@ -338,7 +338,7 @@ function AutomationWeComBotDialog({
         </header>
 
         <div className="automation-bot-role-note">
-          这里的机器人只负责信息推送与群内任务触发，不是主界面的 Claude Code 管理机器人；两种角色不能复用同一个 Bot ID。
+          这里保存的是企业微信渠道身份，不是私人助理本身，也不是 Claude Code 管理机器人；不同连接不能复用同一个 Bot ID。
         </div>
 
         {error ? <div className="automation-error">{error}</div> : null}
@@ -372,8 +372,8 @@ function AutomationWeComBotDialog({
           <form className="automation-bot-form" onSubmit={save}>
             <div className="automation-form-heading">
               <div>
-                <h3>{selected ? selected.name : "添加自动化机器人"}</h3>
-                <p>名称仅保存在本机，用于选择和区分发送身份。</p>
+                <h3>{selected ? selected.name : "添加企业微信入口"}</h3>
+                <p>名称仅保存在本机，用于选择和区分渠道身份。</p>
               </div>
               <label className="automation-inline-toggle">
                 <input
@@ -389,7 +389,7 @@ function AutomationWeComBotDialog({
               <input
                 value={draft.name}
                 maxLength={80}
-                placeholder="例如：资讯推送机器人"
+                placeholder="例如：我的助理入口"
                 onChange={(event) => setDraft({ ...draft, name: event.currentTarget.value })}
                 required
               />
@@ -653,7 +653,7 @@ export function AutomationPanel({
       draft.deliveryChannels.includes("wecom") &&
       !draft.wecomBotProfileId
     ) {
-      setError("请先添加并选择一个自动化推送机器人。");
+      setError("请先添加并选择一个企业微信业务入口。");
       return;
     }
     const request: UpsertAutomationJobRequest = {
@@ -1004,7 +1004,7 @@ export function AutomationPanel({
                         }`}
                       />
                       <span>
-                        <strong>自动化发送机器人</strong>
+                        <strong>企业微信发送入口</strong>
                         <small
                           title={
                             selectedWeComBot?.error ||
@@ -1022,7 +1022,7 @@ export function AutomationPanel({
                     </div>
                     <div className="automation-wecom-sender-actions">
                       <select
-                        aria-label="选择自动化发送机器人"
+                        aria-label="选择企业微信发送入口"
                         value={draft.wecomBotProfileId}
                         onChange={(event) => changeWeComBot(event.currentTarget.value)}
                         required
@@ -1040,7 +1040,7 @@ export function AutomationPanel({
                         ))}
                       </select>
                       <button type="button" onClick={() => setBotDialogOpen(true)}>
-                        管理机器人
+                        管理入口
                       </button>
                     </div>
                   </div>
@@ -1503,7 +1503,7 @@ export function AutomationPanel({
         )}
       </section>
       {botDialogOpen ? (
-        <AutomationWeComBotDialog
+        <WeComBusinessBotDialog
           bots={automation.wecomBots}
           onClose={() => setBotDialogOpen(false)}
           onSaved={(botProfileId) =>

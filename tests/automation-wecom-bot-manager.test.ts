@@ -68,6 +68,20 @@ function groupMessage(messageId: string): WsFrame<BaseMessage> {
   } as WsFrame<BaseMessage>;
 }
 
+function singleMessage(messageId: string): WsFrame<BaseMessage> {
+  return {
+    headers: { req_id: `request-${messageId}` },
+    body: {
+      msgid: messageId,
+      aibotid: "automation-bot",
+      chattype: "single",
+      from: { userid: "zhangsan" },
+      msgtype: "text",
+      text: { content: "继续桌面上的对话" },
+    },
+  } as WsFrame<BaseMessage>;
+}
+
 async function waitFor(check: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (check()) {
@@ -134,15 +148,36 @@ describe("AutomationWeComBotManager", () => {
     expect(clients.get("news-bot")?.sent).toHaveLength(1);
     expect(clients.get("operations-bot")?.sent).toHaveLength(0);
 
-    const inbound: string[] = [];
+    const inbound: Array<{ botProfileId: string; chatType: string; chatId: string }> = [];
     manager.setBusinessMessageHandler(async (message) => {
-      inbound.push(message.botProfileId);
-      return { status: "accepted", message: "已登记" };
+      inbound.push({
+        botProfileId: message.botProfileId,
+        chatType: message.chatType,
+        chatId: message.chatId,
+      });
+      return message.messageId === "message-ignored"
+        ? null
+        : { status: "accepted", message: "已登记" };
     });
     clients.get("operations-bot")?.emit("message", groupMessage("message-one"));
     await waitFor(() => inbound.length === 1);
-    expect(inbound).toEqual([operations.id]);
+    clients.get("operations-bot")?.emit("message", singleMessage("message-two"));
+    await waitFor(() => inbound.length === 2);
+    expect(inbound).toEqual([
+      { botProfileId: operations.id, chatType: "group", chatId: "group-one" },
+      { botProfileId: operations.id, chatType: "single", chatId: "zhangsan" },
+    ]);
     expect(clients.get("operations-bot")?.replies).toContain("已登记");
+
+    const replyCount = clients.get("operations-bot")?.replies.length;
+    clients
+      .get("operations-bot")
+      ?.emit("message", singleMessage("message-ignored"));
+    await waitFor(() => inbound.length === 3);
+    expect(clients.get("operations-bot")?.replies).toHaveLength(replyCount ?? 0);
+    expect(manager.listBots().find((bot) => bot.id === operations.id)).toMatchObject({
+      lastInboundStatus: "ignored",
+    });
 
     const storedJson = await readFile(storePath, "utf8");
     expect(storedJson).not.toContain("news-secret");

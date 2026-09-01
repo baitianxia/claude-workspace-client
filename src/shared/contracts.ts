@@ -192,12 +192,80 @@ export interface AutomationSnapshot {
   lastSchedulerCheckAt?: number;
 }
 
+export interface AssistantProfileRecord {
+  id: string;
+  name: string;
+  enabled: boolean;
+  projectId: string;
+  instructions: string;
+  /** Project-relative MCP JSON path. May be empty when no MCP servers are allowed. */
+  mcpConfigPath: string;
+  allowedMcpServers: string[];
+  /** The owner whose WeCom single-chat shares the local desktop conversation. */
+  ownerWeComUserId: string;
+  /** Optional WeCom business bot used only as a remote entry channel. */
+  wecomBotProfileId?: string;
+  timeoutMinutes: number;
+  maxTurns: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AssistantConversationRecord {
+  id: string;
+  assistantId: string;
+  /** The first release only persists the owner's cross-channel conversation. */
+  kind: "owner";
+  claudeSessionId?: string;
+  createdAt: number;
+  updatedAt: number;
+  lastMessageAt?: number;
+}
+
+export type AssistantTurnSource = "desktop" | "wecom";
+
+export type AssistantTurnStatus =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "timed-out"
+  | "cancelled";
+
+export interface AssistantTurnRecord {
+  id: string;
+  assistantId: string;
+  conversationId: string;
+  source: AssistantTurnSource;
+  /** Present for WeCom turns and used for persistent deduplication. */
+  messageId?: string;
+  /** WeCom entry identity fixed when the turn is accepted. */
+  botProfileId?: string;
+  userId?: string;
+  request: string;
+  status: AssistantTurnStatus;
+  response?: string;
+  error?: string;
+  deliveryError?: string;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+export interface AssistantSnapshot {
+  profiles: AssistantProfileRecord[];
+  conversations: AssistantConversationRecord[];
+  turns: AssistantTurnRecord[];
+  runningConversationIds: string[];
+}
+
 export interface AppSnapshot {
   projects: ProjectRecord[];
   sessions: SessionRecord[];
   claudeExecutable: ClaudeExecutableState;
   wecom: WeComState;
   automation: AutomationSnapshot;
+  assistant: AssistantSnapshot;
 }
 
 export interface TerminalDataEvent {
@@ -266,6 +334,10 @@ export interface WeComStateChangedEvent {
 
 export interface AutomationStateChangedEvent {
   state: AutomationSnapshot;
+}
+
+export interface AssistantStateChangedEvent {
+  state: AssistantSnapshot;
 }
 
 export type CreateSessionRequest =
@@ -337,6 +409,25 @@ export interface UpdateAutomationWeComGroupAliasRequest {
   alias: string;
 }
 
+export interface UpsertAssistantProfileRequest {
+  id?: string;
+  name: string;
+  enabled: boolean;
+  projectId: string;
+  instructions: string;
+  mcpConfigPath: string;
+  allowedMcpServers: string[];
+  ownerWeComUserId: string;
+  wecomBotProfileId?: string;
+  timeoutMinutes: number;
+  maxTurns: number;
+}
+
+export interface SendAssistantMessageRequest {
+  assistantId: string;
+  text: string;
+}
+
 export interface ResizeTerminalRequest {
   sessionId: string;
   columns: number;
@@ -366,6 +457,17 @@ export interface DesktopApi {
   updateAutomationWeComGroupAlias(
     request: UpdateAutomationWeComGroupAliasRequest,
   ): Promise<DiscoveredWeComGroup>;
+  upsertAssistantProfile(
+    request: UpsertAssistantProfileRequest,
+  ): Promise<AssistantProfileRecord>;
+  deleteAssistantProfile(assistantId: string): Promise<void>;
+  sendAssistantMessage(
+    request: SendAssistantMessageRequest,
+  ): Promise<AssistantTurnRecord>;
+  resetAssistantConversation(
+    assistantId: string,
+  ): Promise<AssistantConversationRecord>;
+  cancelAssistantTurn(conversationId: string): Promise<void>;
   deleteAutomationJob(jobId: string): Promise<void>;
   runAutomationJob(jobId: string): Promise<AutomationRunRecord>;
   retryAutomationRun(runId: string): Promise<AutomationRunRecord>;
@@ -392,5 +494,8 @@ export interface DesktopApi {
   ): () => void;
   onAutomationStateChanged(
     listener: (event: AutomationStateChangedEvent) => void,
+  ): () => void;
+  onAssistantStateChanged(
+    listener: (event: AssistantStateChangedEvent) => void,
   ): () => void;
 }

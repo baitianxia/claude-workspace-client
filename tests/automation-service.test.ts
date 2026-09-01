@@ -226,28 +226,28 @@ describe("AutomationService", () => {
       name: "运营机器人",
       botId: "aibot-two",
     });
-    expect(gateway.handler).not.toBeNull();
-
-    const wrongBot = await gateway.handler!({
+    const wrongBot = await service.routeWeComMessage({
       botProfileId: "bot-profile-two",
       messageId: "wrong-bot",
+      chatType: "group",
       chatId: "group-one",
       userId: "zhangsan",
       text: "分析影响",
       quoteText: "",
     });
-    expect(wrongBot).toMatchObject({ status: "rejected" });
+    expect(wrongBot).toBeNull();
     expect(runner.inputs).toHaveLength(0);
 
-    const chatIdResult = await gateway.handler!({
+    const chatIdResult = await service.routeWeComMessage({
       botProfileId: "bot-profile-one",
       messageId: "chat-id-query",
+      chatType: "group",
       chatId: "group-one",
       userId: "unknown",
       text: "@机器人 /chatid",
       quoteText: "",
     });
-    expect(chatIdResult.message).toContain("group-one");
+    expect(chatIdResult?.message).toContain("group-one");
     expect(service.getSnapshot().discoveredWeComGroups).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -279,34 +279,48 @@ describe("AutomationService", () => {
         )?.alias,
     ).toBe("每日资讯群");
 
-    const unauthorized = await gateway.handler!({
+    const ordinary = await service.routeWeComMessage({
       botProfileId: "bot-profile-one",
-      messageId: "unauthorized",
+      messageId: "ordinary-group-message",
+      chatType: "group",
       chatId: "group-one",
-      userId: "lisi",
-      text: "分析影响",
+      userId: "zhangsan",
+      text: "今天大家先同步一下进度",
       quoteText: "",
     });
-    expect(unauthorized.status).toBe("rejected");
+    expect(ordinary).toBeNull();
+    expect(runner.inputs).toHaveLength(0);
+
+    const unauthorized = await service.routeWeComMessage({
+      botProfileId: "bot-profile-one",
+      messageId: "unauthorized",
+      chatType: "group",
+      chatId: "group-one",
+      userId: "lisi",
+      text: "/run 每日资讯",
+      quoteText: "",
+    });
+    expect(unauthorized?.status).toBe("rejected");
 
     const message = {
       botProfileId: "bot-profile-one",
       messageId: "message-one",
+      chatType: "group" as const,
       chatId: "group-one",
       userId: "zhangsan",
-      text: "分析一下对库存的影响",
+      text: "/run 每日资讯",
       quoteText: "",
     };
-    const accepted = await gateway.handler!(message);
-    expect(accepted.status).toBe("accepted");
-    expect(accepted.message).toContain("[RPT-");
+    const accepted = await service.routeWeComMessage(message);
+    expect(accepted?.status).toBe("accepted");
+    expect(accepted?.message).toContain("[RPT-");
     await waitFor(() => service.getSnapshot().runs[0]?.status === "succeeded");
 
-    const duplicate = await gateway.handler!(message);
-    expect(duplicate.status).toBe("accepted");
-    expect(duplicate.message).toContain(service.getSnapshot().runs[0].reportCode);
+    const duplicate = await service.routeWeComMessage(message);
+    expect(duplicate?.status).toBe("accepted");
+    expect(duplicate?.message).toContain(service.getSnapshot().runs[0].reportCode);
     expect(runner.inputs).toHaveLength(1);
-    expect(runner.inputs[0].prompt).toContain("分析一下对库存的影响");
+    expect(runner.inputs[0].prompt).toContain("/run 每日资讯");
   });
 
   it("reserves a job before persistence so simultaneous starts cannot overlap", async () => {
@@ -340,9 +354,10 @@ describe("AutomationService", () => {
       );
     });
 
-    const unknown = await gateway.handler!({
+    const unknown = await service.routeWeComMessage({
       botProfileId: "bot-profile-one",
       messageId: "unknown-report",
+      chatType: "group",
       chatId: "group-one",
       userId: "zhangsan",
       text: "继续分析",
@@ -350,25 +365,27 @@ describe("AutomationService", () => {
     });
     expect(unknown).toMatchObject({ status: "rejected" });
 
-    const wrongGroup = await gateway.handler!({
+    const wrongGroup = await service.routeWeComMessage({
       botProfileId: "bot-profile-one",
       messageId: "wrong-group",
+      chatType: "group",
       chatId: "group-two",
       userId: "zhangsan",
       text: "继续分析",
       quoteText: `[RPT-${source.reportCode}]`,
     });
-    expect(wrongGroup.message).toContain("未投递到本群");
+    expect(wrongGroup?.message).toContain("未投递到本群");
 
-    const accepted = await gateway.handler!({
+    const accepted = await service.routeWeComMessage({
       botProfileId: "bot-profile-one",
       messageId: "valid-quote",
+      chatType: "group",
       chatId: "group-one",
       userId: "zhangsan",
       text: "继续分析影响",
       quoteText: `[RPT-${source.reportCode}]`,
     });
-    expect(accepted.status).toBe("accepted");
+    expect(accepted?.status).toBe("accepted");
     await waitFor(() => runner.inputs.length === 2);
     expect(runner.inputs[1].prompt).toContain("上一份报告摘要：发现一条新信息");
   });

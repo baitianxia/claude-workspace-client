@@ -567,7 +567,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     if (message.chattype === "group") {
       this.recordInbound(
         "ignored",
-        "Claude Code 管理机器人只处理单聊远程回复；自动化群聊请使用自动化推送机器人。",
+        "Claude Code 管理机器人只处理终端远程回复；私人助理和自动化请使用独立的企业微信业务入口。",
       );
       return;
     }

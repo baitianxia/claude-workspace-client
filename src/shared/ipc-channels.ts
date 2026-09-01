@@ -11,6 +11,11 @@ export const IPC_CHANNELS = {
   deleteAutomationWeComBot: "workspace:delete-automation-wecom-bot",
   updateAutomationWeComGroupAlias:
     "workspace:update-automation-wecom-group-alias",
+  upsertAssistantProfile: "workspace:upsert-assistant-profile",
+  deleteAssistantProfile: "workspace:delete-assistant-profile",
+  sendAssistantMessage: "workspace:send-assistant-message",
+  resetAssistantConversation: "workspace:reset-assistant-conversation",
+  cancelAssistantTurn: "workspace:cancel-assistant-turn",
   deleteAutomationJob: "workspace:delete-automation-job",
   runAutomationJob: "workspace:run-automation-job",
   retryAutomationRun: "workspace:retry-automation-run",
@@ -32,4 +37,5 @@ export const IPC_CHANNELS = {
   sessionChanged: "workspace:session-changed",
   wecomStateChanged: "workspace:wecom-state-changed",
   automationStateChanged: "workspace:automation-state-changed",
+  assistantStateChanged: "workspace:assistant-state-changed",
 } as const;

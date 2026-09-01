@@ -1,5 +1,8 @@
 import type {
   AppSnapshot,
+  AssistantProfileRecord,
+  AssistantStateChangedEvent,
+  AssistantTurnRecord,
   AutomationJobRecord,
   AutomationRunRecord,
   AutomationStateChangedEvent,
@@ -204,6 +207,65 @@ const previewSnapshot: AppSnapshot = {
     schedulerActive: true,
     lastSchedulerCheckAt: now,
   },
+  assistant: {
+    profiles: [
+      {
+        id: "assistant-shadow",
+        name: "小岚",
+        enabled: true,
+        projectId: "mall-service",
+        instructions: "作为我的私人研究助理，先给结论，再补充关键依据。",
+        mcpConfigPath: ".mcp.json",
+        allowedMcpServers: ["web", "mail"],
+        ownerWeComUserId: "developer",
+        wecomBotProfileId: "automation-news-bot",
+        timeoutMinutes: 20,
+        maxTurns: 20,
+        createdAt: now - 360_000,
+        updatedAt: now - 360_000,
+      },
+    ],
+    conversations: [
+      {
+        id: "assistant-shadow",
+        assistantId: "assistant-shadow",
+        kind: "owner",
+        createdAt: now - 350_000,
+        updatedAt: now - 25_000,
+        lastMessageAt: now - 25_000,
+      },
+    ],
+    turns: [
+      {
+        id: "assistant-turn-one",
+        assistantId: "assistant-shadow",
+        conversationId: "assistant-shadow",
+        source: "desktop",
+        request: "今天有哪些事情值得我优先关注？",
+        status: "succeeded",
+        response: "今天建议优先关注两件事：\n\n1. **商城登录超时修复**已经进入验证阶段。\n2. 下午的产品评审前，先确认自动化日报里的两条行业变化。",
+        createdAt: now - 62_000,
+        startedAt: now - 61_000,
+        finishedAt: now - 48_000,
+      },
+      {
+        id: "assistant-turn-two",
+        assistantId: "assistant-shadow",
+        conversationId: "assistant-shadow",
+        source: "wecom",
+        messageId: "preview-wecom-owner-message",
+        botProfileId: "automation-news-bot",
+        userId: "developer",
+        request: "把产品评审相关的上下文整理成三个要点。",
+        status: "succeeded",
+        response: "已整理：**目标范围、当前风险、需要现场确认的决策**。我会保持这段上下文，你回到客户端后可以继续补充。",
+        createdAt: now - 32_000,
+        startedAt: now - 31_000,
+        finishedAt: now - 25_000,
+      },
+    ],
+    runningConversationIds: [],
+  },
 };
 
 const previewFileContents: Record<string, { latest: string; diff: string }> = {
@@ -304,6 +366,9 @@ export function installDevelopmentPreview(): void {
   const automationListeners = new Set<
     (event: AutomationStateChangedEvent) => void
   >();
+  const assistantListeners = new Set<
+    (event: AssistantStateChangedEvent) => void
+  >();
 
   if (new URLSearchParams(window.location.search).has("autoConfirm")) {
     window.confirm = () => true;
@@ -324,6 +389,12 @@ export function installDevelopmentPreview(): void {
   const publishAutomation = () => {
     for (const listener of automationListeners) {
       listener({ state: structuredClone(snapshot.automation) });
+    }
+  };
+
+  const publishAssistant = () => {
+    for (const listener of assistantListeners) {
+      listener({ state: structuredClone(snapshot.assistant) });
     }
   };
 
@@ -373,7 +444,7 @@ export function installDevelopmentPreview(): void {
           (bot) => bot.botId === request.botId.trim(),
         )
       ) {
-        throw new Error("这个 Bot ID 已用于自动化推送机器人。");
+        throw new Error("这个 Bot ID 已用于企业微信业务入口。");
       }
       snapshot.wecom = {
         enabled: request.enabled,
@@ -397,7 +468,7 @@ export function installDevelopmentPreview(): void {
           (bot) => bot.id === request.wecomBotProfileId,
         )
       ) {
-        throw new Error("请选择有效的自动化推送机器人。");
+        throw new Error("请选择有效的企业微信业务入口。");
       }
       const existing = request.id
         ? snapshot.automation.jobs.find((job) => job.id === request.id)
@@ -456,6 +527,13 @@ export function installDevelopmentPreview(): void {
     },
     deleteAutomationWeComBot: async (botProfileId) => {
       if (
+        snapshot.assistant.profiles.some(
+          (profile) => profile.wecomBotProfileId === botProfileId,
+        )
+      ) {
+        throw new Error("仍有私人助理绑定这个企业微信入口。");
+      }
+      if (
         snapshot.automation.jobs.some(
           (job) => job.wecomBotProfileId === botProfileId,
         )
@@ -470,6 +548,130 @@ export function installDevelopmentPreview(): void {
           (group) => group.botProfileId !== botProfileId,
         );
       publishAutomation();
+    },
+    upsertAssistantProfile: async (request) => {
+      const existing = request.id
+        ? snapshot.assistant.profiles.find((profile) => profile.id === request.id)
+        : undefined;
+      if (
+        request.wecomBotProfileId &&
+        snapshot.assistant.profiles.some(
+          (profile) =>
+            profile.id !== existing?.id &&
+            profile.wecomBotProfileId === request.wecomBotProfileId,
+        )
+      ) {
+        throw new Error("这个企业微信入口已经绑定到其他私人助理。");
+      }
+      const timestamp = Date.now();
+      const profile: AssistantProfileRecord = {
+        ...request,
+        id: existing?.id ?? crypto.randomUUID(),
+        createdAt: existing?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+      };
+      snapshot.assistant.profiles = [
+        ...snapshot.assistant.profiles.filter(
+          (candidate) => candidate.id !== profile.id,
+        ),
+        profile,
+      ];
+      if (
+        !snapshot.assistant.conversations.some(
+          (conversation) => conversation.id === profile.id,
+        )
+      ) {
+        snapshot.assistant.conversations.push({
+          id: profile.id,
+          assistantId: profile.id,
+          kind: "owner",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+      }
+      publishAssistant();
+      return structuredClone(profile);
+    },
+    deleteAssistantProfile: async (assistantId) => {
+      snapshot.assistant.profiles = snapshot.assistant.profiles.filter(
+        (profile) => profile.id !== assistantId,
+      );
+      snapshot.assistant.conversations = snapshot.assistant.conversations.filter(
+        (conversation) => conversation.assistantId !== assistantId,
+      );
+      snapshot.assistant.turns = snapshot.assistant.turns.filter(
+        (turn) => turn.assistantId !== assistantId,
+      );
+      publishAssistant();
+    },
+    sendAssistantMessage: async ({ assistantId, text }) => {
+      const profile = snapshot.assistant.profiles.find(
+        (candidate) => candidate.id === assistantId,
+      );
+      if (!profile?.enabled) {
+        throw new Error("私人助理当前不可用。");
+      }
+      const timestamp = Date.now();
+      const turn: AssistantTurnRecord = {
+        id: crypto.randomUUID(),
+        assistantId,
+        conversationId: assistantId,
+        source: "desktop",
+        request: text.trim(),
+        status: "running",
+        createdAt: timestamp,
+        startedAt: timestamp,
+      };
+      snapshot.assistant.turns.push(turn);
+      const conversation = snapshot.assistant.conversations.find(
+        (candidate) => candidate.id === assistantId,
+      );
+      if (conversation) {
+        conversation.updatedAt = timestamp;
+        conversation.lastMessageAt = timestamp;
+      }
+      snapshot.assistant.runningConversationIds = [assistantId];
+      publishAssistant();
+      window.setTimeout(() => {
+        turn.status = "succeeded";
+        turn.response = `我已经收到：“${turn.request}”。这是预览模式回复；真实运行时会继续同一个主人 Claude 会话。`;
+        turn.finishedAt = Date.now();
+        snapshot.assistant.runningConversationIds = [];
+        publishAssistant();
+      }, 700);
+      return structuredClone(turn);
+    },
+    resetAssistantConversation: async (assistantId) => {
+      const conversation = snapshot.assistant.conversations.find(
+        (candidate) => candidate.id === assistantId,
+      );
+      if (!conversation) {
+        throw new Error("Preview assistant conversation does not exist.");
+      }
+      delete conversation.claudeSessionId;
+      conversation.updatedAt = Date.now();
+      snapshot.assistant.turns = snapshot.assistant.turns.filter(
+        (turn) => turn.assistantId !== assistantId,
+      );
+      publishAssistant();
+      return structuredClone(conversation);
+    },
+    cancelAssistantTurn: async (conversationId) => {
+      const turn = snapshot.assistant.turns.find(
+        (candidate) =>
+          candidate.conversationId === conversationId &&
+          (candidate.status === "queued" || candidate.status === "running"),
+      );
+      if (turn) {
+        turn.status = "cancelled";
+        turn.error = "本轮对话已取消。";
+        turn.finishedAt = Date.now();
+      }
+      snapshot.assistant.runningConversationIds =
+        snapshot.assistant.runningConversationIds.filter(
+          (candidate) => candidate !== conversationId,
+        );
+      publishAssistant();
     },
     updateAutomationWeComGroupAlias: async ({
       botProfileId,
@@ -683,6 +885,10 @@ export function installDevelopmentPreview(): void {
     onAutomationStateChanged: (listener) => {
       automationListeners.add(listener);
       return () => automationListeners.delete(listener);
+    },
+    onAssistantStateChanged: (listener) => {
+      assistantListeners.add(listener);
+      return () => assistantListeners.delete(listener);
     },
   };
 

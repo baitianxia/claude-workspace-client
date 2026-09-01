@@ -31,6 +31,11 @@ const AutomationPanel = lazy(async () => {
   return { default: module.AutomationPanel };
 });
 
+const AssistantPanel = lazy(async () => {
+  const module = await import("./AssistantPanel");
+  return { default: module.AssistantPanel };
+});
+
 function readableError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   return raw.replace(/^Error invoking remote method '[^']+': Error: /u, "");
@@ -93,8 +98,8 @@ function automationStatusLabel(state: AppSnapshot["automation"]): string {
     (bot) => bot.status === "connected",
   ).length;
   const botStatus = state.wecomBots.length
-    ? ` · ${connectedBots}/${state.wecomBots.length} 个推送机器人在线`
-    : " · 尚未配置推送机器人";
+    ? ` · ${connectedBots}/${state.wecomBots.length} 个企微入口在线`
+    : " · 尚未配置企微入口";
   if (state.runningJobIds.length) {
     return `${state.runningJobIds.length} 个任务正在运行${botStatus}`;
   }
@@ -103,6 +108,19 @@ function automationStatusLabel(state: AppSnapshot["automation"]): string {
     return `尚未配置任务${botStatus}`;
   }
   return `${enabled} 个定时任务已启用${botStatus}`;
+}
+
+function assistantStatusLabel(snapshot: AppSnapshot): string {
+  const profiles = snapshot.assistant.profiles;
+  if (!profiles.length) {
+    return "尚未创建助理";
+  }
+  if (snapshot.assistant.runningConversationIds.length) {
+    return `${snapshot.assistant.runningConversationIds.length} 个助理正在思考`;
+  }
+  const enabled = profiles.filter((profile) => profile.enabled).length;
+  const bound = profiles.filter((profile) => profile.wecomBotProfileId).length;
+  return `${enabled}/${profiles.length} 个可用 · ${bound} 个已接入企微`;
 }
 
 function upsertSession(
@@ -194,6 +212,7 @@ export function App() {
   const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
   const [wecomSecretDraft, setWeComSecretDraft] = useState("");
   const [automationPanelOpen, setAutomationPanelOpen] = useState(false);
+  const [assistantPanelOpen, setAssistantPanelOpen] = useState(false);
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -378,6 +397,15 @@ export function App() {
           current ? { ...current, automation: state } : current,
         );
       });
+    const unsubscribeAssistant =
+      window.claudeWorkspace.onAssistantStateChanged(({ state }) => {
+        if (disposed) {
+          return;
+        }
+        setSnapshot((current) =>
+          current ? { ...current, assistant: state } : current,
+        );
+      });
 
     void window.claudeWorkspace
       .getSnapshot()
@@ -435,6 +463,7 @@ export function App() {
       unsubscribeTerminal();
       unsubscribeWeCom();
       unsubscribeAutomation();
+      unsubscribeAssistant();
     };
   }, []);
 
@@ -1048,6 +1077,33 @@ export function App() {
           <div className="runtime-heading">
             <span
               className={`status-dot ${
+                snapshot.assistant.runningConversationIds.length
+                  ? "status-dot--pending"
+                  : snapshot.assistant.profiles.some((profile) => profile.enabled)
+                    ? "status-dot--online"
+                    : "status-dot--offline"
+              }`}
+            />
+            <div>
+              <strong>私人助理 Agent</strong>
+              <span>{assistantStatusLabel(snapshot)}</span>
+            </div>
+          </div>
+          <div className="runtime-actions">
+            <button
+              type="button"
+              onClick={() => setAssistantPanelOpen(true)}
+              disabled={busy || !snapshot.claudeExecutable.path}
+            >
+              {snapshot.assistant.profiles.length ? "打开对话" : "创建助理"}
+            </button>
+          </div>
+        </section>
+
+        <section className="claude-runtime-card automation-runtime-card">
+          <div className="runtime-heading">
+            <span
+              className={`status-dot ${
                 snapshot.automation.runningJobIds.length
                   ? "status-dot--pending"
                   : snapshot.automation.schedulerActive
@@ -1549,6 +1605,20 @@ export function App() {
           />
         </Suspense>
       ) : null}
+      {assistantPanelOpen ? (
+        <Suspense
+          fallback={
+            <div className="assistant-backdrop">正在加载私人助理…</div>
+          }
+        >
+          <AssistantPanel
+            assistant={snapshot.assistant}
+            automation={snapshot.automation}
+            projects={projects}
+            onClose={() => setAssistantPanelOpen(false)}
+          />
+        </Suspense>
+      ) : null}
       {wecomSettingsOpen ? (
         <div className="settings-backdrop" role="presentation">
           <form
@@ -1582,7 +1652,7 @@ export function App() {
               />
               <span>
                 <strong>启用 Claude Code 远程管理</strong>
-                <small>此连接不用于网页信息推送；自动化机器人在任务面板单独管理</small>
+                <small>此连接不用于私人助理或网页推送；企业微信业务入口单独管理</small>
               </span>
             </label>
             <label className="settings-field">
@@ -1636,7 +1706,7 @@ export function App() {
               终端远程回复。每条待回复消息都有独立回复码，
               多个 Claude Code 进程同时等待时也会精确路由；引用机器人消息回复时
               无需重复输入回复码。启用后请新建或重启需要远程回复的 Claude Code
-              会话。它不能与自动化推送机器人复用 Bot ID；同一组 Bot ID/Secret
+              会话。它不能与企业微信业务入口复用 Bot ID；同一组 Bot ID/Secret
               同时只能连接一个客户端。
             </div>
             <footer>

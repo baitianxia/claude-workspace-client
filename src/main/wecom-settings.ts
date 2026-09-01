@@ -70,7 +70,7 @@ export class WeComSettingsService {
     );
     if (botId && this.isBotIdReserved(botId)) {
       throw new Error(
-        "这个 Bot ID 已用于自动化推送机器人，不能同时作为 Claude Code 管理机器人。",
+        "这个 Bot ID 已用于企业微信业务入口，不能同时作为 Claude Code 管理机器人。",
       );
     }
     const submittedSecret =

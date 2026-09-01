@@ -186,7 +186,7 @@ function deliveryRecords(
   targetIds: string[],
 ): AutomationDeliveryRecord[] {
   if (targetIds.length > 0 && !botProfileId) {
-    throw new Error("企业微信投递任务必须选择自动化机器人。");
+    throw new Error("企业微信投递任务必须选择业务入口。");
   }
   return targetIds.map((targetId) => ({
     botProfileId,
@@ -279,7 +279,6 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     }
     await this.runner.initialize?.();
     await this.store.initialize();
-    this.wecomBots.setBusinessMessageHandler(this.handleWeComMessage);
     await this.wecomBots.initialize?.();
     await this.store.disableJobsWithoutWeComBotProfile(this.now());
     await this.store.recoverInterruptedRuns(this.now());
@@ -373,13 +372,13 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     const wecomBotProfileId = request.wecomBotProfileId?.trim();
     if (wecomTargetIds.length > 0) {
       if (!wecomBotProfileId) {
-        throw new Error("配置企业微信群后必须选择自动化发送机器人。");
+        throw new Error("配置企业微信群后必须选择企业微信发送入口。");
       }
       if (!this.wecomBots.listBots().some((bot) => bot.id === wecomBotProfileId)) {
-        throw new Error("选择的自动化机器人不存在或已经删除。");
+        throw new Error("选择的企业微信业务入口不存在或已经删除。");
       }
     } else if (wecomBotProfileId) {
-      throw new Error("尚未配置企业微信群，不需要选择自动化发送机器人。");
+      throw new Error("尚未配置企业微信群，不需要选择企业微信发送入口。");
     }
     const now = this.now();
     const job: AutomationJobRecord = {
@@ -457,11 +456,11 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     }
     const botProfileId = requireText(
       request.botProfileId,
-      "自动化机器人配置 ID",
+      "企业微信业务入口配置 ID",
       200,
     );
     if (!this.wecomBots.listBots().some((bot) => bot.id === botProfileId)) {
-      throw new Error("自动化机器人不存在或已经删除。");
+      throw new Error("企业微信业务入口不存在或已经删除。");
     }
     const chatId = requireText(request.chatId, "企业微信群 ID", 200);
     if (chatId === "*" || !validWeComIdentifier(chatId)) {
@@ -538,7 +537,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
       )
     ) {
       throw new Error(
-        "这次执行原先绑定的自动化机器人已不存在，不能用其他身份重试。",
+        "这次执行原先绑定的企业微信业务入口已不存在，不能用其他身份重试。",
       );
     }
     run.status = "queued";
@@ -631,7 +630,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
         throw new Error("自动化任务尚未选择企业微信发送机器人。");
       }
       if (!this.wecomBots.listBots().some((bot) => bot.id === job.wecomBotProfileId)) {
-        throw new Error("自动化任务选择的企业微信机器人不存在或已经删除。");
+        throw new Error("自动化任务选择的企业微信业务入口不存在或已经删除。");
       }
     }
     return job;
@@ -834,6 +833,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
           job.wecomBotProfileId ??
           "legacy-missing-bot-profile",
         messageId: run.triggerMessageId ?? "retry",
+        chatType: "group",
         chatId: run.deliveries[0]?.targetId ?? "unknown",
         userId: run.requestedBy ?? "unknown",
         text: run.requestText ?? "",
@@ -843,9 +843,12 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     );
   }
 
-  private readonly handleWeComMessage = async (
+  readonly routeWeComMessage = async (
     message: AutomationWeComMessage,
-  ): Promise<AutomationWeComMessageResult> => {
+  ): Promise<AutomationWeComMessageResult | null> => {
+    if (message.chatType !== "group") {
+      return null;
+    }
     if (
       await this.store.touchDiscoveredWeComGroup(
         message.botProfileId,
@@ -878,6 +881,10 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     const sourceCode = REPORT_CODE_PATTERN.exec(
       `${message.quoteText}\n${message.text}`,
     )?.[1]?.toLocaleUpperCase("en-US");
+    const command = /\/run\s+([^\r\n]+)/iu.exec(message.text)?.[1]?.trim();
+    if (!sourceCode && !command) {
+      return null;
+    }
     const sourceRun = sourceCode
       ? this.store.findRunByReportCode(sourceCode)
       : undefined;
@@ -918,20 +925,15 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
           message: "引用的报告不属于本群可用任务，或当前用户没有执行权限。",
         };
       }
-    } else {
-      const command = /\/run\s+([^\r\n]+)/iu.exec(message.text)?.[1]?.trim();
-      if (command) {
-        const normalized = command.toLocaleLowerCase("zh-CN");
-        const matches = eligibleJobs.filter(
-          (candidate) =>
-            candidate.id.toLocaleLowerCase("en-US").startsWith(normalized) ||
-            candidate.name.toLocaleLowerCase("zh-CN") === normalized,
-        );
-        if (matches.length === 1) {
-          job = matches[0];
-        }
-      } else if (eligibleJobs.length === 1) {
-        job = eligibleJobs[0];
+    } else if (command) {
+      const normalized = command.toLocaleLowerCase("zh-CN");
+      const matches = eligibleJobs.filter(
+        (candidate) =>
+          candidate.id.toLocaleLowerCase("en-US").startsWith(normalized) ||
+          candidate.name.toLocaleLowerCase("zh-CN") === normalized,
+      );
+      if (matches.length === 1) {
+        job = matches[0];
       }
     }
     if (!job) {
@@ -1006,7 +1008,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
             try {
               if (!delivery.botProfileId) {
                 throw new Error(
-                  "旧版投递记录没有绑定自动化机器人，已停止投递以避免使用错误身份。",
+                  "旧版投递记录没有绑定企业微信业务入口，已停止投递以避免使用错误身份。",
                 );
               }
               await this.wecomBots.sendMarkdown(
