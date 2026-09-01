@@ -89,14 +89,20 @@ function wecomInboundLabel(state: AppSnapshot["wecom"]): string | null {
 }
 
 function automationStatusLabel(state: AppSnapshot["automation"]): string {
+  const connectedBots = state.wecomBots.filter(
+    (bot) => bot.status === "connected",
+  ).length;
+  const botStatus = state.wecomBots.length
+    ? ` · ${connectedBots}/${state.wecomBots.length} 个推送机器人在线`
+    : " · 尚未配置推送机器人";
   if (state.runningJobIds.length) {
-    return `${state.runningJobIds.length} 个任务正在运行`;
+    return `${state.runningJobIds.length} 个任务正在运行${botStatus}`;
   }
   const enabled = state.jobs.filter((job) => job.enabled).length;
   if (!state.jobs.length) {
-    return "尚未配置任务";
+    return `尚未配置任务${botStatus}`;
   }
-  return `${enabled} 个定时任务已启用`;
+  return `${enabled} 个定时任务已启用${botStatus}`;
 }
 
 function upsertSession(
@@ -1017,7 +1023,7 @@ export function App() {
               }`}
             />
             <div>
-              <strong>企业微信智能机器人</strong>
+              <strong>Claude Code 管理机器人</strong>
               <span title={snapshot.wecom.error}>
                 {wecomStatusLabel(snapshot.wecom)}
               </span>
@@ -1539,20 +1545,12 @@ export function App() {
           <AutomationPanel
             automation={snapshot.automation}
             projects={projects}
-            wecom={snapshot.wecom}
-            defaultWeComUserId={snapshot.wecom.targetUserId || undefined}
-            onConfigureWeCom={openWeComSettings}
             onClose={() => setAutomationPanelOpen(false)}
           />
         </Suspense>
       ) : null}
       {wecomSettingsOpen ? (
-        <div
-          className={`settings-backdrop ${
-            automationPanelOpen ? "settings-backdrop--above-automation" : ""
-          }`}
-          role="presentation"
-        >
+        <div className="settings-backdrop" role="presentation">
           <form
             className="settings-dialog"
             role="dialog"
@@ -1562,8 +1560,8 @@ export function App() {
           >
             <header>
               <div>
-                <h2 id="wecom-settings-title">企业微信智能机器人</h2>
-                <p>使用 API 模式的 WebSocket 长连接收发消息。</p>
+                <h2 id="wecom-settings-title">Claude Code 管理机器人</h2>
+                <p>专门接收 Claude Code 状态并把回复精确路由回终端。</p>
               </div>
               <button
                 type="button"
@@ -1583,8 +1581,8 @@ export function App() {
                 }
               />
               <span>
-                <strong>启用企业微信机器人连接</strong>
-                <small>终端远程回复、自动化群聊交互与主动推送共用一个连接</small>
+                <strong>启用 Claude Code 远程管理</strong>
+                <small>此连接不用于网页信息推送；自动化机器人在任务面板单独管理</small>
               </span>
             </label>
             <label className="settings-field">
@@ -1634,12 +1632,12 @@ export function App() {
               />
             </label>
             <div className="settings-note">
-              Secret 使用操作系统安全存储加密。一个机器人连接可同时服务终端回复和
-              多个自动化任务。每条待回复消息都有独立回复码，
+              Secret 使用操作系统安全存储加密。这个机器人只负责 Claude Code
+              终端远程回复。每条待回复消息都有独立回复码，
               多个 Claude Code 进程同时等待时也会精确路由；引用机器人消息回复时
               无需重复输入回复码。启用后请新建或重启需要远程回复的 Claude Code
-              会话。同一组 Bot ID/Secret 同时只能连接一个客户端；多人使用时每个
-              客户端必须配置独立机器人。
+              会话。它不能与自动化推送机器人复用 Bot ID；同一组 Bot ID/Secret
+              同时只能连接一个客户端。
             </div>
             <footer>
               <button

@@ -93,25 +93,52 @@ const previewSnapshot: AppSnapshot = {
     enabled: true,
     configured: true,
     hasSecret: true,
-    botId: "aibot-preview-news",
+    botId: "aibot-preview-claude-manager",
     targetUserId: "developer",
     status: "connected",
   },
   automation: {
+    wecomBots: [
+      {
+        id: "automation-news-bot",
+        name: "资讯推送机器人",
+        enabled: true,
+        configured: true,
+        hasSecret: true,
+        botId: "aibot-preview-news",
+        status: "connected",
+        createdAt: now - 300_000,
+        updatedAt: now - 300_000,
+      },
+      {
+        id: "automation-ops-bot",
+        name: "运营播报机器人",
+        enabled: true,
+        configured: true,
+        hasSecret: true,
+        botId: "aibot-preview-ops",
+        status: "connected",
+        createdAt: now - 260_000,
+        updatedAt: now - 260_000,
+      },
+    ],
     discoveredWeComGroups: [
       {
+        botProfileId: "automation-news-bot",
         chatId: "wr-preview-group",
         alias: "每日资讯群",
         discoveredAt: now - 240_000,
         lastSeenAt: now - 18_000,
       },
       {
+        botProfileId: "automation-news-bot",
         chatId: "wr-product-watch",
         alias: "产品观察群",
         discoveredAt: now - 180_000,
         lastSeenAt: now - 45_000,
       },
       {
+        botProfileId: "automation-ops-bot",
         chatId: "wr-unnamed-preview-group",
         discoveredAt: now - 120_000,
         lastSeenAt: now - 72_000,
@@ -128,6 +155,7 @@ const previewSnapshot: AppSnapshot = {
         allowedMcpServers: ["web", "mail"],
         prompt: "读取配置中的行业网页，只整理新出现且与业务相关的信息。",
         emailRecipients: ["owner@example.com"],
+        wecomBotProfileId: "automation-news-bot",
         wecomTargetIds: ["wr-preview-group"],
         allowedWecomUserIds: ["developer"],
         timeoutMinutes: 20,
@@ -163,6 +191,7 @@ const previewSnapshot: AppSnapshot = {
         },
         deliveries: [
           {
+            botProfileId: "automation-news-bot",
             targetId: "wr-preview-group",
             status: "sent",
             attempts: 1,
@@ -338,6 +367,14 @@ export function installDevelopmentPreview(): void {
     selectClaudeExecutable: async () => snapshot.claudeExecutable,
     autoDetectClaudeExecutable: async () => snapshot.claudeExecutable,
     updateWeComConfig: async (request) => {
+      if (
+        request.botId.trim() &&
+        snapshot.automation.wecomBots.some(
+          (bot) => bot.botId === request.botId.trim(),
+        )
+      ) {
+        throw new Error("这个 Bot ID 已用于自动化推送机器人。");
+      }
       snapshot.wecom = {
         enabled: request.enabled,
         configured: Boolean(
@@ -354,6 +391,14 @@ export function installDevelopmentPreview(): void {
       return { ...snapshot.wecom };
     },
     upsertAutomationJob: async (request) => {
+      if (
+        request.wecomTargetIds.length > 0 &&
+        !snapshot.automation.wecomBots.some(
+          (bot) => bot.id === request.wecomBotProfileId,
+        )
+      ) {
+        throw new Error("请选择有效的自动化推送机器人。");
+      }
       const existing = request.id
         ? snapshot.automation.jobs.find((job) => job.id === request.id)
         : undefined;
@@ -371,9 +416,70 @@ export function installDevelopmentPreview(): void {
       publishAutomation();
       return structuredClone(job);
     },
-    updateAutomationWeComGroupAlias: async ({ chatId, alias }) => {
+    upsertAutomationWeComBot: async (request) => {
+      const existing = request.id
+        ? snapshot.automation.wecomBots.find((bot) => bot.id === request.id)
+        : undefined;
+      if (existing && existing.botId !== request.botId.trim()) {
+        throw new Error("已保存机器人的 Bot ID 不能修改。");
+      }
+      if (
+        request.botId.trim() === snapshot.wecom.botId ||
+        snapshot.automation.wecomBots.some(
+          (bot) => bot.id !== existing?.id && bot.botId === request.botId.trim(),
+        )
+      ) {
+        throw new Error("这个 Bot ID 已被其他机器人使用。");
+      }
+      const timestamp = Date.now();
+      const bot = {
+        id: existing?.id ?? crypto.randomUUID(),
+        name: request.name.trim(),
+        enabled: request.enabled,
+        configured: Boolean(
+          request.botId.trim() && (request.secret?.trim() || existing?.hasSecret),
+        ),
+        hasSecret: Boolean(request.secret?.trim() || existing?.hasSecret),
+        botId: request.botId.trim(),
+        status: request.enabled ? ("connected" as const) : ("disabled" as const),
+        createdAt: existing?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+      };
+      snapshot.automation.wecomBots = [
+        ...snapshot.automation.wecomBots.filter(
+          (candidate) => candidate.id !== bot.id,
+        ),
+        bot,
+      ];
+      publishAutomation();
+      return structuredClone(bot);
+    },
+    deleteAutomationWeComBot: async (botProfileId) => {
+      if (
+        snapshot.automation.jobs.some(
+          (job) => job.wecomBotProfileId === botProfileId,
+        )
+      ) {
+        throw new Error("仍有自动化任务使用这个机器人。");
+      }
+      snapshot.automation.wecomBots = snapshot.automation.wecomBots.filter(
+        (bot) => bot.id !== botProfileId,
+      );
+      snapshot.automation.discoveredWeComGroups =
+        snapshot.automation.discoveredWeComGroups.filter(
+          (group) => group.botProfileId !== botProfileId,
+        );
+      publishAutomation();
+    },
+    updateAutomationWeComGroupAlias: async ({
+      botProfileId,
+      chatId,
+      alias,
+    }) => {
       const group = snapshot.automation.discoveredWeComGroups.find(
-        (candidate) => candidate.chatId === chatId,
+        (candidate) =>
+          candidate.botProfileId === botProfileId &&
+          candidate.chatId === chatId,
       );
       if (!group) {
         throw new Error("Preview WeCom group does not exist.");
@@ -409,6 +515,7 @@ export function installDevelopmentPreview(): void {
         createdAt: Date.now(),
         startedAt: Date.now(),
         deliveries: job.wecomTargetIds.map((targetId) => ({
+          botProfileId: job.wecomBotProfileId,
           targetId,
           status: "pending",
           attempts: 0,

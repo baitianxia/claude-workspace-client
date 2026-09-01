@@ -17,10 +17,21 @@ import type {
   DiscoveredWeComGroup,
 } from "../shared/contracts";
 
+export interface StoredAutomationWeComBot {
+  id: string;
+  name: string;
+  enabled: boolean;
+  botId: string;
+  encryptedSecret: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface AutomationStoreData {
   version: 1;
   jobs: AutomationJobRecord[];
   runs: AutomationRunRecord[];
+  wecomBots: StoredAutomationWeComBot[];
   discoveredWeComGroups: DiscoveredWeComGroup[];
 }
 
@@ -28,9 +39,11 @@ const EMPTY_STORE: AutomationStoreData = {
   version: 1,
   jobs: [],
   runs: [],
+  wecomBots: [],
   discoveredWeComGroups: [],
 };
 const MAX_STORED_RUNS = 500;
+const MAX_AUTOMATION_WECOM_BOTS = 20;
 const MAX_DISCOVERED_WECOM_GROUPS = 200;
 const WECOM_GROUP_LAST_SEEN_WRITE_INTERVAL_MILLISECONDS = 60_000;
 
@@ -90,6 +103,7 @@ function normalizeJob(value: unknown): AutomationJobRecord | null {
     !isStringArray(candidate.allowedMcpServers) ||
     typeof candidate.prompt !== "string" ||
     !isStringArray(candidate.emailRecipients) ||
+    !optionalString(candidate.wecomBotProfileId) ||
     !isStringArray(candidate.wecomTargetIds) ||
     !isStringArray(candidate.allowedWecomUserIds) ||
     typeof candidate.timeoutMinutes !== "number" ||
@@ -108,6 +122,7 @@ function normalizeDelivery(value: unknown): AutomationDeliveryRecord | null {
   }
   const candidate = value as Partial<AutomationDeliveryRecord>;
   if (
+    !optionalString(candidate.botProfileId) ||
     typeof candidate.targetId !== "string" ||
     typeof candidate.status !== "string" ||
     !DELIVERY_STATUSES.has(
@@ -206,6 +221,7 @@ function normalizeDiscoveredWeComGroup(
   }
   const candidate = value as Partial<DiscoveredWeComGroup>;
   if (
+    !optionalString(candidate.botProfileId) ||
     typeof candidate.chatId !== "string" ||
     !candidate.chatId ||
     candidate.chatId !== candidate.chatId.trim() ||
@@ -227,11 +243,46 @@ function normalizeDiscoveredWeComGroup(
   return clone(candidate as DiscoveredWeComGroup);
 }
 
+function normalizeStoredAutomationWeComBot(
+  value: unknown,
+): StoredAutomationWeComBot | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const candidate = value as Partial<StoredAutomationWeComBot>;
+  if (
+    typeof candidate.id !== "string" ||
+    !candidate.id ||
+    [...candidate.id].length > 200 ||
+    /\p{Cc}/u.test(candidate.id) ||
+    typeof candidate.name !== "string" ||
+    !candidate.name.trim() ||
+    candidate.name !== candidate.name.trim() ||
+    [...candidate.name].length > 80 ||
+    /\p{Cc}/u.test(candidate.name) ||
+    typeof candidate.enabled !== "boolean" ||
+    typeof candidate.botId !== "string" ||
+    !candidate.botId ||
+    candidate.botId !== candidate.botId.trim() ||
+    /\s/u.test(candidate.botId) ||
+    [...candidate.botId].length > 200 ||
+    typeof candidate.encryptedSecret !== "string" ||
+    typeof candidate.createdAt !== "number" ||
+    !Number.isFinite(candidate.createdAt) ||
+    typeof candidate.updatedAt !== "number" ||
+    !Number.isFinite(candidate.updatedAt)
+  ) {
+    return null;
+  }
+  return clone(candidate as StoredAutomationWeComBot);
+}
+
 function parseStore(raw: string): AutomationStoreData {
   const parsed = JSON.parse(raw) as {
     version?: unknown;
     jobs?: unknown;
     runs?: unknown;
+    wecomBots?: unknown;
     discoveredWeComGroups?: unknown;
   };
   if (
@@ -243,6 +294,12 @@ function parseStore(raw: string): AutomationStoreData {
   }
   const jobs = parsed.jobs.map(normalizeJob);
   const runs = parsed.runs.map(normalizeRun);
+  const wecomBots =
+    parsed.wecomBots === undefined
+      ? []
+      : Array.isArray(parsed.wecomBots)
+        ? parsed.wecomBots.map(normalizeStoredAutomationWeComBot)
+        : null;
   const discoveredWeComGroups =
     parsed.discoveredWeComGroups === undefined
       ? []
@@ -252,6 +309,8 @@ function parseStore(raw: string): AutomationStoreData {
   if (
     jobs.some((entry) => entry === null) ||
     runs.some((entry) => entry === null) ||
+    wecomBots === null ||
+    wecomBots.some((entry) => entry === null) ||
     discoveredWeComGroups === null ||
     discoveredWeComGroups.some((entry) => entry === null)
   ) {
@@ -261,6 +320,9 @@ function parseStore(raw: string): AutomationStoreData {
     version: 1,
     jobs: jobs as AutomationJobRecord[],
     runs: (runs as AutomationRunRecord[]).slice(-MAX_STORED_RUNS),
+    wecomBots: (wecomBots as StoredAutomationWeComBot[])
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"))
+      .slice(0, MAX_AUTOMATION_WECOM_BOTS),
     discoveredWeComGroups: (
       discoveredWeComGroups as DiscoveredWeComGroup[]
     )
@@ -292,6 +354,77 @@ export class AutomationStore {
     this.initialized = true;
   }
 
+  listStoredWeComBots(): StoredAutomationWeComBot[] {
+    this.assertInitialized();
+    return this.data.wecomBots
+      .map((bot) => clone(bot))
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  }
+
+  getStoredWeComBot(
+    botProfileId: string,
+  ): StoredAutomationWeComBot | undefined {
+    this.assertInitialized();
+    const bot = this.data.wecomBots.find(
+      (candidate) => candidate.id === botProfileId,
+    );
+    return bot ? clone(bot) : undefined;
+  }
+
+  async putStoredWeComBot(bot: StoredAutomationWeComBot): Promise<void> {
+    this.assertInitialized();
+    const index = this.data.wecomBots.findIndex(
+      (candidate) => candidate.id === bot.id,
+    );
+    if (index < 0) {
+      if (this.data.wecomBots.length >= MAX_AUTOMATION_WECOM_BOTS) {
+        throw new Error(`自动化机器人最多可以配置 ${MAX_AUTOMATION_WECOM_BOTS} 个。`);
+      }
+      this.data.wecomBots.push(clone(bot));
+    } else {
+      this.data.wecomBots[index] = clone(bot);
+    }
+    await this.persist();
+  }
+
+  async removeStoredWeComBot(botProfileId: string): Promise<void> {
+    this.assertInitialized();
+    const next = this.data.wecomBots.filter(
+      (candidate) => candidate.id !== botProfileId,
+    );
+    if (next.length === this.data.wecomBots.length) {
+      throw new Error("自动化机器人不存在或已经删除。");
+    }
+    this.data.wecomBots = next;
+    this.data.discoveredWeComGroups = this.data.discoveredWeComGroups.filter(
+      (group) => group.botProfileId !== botProfileId,
+    );
+    await this.persist();
+  }
+
+  async disableJobsWithoutWeComBotProfile(
+    now = Date.now(),
+  ): Promise<boolean> {
+    this.assertInitialized();
+    const botIds = new Set(this.data.wecomBots.map((bot) => bot.id));
+    let changed = false;
+    for (const job of this.data.jobs) {
+      if (
+        job.enabled &&
+        job.wecomTargetIds.length > 0 &&
+        (!job.wecomBotProfileId || !botIds.has(job.wecomBotProfileId))
+      ) {
+        job.enabled = false;
+        job.updatedAt = now;
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.persist();
+    }
+    return changed;
+  }
+
   listDiscoveredWeComGroups(): DiscoveredWeComGroup[] {
     this.assertInitialized();
     return this.data.discoveredWeComGroups
@@ -307,12 +440,17 @@ export class AutomationStore {
   }
 
   async touchDiscoveredWeComGroup(
+    botProfileId: string,
     chatId: string,
     now = Date.now(),
   ): Promise<boolean> {
     this.assertInitialized();
     const normalizedChatId = chatId.trim();
+    const normalizedBotProfileId = botProfileId.trim();
     if (
+      !normalizedBotProfileId ||
+      /\p{Cc}/u.test(normalizedBotProfileId) ||
+      [...normalizedBotProfileId].length > 200 ||
       !normalizedChatId ||
       /\s/u.test(normalizedChatId) ||
       [...normalizedChatId].length > 200 ||
@@ -321,7 +459,9 @@ export class AutomationStore {
       throw new Error("企业微信群 ID 格式无效。");
     }
     const existing = this.data.discoveredWeComGroups.find(
-      (group) => group.chatId === normalizedChatId,
+      (group) =>
+        group.botProfileId === normalizedBotProfileId &&
+        group.chatId === normalizedChatId,
     );
     if (existing) {
       if (
@@ -336,6 +476,7 @@ export class AutomationStore {
       return true;
     }
     const group: DiscoveredWeComGroup = {
+      botProfileId: normalizedBotProfileId,
       chatId: normalizedChatId,
       discoveredAt: now,
       lastSeenAt: now,
@@ -349,12 +490,14 @@ export class AutomationStore {
   }
 
   async updateDiscoveredWeComGroupAlias(
+    botProfileId: string,
     chatId: string,
     alias: string,
   ): Promise<DiscoveredWeComGroup> {
     this.assertInitialized();
     const group = this.data.discoveredWeComGroups.find(
-      (candidate) => candidate.chatId === chatId,
+      (candidate) =>
+        candidate.botProfileId === botProfileId && candidate.chatId === chatId,
     );
     if (!group) {
       throw new Error("这个企业微信群尚未被客户端发现。");

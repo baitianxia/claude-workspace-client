@@ -27,6 +27,7 @@ function job(): AutomationJobRecord {
     allowedMcpServers: ["web", "mail"],
     prompt: "读取网页并整理。",
     emailRecipients: ["owner@example.com"],
+    wecomBotProfileId: "bot-profile-one",
     wecomTargetIds: ["group-one"],
     allowedWecomUserIds: ["zhangsan"],
     timeoutMinutes: 20,
@@ -50,6 +51,7 @@ function run(status: AutomationRunRecord["status"] = "running"): AutomationRunRe
     scheduledFor: 0,
     deliveries: [
       {
+        botProfileId: "bot-profile-one",
         targetId: "group-one",
         status: "sending",
         attempts: 0,
@@ -74,8 +76,16 @@ describe("AutomationStore", () => {
     await store.initialize();
     await store.putJob(job());
     await store.addRun(run("succeeded"));
-    await store.touchDiscoveredWeComGroup("group-one", 4);
-    await store.updateDiscoveredWeComGroupAlias("group-one", "每日资讯群");
+    await store.touchDiscoveredWeComGroup(
+      "bot-profile-one",
+      "group-one",
+      4,
+    );
+    await store.updateDiscoveredWeComGroupAlias(
+      "bot-profile-one",
+      "group-one",
+      "每日资讯群",
+    );
 
     const reloaded = new AutomationStore(storePath);
     await reloaded.initialize();
@@ -84,6 +94,7 @@ describe("AutomationStore", () => {
     expect(reloaded.listRuns()).toEqual([run("succeeded")]);
     expect(reloaded.listDiscoveredWeComGroups()).toEqual([
       {
+        botProfileId: "bot-profile-one",
         chatId: "group-one",
         alias: "每日资讯群",
         discoveredAt: 4,
@@ -115,19 +126,60 @@ describe("AutomationStore", () => {
     const store = new AutomationStore(join(root, "automation.json"));
     await store.initialize();
 
-    await expect(store.touchDiscoveredWeComGroup("group-one", 1)).resolves.toBe(
-      true,
-    );
     await expect(
-      store.touchDiscoveredWeComGroup("group-one", 30_000),
+      store.touchDiscoveredWeComGroup("bot-profile-one", "group-one", 1),
+    ).resolves.toBe(true);
+    await expect(
+      store.touchDiscoveredWeComGroup(
+        "bot-profile-one",
+        "group-one",
+        30_000,
+      ),
     ).resolves.toBe(false);
     await expect(
-      store.touchDiscoveredWeComGroup("group-one", 60_001),
+      store.touchDiscoveredWeComGroup(
+        "bot-profile-one",
+        "group-one",
+        60_001,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      store.touchDiscoveredWeComGroup(
+        "bot-profile-two",
+        "group-one",
+        60_002,
+      ),
     ).resolves.toBe(true);
 
-    expect(store.listDiscoveredWeComGroups()[0]).toMatchObject({
-      discoveredAt: 1,
-      lastSeenAt: 60_001,
+    expect(store.listDiscoveredWeComGroups()).toEqual([
+      expect.objectContaining({
+        botProfileId: "bot-profile-two",
+        discoveredAt: 60_002,
+        lastSeenAt: 60_002,
+      }),
+      expect.objectContaining({
+        botProfileId: "bot-profile-one",
+        discoveredAt: 1,
+        lastSeenAt: 60_001,
+      }),
+    ]);
+  });
+
+  it("disables legacy enabled delivery jobs that have no valid bot profile", async () => {
+    const root = await temporaryDirectory();
+    const store = new AutomationStore(join(root, "automation.json"));
+    await store.initialize();
+    const legacy = job();
+    delete legacy.wecomBotProfileId;
+    await store.putJob(legacy);
+
+    await expect(store.disableJobsWithoutWeComBotProfile(100)).resolves.toBe(
+      true,
+    );
+
+    expect(store.getJob(legacy.id)).toMatchObject({
+      enabled: false,
+      updatedAt: 100,
     });
   });
 

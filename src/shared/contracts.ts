@@ -70,6 +70,8 @@ export interface AutomationJobRecord {
   allowedMcpServers: string[];
   prompt: string;
   emailRecipients: string[];
+  /** Automation bot profile used for all WeCom targets on this job. */
+  wecomBotProfileId?: string;
   wecomTargetIds: string[];
   /** User IDs allowed to start follow-up runs; "*" explicitly allows the group. */
   allowedWecomUserIds: string[];
@@ -98,6 +100,8 @@ export type AutomationDeliveryStatus =
   | "skipped";
 
 export interface AutomationDeliveryRecord {
+  /** Missing only on legacy records created before automation bot profiles. */
+  botProfileId?: string;
   targetId: string;
   status: AutomationDeliveryStatus;
   attempts: number;
@@ -154,15 +158,34 @@ export interface AutomationRunRecord {
 }
 
 export interface DiscoveredWeComGroup {
+  /** Missing only on legacy records discovered through the management bot. */
+  botProfileId?: string;
   chatId: string;
   alias?: string;
   discoveredAt: number;
   lastSeenAt: number;
 }
 
+export interface AutomationWeComBotProfile {
+  id: string;
+  name: string;
+  enabled: boolean;
+  configured: boolean;
+  hasSecret: boolean;
+  botId: string;
+  status: WeComConnectionStatus;
+  error?: string;
+  lastInboundAt?: number;
+  lastInboundStatus?: WeComInboundStatus;
+  lastInboundDetail?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface AutomationSnapshot {
   jobs: AutomationJobRecord[];
   runs: AutomationRunRecord[];
+  wecomBots: AutomationWeComBotProfile[];
   discoveredWeComGroups: DiscoveredWeComGroup[];
   runningJobIds: string[];
   schedulerActive: boolean;
@@ -291,13 +314,24 @@ export interface UpsertAutomationJobRequest {
   allowedMcpServers: string[];
   prompt: string;
   emailRecipients: string[];
+  wecomBotProfileId?: string;
   wecomTargetIds: string[];
   allowedWecomUserIds: string[];
   timeoutMinutes: number;
   maxTurns: number;
 }
 
+export interface UpsertAutomationWeComBotRequest {
+  id?: string;
+  name: string;
+  enabled: boolean;
+  botId: string;
+  /** Empty or omitted keeps the previously saved Secret. */
+  secret?: string;
+}
+
 export interface UpdateAutomationWeComGroupAliasRequest {
+  botProfileId: string;
   chatId: string;
   /** Empty text clears the locally assigned alias. */
   alias: string;
@@ -325,6 +359,10 @@ export interface DesktopApi {
   upsertAutomationJob(
     request: UpsertAutomationJobRequest,
   ): Promise<AutomationJobRecord>;
+  upsertAutomationWeComBot(
+    request: UpsertAutomationWeComBotRequest,
+  ): Promise<AutomationWeComBotProfile>;
+  deleteAutomationWeComBot(botProfileId: string): Promise<void>;
   updateAutomationWeComGroupAlias(
     request: UpdateAutomationWeComGroupAliasRequest,
   ): Promise<DiscoveredWeComGroup>;

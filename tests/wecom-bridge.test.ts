@@ -738,7 +738,7 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
-  it("routes group messages and outbound reports through the shared bot connection", async () => {
+  it("keeps group automation traffic out of the Claude Code management bot", async () => {
     const manager = new SessionManager(
       () => "C:\\Tools\\claude.exe",
       vi.fn() as unknown as PtySpawner,
@@ -751,11 +751,6 @@ describe("WeComBridge", () => {
       new RemoteReplyRouter(),
       () => client as unknown as WeComClient,
     );
-    const businessHandler = vi.fn().mockResolvedValue({
-      status: "accepted" as const,
-      message: "已触发任务。",
-    });
-    bridge.setBusinessMessageHandler(businessHandler);
     bridge.configure({
       enabled: true,
       botId: "bot-id",
@@ -774,34 +769,15 @@ describe("WeComBridge", () => {
     );
     client.emit("message", frame);
 
-    await vi.waitFor(() => expect(businessHandler).toHaveBeenCalledTimes(1));
-    expect(businessHandler).toHaveBeenCalledWith({
-      messageId: "group-message-1",
-      chatId: "group-one",
-      userId: "lisi",
-      text: "/run 每日报告",
-      quoteText: "[RPT-ABCDEF1234] 上次报告",
-    });
-    await vi.waitFor(() => expect(client.replies).toEqual(["已触发任务。"]));
+    await vi.waitFor(() =>
+      expect(bridge.getState().lastInboundStatus).toBe("ignored"),
+    );
     expect(bridge.getState()).toMatchObject({
-      lastInboundStatus: "routed",
-      lastInboundDetail: "已触发任务。",
+      lastInboundStatus: "ignored",
+      lastInboundDetail: expect.stringContaining("自动化推送机器人"),
     });
-
-    client.emit("message", frame);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(businessHandler).toHaveBeenCalledTimes(1);
-
-    await bridge.sendMarkdown("group-one", "# [RPT-ABCDEF1234]\n报告正文");
-    expect(client.sent).toEqual([
-      {
-        chatId: "group-one",
-        body: {
-          msgtype: "markdown",
-          markdown: { content: "# [RPT-ABCDEF1234]\n报告正文" },
-        },
-      },
-    ]);
+    expect(client.replies).toEqual([]);
+    expect(client.sent).toEqual([]);
 
     bridge.dispose();
   });

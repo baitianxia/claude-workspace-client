@@ -7,10 +7,12 @@ import type {
   AutomationRunRecord,
   AutomationRunTrigger,
   AutomationSnapshot,
+  AutomationWeComBotProfile,
   DiscoveredWeComGroup,
   ProjectRecord,
   UpdateAutomationWeComGroupAliasRequest,
   UpsertAutomationJobRequest,
+  UpsertAutomationWeComBotRequest,
 } from "../shared/contracts";
 import { AutomationStore } from "./automation-store";
 import {
@@ -20,10 +22,10 @@ import {
 import { parseCronSchedule } from "./cron-schedule";
 import { ScheduledJobService } from "./scheduled-job-service";
 import type {
-  WeComBusinessMessage,
-  WeComBusinessMessageHandler,
-  WeComBusinessMessageResult,
-} from "./wecom-bridge";
+  AutomationWeComMessage,
+  AutomationWeComMessageHandler,
+  AutomationWeComMessageResult,
+} from "./automation-wecom-bot-manager";
 
 const DELIVERY_RETRY_INTERVAL_MILLISECONDS = 30_000;
 const MAX_DELIVERY_ATTEMPTS = 5;
@@ -42,11 +44,24 @@ export interface AutomationRunner {
 }
 
 export interface AutomationWeComGateway {
-  setBusinessMessageHandler(handler: WeComBusinessMessageHandler | null): void;
-  sendMarkdown(targetId: string, content: string): Promise<void>;
-  getState(): { status: string };
+  initialize?(): Promise<void>;
+  listBots(): AutomationWeComBotProfile[];
+  upsertBot(
+    request: UpsertAutomationWeComBotRequest,
+    now?: number,
+  ): Promise<AutomationWeComBotProfile>;
+  deleteBot(botProfileId: string): Promise<void>;
+  setBusinessMessageHandler(
+    handler: AutomationWeComMessageHandler | null,
+  ): void;
+  sendMarkdown(
+    botProfileId: string,
+    targetId: string,
+    content: string,
+  ): Promise<void>;
   on(event: "stateChanged", listener: () => void): unknown;
   off(event: "stateChanged", listener: () => void): unknown;
+  dispose(): void;
 }
 
 interface RunContext {
@@ -56,6 +71,7 @@ interface RunContext {
   requestedBy?: string;
   requestText?: string;
   quoteText?: string;
+  deliveryBotProfileId?: string;
   deliveryTargetIds?: string[];
   prompt?: string;
 }
@@ -165,8 +181,15 @@ function validateMcpConfigPath(value: unknown): string {
   return path;
 }
 
-function deliveryRecords(targetIds: string[]): AutomationDeliveryRecord[] {
+function deliveryRecords(
+  botProfileId: string | undefined,
+  targetIds: string[],
+): AutomationDeliveryRecord[] {
+  if (targetIds.length > 0 && !botProfileId) {
+    throw new Error("企业微信投递任务必须选择自动化机器人。");
+  }
   return targetIds.map((targetId) => ({
+    botProfileId,
     targetId,
     status: "pending",
     attempts: 0,
@@ -195,7 +218,7 @@ function formatReportMessage(run: AutomationRunRecord): string {
 
 function followUpPrompt(
   job: AutomationJobRecord,
-  message: WeComBusinessMessage,
+  message: AutomationWeComMessage,
   sourceRun?: AutomationRunRecord,
 ): string {
   const previous = sourceRun?.result
@@ -238,7 +261,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     private readonly getProject: (
       projectId: string,
     ) => ProjectRecord | undefined,
-    private readonly wecomBridge: AutomationWeComGateway,
+    private readonly wecomBots: AutomationWeComGateway,
     private readonly now: () => number = Date.now,
   ) {
     super();
@@ -256,10 +279,12 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     }
     await this.runner.initialize?.();
     await this.store.initialize();
+    this.wecomBots.setBusinessMessageHandler(this.handleWeComMessage);
+    await this.wecomBots.initialize?.();
+    await this.store.disableJobsWithoutWeComBotProfile(this.now());
     await this.store.recoverInterruptedRuns(this.now());
     this.initialized = true;
-    this.wecomBridge.setBusinessMessageHandler(this.handleWeComMessage);
-    this.wecomBridge.on("stateChanged", this.handleWeComStateChanged);
+    this.wecomBots.on("stateChanged", this.handleWeComStateChanged);
     this.scheduler.start();
     this.deliveryTimer = setInterval(
       () =>
@@ -277,10 +302,19 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
   }
 
   getSnapshot(): AutomationSnapshot {
+    const wecomBots = this.wecomBots.listBots();
+    const botProfileIds = new Set(wecomBots.map((bot) => bot.id));
     return {
       jobs: this.store.listJobs(),
       runs: this.store.listRuns(),
-      discoveredWeComGroups: this.store.listDiscoveredWeComGroups(),
+      wecomBots,
+      discoveredWeComGroups: this.store
+        .listDiscoveredWeComGroups()
+        .filter(
+          (group) =>
+            Boolean(group.botProfileId) &&
+            botProfileIds.has(group.botProfileId ?? ""),
+        ),
       runningJobIds: [...this.runningJobs.keys()],
       schedulerActive: this.scheduler.isActive(),
       ...(this.scheduler.getLastCheckedAt() === undefined
@@ -326,6 +360,27 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     const schedule = parseCronSchedule(
       requireText(request.schedule, "定时表达式", 100),
     ).expression;
+    const wecomTargetIds = requireStringList(
+      request.wecomTargetIds,
+      "企业微信投递目标",
+      {
+        maximumItems: 100,
+        maximumLength: 200,
+        validate: (value) => value !== "*" && validWeComIdentifier(value),
+        allowEmpty: true,
+      },
+    );
+    const wecomBotProfileId = request.wecomBotProfileId?.trim();
+    if (wecomTargetIds.length > 0) {
+      if (!wecomBotProfileId) {
+        throw new Error("配置企业微信群后必须选择自动化发送机器人。");
+      }
+      if (!this.wecomBots.listBots().some((bot) => bot.id === wecomBotProfileId)) {
+        throw new Error("选择的自动化机器人不存在或已经删除。");
+      }
+    } else if (wecomBotProfileId) {
+      throw new Error("尚未配置企业微信群，不需要选择自动化发送机器人。");
+    }
     const now = this.now();
     const job: AutomationJobRecord = {
       id,
@@ -354,16 +409,8 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
           allowEmpty: true,
         },
       ),
-      wecomTargetIds: requireStringList(
-        request.wecomTargetIds,
-        "企业微信投递目标",
-        {
-          maximumItems: 100,
-          maximumLength: 200,
-          validate: (value) => value !== "*" && validWeComIdentifier(value),
-          allowEmpty: true,
-        },
-      ),
+      ...(wecomBotProfileId ? { wecomBotProfileId } : {}),
+      wecomTargetIds,
       allowedWecomUserIds: requireStringList(
         request.allowedWecomUserIds,
         "企业微信交互用户",
@@ -389,11 +436,32 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     return job;
   }
 
+  async upsertWeComBot(
+    request: UpsertAutomationWeComBotRequest,
+  ): Promise<AutomationWeComBotProfile> {
+    const bot = await this.wecomBots.upsertBot(request, this.now());
+    this.emitStateChanged();
+    return bot;
+  }
+
+  async deleteWeComBot(botProfileId: string): Promise<void> {
+    await this.wecomBots.deleteBot(botProfileId);
+    this.emitStateChanged();
+  }
+
   async updateWeComGroupAlias(
     request: UpdateAutomationWeComGroupAliasRequest,
   ): Promise<DiscoveredWeComGroup> {
     if (!request || typeof request !== "object") {
       throw new Error("企业微信群名称请求无效。");
+    }
+    const botProfileId = requireText(
+      request.botProfileId,
+      "自动化机器人配置 ID",
+      200,
+    );
+    if (!this.wecomBots.listBots().some((bot) => bot.id === botProfileId)) {
+      throw new Error("自动化机器人不存在或已经删除。");
     }
     const chatId = requireText(request.chatId, "企业微信群 ID", 200);
     if (chatId === "*" || !validWeComIdentifier(chatId)) {
@@ -407,6 +475,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
       throw new Error("群名称格式无效。");
     }
     const group = await this.store.updateDiscoveredWeComGroupAlias(
+      botProfileId,
       chatId,
       alias,
     );
@@ -458,6 +527,20 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     if (this.runningJobs.has(job.id)) {
       throw new Error("这个自动化任务已有一次执行正在运行。");
     }
+    const availableBotProfileIds = new Set(
+      this.wecomBots.listBots().map((bot) => bot.id),
+    );
+    if (
+      run.deliveries.some(
+        (delivery) =>
+          !delivery.botProfileId ||
+          !availableBotProfileIds.has(delivery.botProfileId),
+      )
+    ) {
+      throw new Error(
+        "这次执行原先绑定的自动化机器人已不存在，不能用其他身份重试。",
+      );
+    }
     run.status = "queued";
     run.attempt += 1;
     delete run.startedAt;
@@ -468,6 +551,9 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     delete run.error;
     delete run.diagnostic;
     run.deliveries = run.deliveries.map((delivery) => ({
+      ...(delivery.botProfileId
+        ? { botProfileId: delivery.botProfileId }
+        : {}),
       targetId: delivery.targetId,
       status: "pending",
       attempts: 0,
@@ -522,13 +608,14 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
       clearInterval(this.deliveryTimer);
       this.deliveryTimer = null;
     }
-    this.wecomBridge.off("stateChanged", this.handleWeComStateChanged);
-    this.wecomBridge.setBusinessMessageHandler(null);
+    this.wecomBots.off("stateChanged", this.handleWeComStateChanged);
+    this.wecomBots.setBusinessMessageHandler(null);
     await this.scheduler.settle();
     this.runner.dispose();
     while (this.backgroundTasks.size > 0) {
       await Promise.allSettled([...this.backgroundTasks]);
     }
+    this.wecomBots.dispose();
   }
 
   private requireJob(jobId: string): AutomationJobRecord {
@@ -538,6 +625,14 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     }
     if (!this.getProject(job.projectId)) {
       throw new Error("自动化任务关联的工程已经被移除。");
+    }
+    if (job.wecomTargetIds.length > 0) {
+      if (!job.wecomBotProfileId) {
+        throw new Error("自动化任务尚未选择企业微信发送机器人。");
+      }
+      if (!this.wecomBots.listBots().some((bot) => bot.id === job.wecomBotProfileId)) {
+        throw new Error("自动化任务选择的企业微信机器人不存在或已经删除。");
+      }
     }
     return job;
   }
@@ -618,6 +713,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
       ...(context.requestText ? { requestText: context.requestText } : {}),
       ...(context.quoteText ? { quoteText: context.quoteText } : {}),
       deliveries: deliveryRecords(
+        context.deliveryBotProfileId ?? job.wecomBotProfileId,
         context.deliveryTargetIds ?? job.wecomTargetIds,
       ),
     };
@@ -733,6 +829,10 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     return followUpPrompt(
       job,
       {
+        botProfileId:
+          run.deliveries[0]?.botProfileId ??
+          job.wecomBotProfileId ??
+          "legacy-missing-bot-profile",
         messageId: run.triggerMessageId ?? "retry",
         chatId: run.deliveries[0]?.targetId ?? "unknown",
         userId: run.requestedBy ?? "unknown",
@@ -744,10 +844,14 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
   }
 
   private readonly handleWeComMessage = async (
-    message: WeComBusinessMessage,
-  ): Promise<WeComBusinessMessageResult> => {
+    message: AutomationWeComMessage,
+  ): Promise<AutomationWeComMessageResult> => {
     if (
-      await this.store.touchDiscoveredWeComGroup(message.chatId, this.now())
+      await this.store.touchDiscoveredWeComGroup(
+        message.botProfileId,
+        message.chatId,
+        this.now(),
+      )
     ) {
       this.emitStateChanged();
     }
@@ -757,7 +861,13 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
         message: `本群 chatid：\`${message.chatId}\`。客户端已自动记录，可在自动化任务中直接选择。`,
       };
     }
-    const duplicate = this.store.findRunByTriggerMessageId(message.messageId);
+    const duplicate = this.store.listRuns(500).find(
+      (run) =>
+        run.triggerMessageId === message.messageId &&
+        run.deliveries.some(
+          (delivery) => delivery.botProfileId === message.botProfileId,
+        ),
+    );
     if (duplicate) {
       return {
         status: "accepted",
@@ -782,6 +892,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
       .filter(
         (job) =>
           job.enabled &&
+          job.wecomBotProfileId === message.botProfileId &&
           job.wecomTargetIds.includes(message.chatId) &&
           (job.allowedWecomUserIds.includes("*") ||
             job.allowedWecomUserIds.includes(message.userId)),
@@ -790,7 +901,9 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
     if (sourceRun) {
       if (
         !sourceRun.deliveries.some(
-          (delivery) => delivery.targetId === message.chatId,
+          (delivery) =>
+            delivery.botProfileId === message.botProfileId &&
+            delivery.targetId === message.chatId,
         )
       ) {
         return {
@@ -842,6 +955,7 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
       requestedBy: message.userId,
       requestText: message.text.slice(0, 10_000),
       quoteText: message.quoteText.slice(0, 10_000),
+      deliveryBotProfileId: message.botProfileId,
       deliveryTargetIds: [message.chatId],
       prompt: followUpPrompt(job, message, sourceRun),
     });
@@ -852,12 +966,11 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
   };
 
   private readonly handleWeComStateChanged = () => {
-    if (this.wecomBridge.getState().status === "connected") {
-      this.runInBackground(
-        this.flushPendingDeliveries(),
-        "flushing pending WeCom deliveries after reconnect",
-      );
-    }
+    this.emitStateChanged();
+    this.runInBackground(
+      this.flushPendingDeliveries(),
+      "flushing pending WeCom deliveries after bot state change",
+    );
   };
 
   private async flushPendingDeliveries(): Promise<void> {
@@ -891,7 +1004,13 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
             await this.store.replaceRun(run);
             this.emitStateChanged();
             try {
-              await this.wecomBridge.sendMarkdown(
+              if (!delivery.botProfileId) {
+                throw new Error(
+                  "旧版投递记录没有绑定自动化机器人，已停止投递以避免使用错误身份。",
+                );
+              }
+              await this.wecomBots.sendMarkdown(
+                delivery.botProfileId,
                 delivery.targetId,
                 formatReportMessage(run),
               );
@@ -902,13 +1021,18 @@ export class AutomationService extends EventEmitter<AutomationServiceEvents> {
               delivery.status = "failed";
               delivery.attempts += 1;
               delivery.error = readableError(error).slice(0, 2_000);
-              delivery.nextAttemptAt =
-                this.now() +
-                Math.min(
-                  15 * 60_000,
-                  DELIVERY_RETRY_INTERVAL_MILLISECONDS *
-                    2 ** Math.max(0, delivery.attempts - 1),
-                );
+              if (!delivery.botProfileId) {
+                delivery.attempts = MAX_DELIVERY_ATTEMPTS;
+                delete delivery.nextAttemptAt;
+              } else {
+                delivery.nextAttemptAt =
+                  this.now() +
+                  Math.min(
+                    15 * 60_000,
+                    DELIVERY_RETRY_INTERVAL_MILLISECONDS *
+                      2 ** Math.max(0, delivery.attempts - 1),
+                  );
+              }
             }
             await this.store.replaceRun(run);
             this.emitStateChanged();

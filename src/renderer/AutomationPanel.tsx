@@ -8,10 +8,10 @@ import type {
   AutomationJobRecord,
   AutomationRunRecord,
   AutomationSnapshot,
+  AutomationWeComBotProfile,
   DiscoveredWeComGroup,
   ProjectRecord,
   UpsertAutomationJobRequest,
-  WeComState,
 } from "../shared/contracts";
 import {
   automationScheduleExpression,
@@ -24,9 +24,6 @@ import { projectDisplayName } from "./workspace-search";
 interface AutomationPanelProps {
   automation: AutomationSnapshot;
   projects: ProjectRecord[];
-  wecom: WeComState;
-  defaultWeComUserId?: string;
-  onConfigureWeCom(): void;
   onClose(): void;
 }
 
@@ -41,6 +38,7 @@ interface JobDraft {
   allowedMcpServers: string;
   prompt: string;
   emailRecipients: string;
+  wecomBotProfileId: string;
   wecomTargetIds: string;
   allowedWecomUserIds: string;
   timeoutMinutes: string;
@@ -49,6 +47,13 @@ interface JobDraft {
 }
 
 type DeliveryChannel = "wecom" | "email";
+
+interface BotDraft {
+  name: string;
+  enabled: boolean;
+  botId: string;
+  secret: string;
+}
 
 function readableError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
@@ -76,11 +81,11 @@ function discoveredGroupLabel(group: DiscoveredWeComGroup): string {
   return `${group.alias || "未命名群"} · ${shortWeComTargetId(group.chatId)}`;
 }
 
-function wecomConnectionLabel(wecom: WeComState): string {
-  if (!wecom.configured) {
+function wecomConnectionLabel(bot: AutomationWeComBotProfile): string {
+  if (!bot.configured) {
     return "尚未配置";
   }
-  switch (wecom.status) {
+  switch (bot.status) {
     case "connected":
       return "已连接";
     case "connecting":
@@ -111,7 +116,7 @@ function deliveryChannelsForJob(
 function draftForJob(
   job: AutomationJobRecord | undefined,
   projects: ProjectRecord[],
-  defaultWeComUserId?: string,
+  automationBots: AutomationWeComBotProfile[],
 ): JobDraft {
   const schedule = job?.schedule ?? "0 9 * * 1-5";
   const scheduleFields = automationScheduleFields(schedule);
@@ -127,6 +132,7 @@ function draftForJob(
         allowedMcpServers: listText(job.allowedMcpServers),
         prompt: job.prompt,
         emailRecipients: listText(job.emailRecipients),
+        wecomBotProfileId: job.wecomBotProfileId ?? "",
         wecomTargetIds: listText(job.wecomTargetIds),
         allowedWecomUserIds: listText(job.allowedWecomUserIds),
         timeoutMinutes: String(job.timeoutMinutes),
@@ -144,8 +150,9 @@ function draftForJob(
         allowedMcpServers: "web\nmail",
         prompt: "",
         emailRecipients: "",
+        wecomBotProfileId: automationBots[0]?.id ?? "",
         wecomTargetIds: "",
-        allowedWecomUserIds: defaultWeComUserId ?? "",
+        allowedWecomUserIds: "",
         timeoutMinutes: "20",
         maxTurns: "20",
         deliveryChannels: deliveryChannelsForJob(undefined),
@@ -229,38 +236,249 @@ function dateTime(value: number | undefined): string {
     : "—";
 }
 
+function botDraftFor(bot?: AutomationWeComBotProfile): BotDraft {
+  return {
+    name: bot?.name ?? "",
+    enabled: bot?.enabled ?? true,
+    botId: bot?.botId ?? "",
+    secret: "",
+  };
+}
+
+function AutomationWeComBotDialog({
+  bots,
+  onClose,
+  onSaved,
+}: {
+  bots: AutomationWeComBotProfile[];
+  onClose(): void;
+  onSaved(botProfileId: string): void;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(
+    bots[0]?.id ?? null,
+  );
+  const selected = bots.find((bot) => bot.id === selectedId);
+  const [draft, setDraft] = useState(() => botDraftFor(selected));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedId && !bots.some((bot) => bot.id === selectedId)) {
+      const next = bots[0];
+      setSelectedId(next?.id ?? null);
+      setDraft(botDraftFor(next));
+    }
+  }, [bots, selectedId]);
+
+  const choose = (bot?: AutomationWeComBotProfile) => {
+    setSelectedId(bot?.id ?? null);
+    setDraft(botDraftFor(bot));
+    setError(null);
+  };
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await window.claudeWorkspace.upsertAutomationWeComBot({
+        ...(selectedId ? { id: selectedId } : {}),
+        name: draft.name,
+        enabled: draft.enabled,
+        botId: draft.botId,
+        ...(draft.secret ? { secret: draft.secret } : {}),
+      });
+      setSelectedId(saved.id);
+      setDraft(botDraftFor(saved));
+      onSaved(saved.id);
+    } catch (saveError) {
+      setError(readableError(saveError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (
+      !selected ||
+      !window.confirm(
+        `确认删除自动化机器人“${selected.name}”？使用它的任务或未完成投递会阻止删除。`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await window.claudeWorkspace.deleteAutomationWeComBot(selected.id);
+    } catch (deleteError) {
+      setError(readableError(deleteError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="automation-bot-backdrop" role="presentation">
+      <section
+        className="automation-bot-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="automation-bot-dialog-title"
+      >
+        <header>
+          <div>
+            <span className="automation-eyebrow">AUTOMATION BOTS</span>
+            <h3 id="automation-bot-dialog-title">自动化推送机器人</h3>
+            <p>已启用的机器人会各自保持在线，可同时承担不同任务。</p>
+          </div>
+          <button type="button" aria-label="关闭机器人管理" onClick={onClose}>
+            ×
+          </button>
+        </header>
+
+        <div className="automation-bot-role-note">
+          这里的机器人只负责信息推送与群内任务触发，不是主界面的 Claude Code 管理机器人；两种角色不能复用同一个 Bot ID。
+        </div>
+
+        {error ? <div className="automation-error">{error}</div> : null}
+
+        <div className="automation-bot-layout">
+          <aside className="automation-bot-list">
+            <button
+              type="button"
+              className={!selectedId ? "automation-bot-row automation-bot-row--selected" : "automation-bot-row"}
+              onClick={() => choose()}
+            >
+              <span className="automation-bot-add-icon">＋</span>
+              <span><strong>添加机器人</strong><small>新建独立连接</small></span>
+            </button>
+            {bots.map((bot) => (
+              <button
+                type="button"
+                key={bot.id}
+                className={selectedId === bot.id ? "automation-bot-row automation-bot-row--selected" : "automation-bot-row"}
+                onClick={() => choose(bot)}
+              >
+                <span className={`status-dot ${bot.status === "connected" ? "status-dot--online" : bot.status === "connecting" ? "status-dot--pending" : "status-dot--offline"}`} />
+                <span>
+                  <strong>{bot.name}</strong>
+                  <small title={bot.error}>{wecomConnectionLabel(bot)} · {bot.botId}</small>
+                </span>
+              </button>
+            ))}
+          </aside>
+
+          <form className="automation-bot-form" onSubmit={save}>
+            <div className="automation-form-heading">
+              <div>
+                <h3>{selected ? selected.name : "添加自动化机器人"}</h3>
+                <p>名称仅保存在本机，用于选择和区分发送身份。</p>
+              </div>
+              <label className="automation-inline-toggle">
+                <input
+                  type="checkbox"
+                  checked={draft.enabled}
+                  onChange={(event) => setDraft({ ...draft, enabled: event.currentTarget.checked })}
+                />
+                保持在线
+              </label>
+            </div>
+            <label>
+              <span>本机名称</span>
+              <input
+                value={draft.name}
+                maxLength={80}
+                placeholder="例如：资讯推送机器人"
+                onChange={(event) => setDraft({ ...draft, name: event.currentTarget.value })}
+                required
+              />
+            </label>
+            <label>
+              <span>Bot ID</span>
+              <input
+                value={draft.botId}
+                maxLength={200}
+                placeholder="企业微信智能机器人的 Bot ID"
+                onChange={(event) => setDraft({ ...draft, botId: event.currentTarget.value })}
+                disabled={Boolean(selected)}
+                required
+              />
+              {selected ? <small>发送身份已固定；更换 Bot ID 请新建机器人。</small> : null}
+            </label>
+            <label>
+              <span>Secret</span>
+              <input
+                type="password"
+                value={draft.secret}
+                maxLength={1_000}
+                placeholder={selected?.hasSecret ? "已安全保存；留空保持不变" : "企业微信智能机器人的 Secret"}
+                onChange={(event) => setDraft({ ...draft, secret: event.currentTarget.value })}
+                required={!selected?.hasSecret}
+              />
+            </label>
+            {selected?.error ? <div className="automation-bot-inline-error">{selected.error}</div> : null}
+            <footer>
+              {selected ? (
+                <button type="button" className="automation-danger-button" onClick={() => void remove()} disabled={busy}>
+                  删除机器人
+                </button>
+              ) : <span />}
+              <button type="submit" className="primary-button primary-button--compact" disabled={busy}>
+                {busy ? "正在保存…" : "保存机器人"}
+              </button>
+            </footer>
+          </form>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function AutomationPanel({
   automation,
   projects,
-  wecom,
-  defaultWeComUserId,
-  onConfigureWeCom,
   onClose,
 }: AutomationPanelProps) {
   const initialJob = automation.jobs[0];
+  const initialBotProfileId =
+    initialJob?.wecomBotProfileId ?? automation.wecomBots[0]?.id;
   const [tab, setTab] = useState<"jobs" | "runs">("jobs");
   const [selectedJobId, setSelectedJobId] = useState<string | null>(
     initialJob?.id ?? null,
   );
   const [draft, setDraft] = useState(() =>
-    draftForJob(initialJob, projects, defaultWeComUserId),
+    draftForJob(initialJob, projects, automation.wecomBots),
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [botDialogOpen, setBotDialogOpen] = useState(false);
   const [selectedDiscoveredGroupId, setSelectedDiscoveredGroupId] =
     useState("");
   const [editingGroupAlias, setEditingGroupAlias] = useState(false);
   const [groupAliasDraft, setGroupAliasDraft] = useState("");
   const [manualWeComTarget, setManualWeComTarget] = useState("");
   const [manualWeComTargetOpen, setManualWeComTargetOpen] = useState(
-    !automation.discoveredWeComGroups.length,
+    !automation.discoveredWeComGroups.some(
+      (group) => group.botProfileId === initialBotProfileId,
+    ),
   );
   const selectedJob = automation.jobs.find((job) => job.id === selectedJobId);
   const selectedWeComTargetIds = useMemo(
     () => parseList(draft.wecomTargetIds),
     [draft.wecomTargetIds],
   );
-  const selectedDiscoveredGroup = automation.discoveredWeComGroups.find(
+  const selectedWeComBot = automation.wecomBots.find(
+    (bot) => bot.id === draft.wecomBotProfileId,
+  );
+  const discoveredGroupsForBot = useMemo(
+    () =>
+      automation.discoveredWeComGroups.filter(
+        (group) => group.botProfileId === draft.wecomBotProfileId,
+      ),
+    [automation.discoveredWeComGroups, draft.wecomBotProfileId],
+  );
+  const selectedDiscoveredGroup = discoveredGroupsForBot.find(
     (group) => group.chatId === selectedDiscoveredGroupId,
   );
   const runsByJob = useMemo(() => {
@@ -280,9 +498,9 @@ export function AutomationPanel({
     ) {
       const next = automation.jobs[0];
       setSelectedJobId(next?.id ?? null);
-      setDraft(draftForJob(next, projects, defaultWeComUserId));
+      setDraft(draftForJob(next, projects, automation.wecomBots));
     }
-  }, [automation.jobs, defaultWeComUserId, projects, selectedJobId]);
+  }, [automation.jobs, automation.wecomBots, projects, selectedJobId]);
 
   const runAction = async <T,>(action: () => Promise<T>): Promise<T | undefined> => {
     setBusy(true);
@@ -299,21 +517,29 @@ export function AutomationPanel({
 
   const selectJob = (job: AutomationJobRecord) => {
     setSelectedJobId(job.id);
-    setDraft(draftForJob(job, projects, defaultWeComUserId));
+    setDraft(draftForJob(job, projects, automation.wecomBots));
     setSelectedDiscoveredGroupId("");
     setEditingGroupAlias(false);
     setManualWeComTarget("");
-    setManualWeComTargetOpen(!automation.discoveredWeComGroups.length);
+    setManualWeComTargetOpen(
+      !automation.discoveredWeComGroups.some(
+        (group) => group.botProfileId === job.wecomBotProfileId,
+      ),
+    );
     setError(null);
   };
 
   const createJob = () => {
     setSelectedJobId(null);
-    setDraft(draftForJob(undefined, projects, defaultWeComUserId));
+    setDraft(draftForJob(undefined, projects, automation.wecomBots));
     setSelectedDiscoveredGroupId("");
     setEditingGroupAlias(false);
     setManualWeComTarget("");
-    setManualWeComTargetOpen(!automation.discoveredWeComGroups.length);
+    setManualWeComTargetOpen(
+      !automation.discoveredWeComGroups.some(
+        (group) => group.botProfileId === automation.wecomBots[0]?.id,
+      ),
+    );
     setError(null);
   };
 
@@ -363,12 +589,36 @@ export function AutomationPanel({
     setError(null);
   };
 
+  const changeWeComBot = (botProfileId: string) => {
+    if (
+      selectedWeComTargetIds.length > 0 &&
+      !window.confirm("切换发送机器人会清空当前选择的接收群，是否继续？")
+    ) {
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      wecomBotProfileId: botProfileId,
+      wecomTargetIds: "",
+    }));
+    setSelectedDiscoveredGroupId("");
+    setEditingGroupAlias(false);
+    setManualWeComTarget("");
+    setManualWeComTargetOpen(
+      !automation.discoveredWeComGroups.some(
+        (group) => group.botProfileId === botProfileId,
+      ),
+    );
+    setError(null);
+  };
+
   const saveGroupAlias = () => {
     if (!selectedDiscoveredGroup) {
       return;
     }
     void runAction(() =>
       window.claudeWorkspace.updateAutomationWeComGroupAlias({
+        botProfileId: selectedDiscoveredGroup.botProfileId ?? "",
         chatId: selectedDiscoveredGroup.chatId,
         alias: groupAliasDraft,
       }),
@@ -399,6 +649,13 @@ export function AutomationPanel({
       setError("请选择至少一个企业微信接收群，或手动添加接收目标。");
       return;
     }
+    if (
+      draft.deliveryChannels.includes("wecom") &&
+      !draft.wecomBotProfileId
+    ) {
+      setError("请先添加并选择一个自动化推送机器人。");
+      return;
+    }
     const request: UpsertAutomationJobRequest = {
       ...(selectedJobId ? { id: selectedJobId } : {}),
       name: draft.name,
@@ -415,6 +672,9 @@ export function AutomationPanel({
       emailRecipients: draft.deliveryChannels.includes("email")
         ? parseList(draft.emailRecipients)
         : [],
+      ...(draft.deliveryChannels.includes("wecom")
+        ? { wecomBotProfileId: draft.wecomBotProfileId }
+        : {}),
       wecomTargetIds: draft.deliveryChannels.includes("wecom")
         ? wecomTargetIds
         : [],
@@ -428,7 +688,7 @@ export function AutomationPanel({
       (saved) => {
         if (saved) {
           setSelectedJobId(saved.id);
-          setDraft(draftForJob(saved, projects, defaultWeComUserId));
+          setDraft(draftForJob(saved, projects, automation.wecomBots));
         }
       },
     );
@@ -731,38 +991,58 @@ export function AutomationPanel({
 
                 {draft.deliveryChannels.includes("wecom") ? (
                   <div
-                    className={`automation-wecom-sender automation-wecom-sender--${wecom.status}`}
+                    className={`automation-wecom-sender automation-wecom-sender--${selectedWeComBot?.status ?? "disabled"}`}
                   >
                     <div>
                       <span
                         className={`status-dot ${
-                          wecom.status === "connected"
+                          selectedWeComBot?.status === "connected"
                             ? "status-dot--online"
-                            : wecom.status === "connecting"
+                            : selectedWeComBot?.status === "connecting"
                               ? "status-dot--pending"
                               : "status-dot--offline"
                         }`}
                       />
                       <span>
-                        <strong>发送机器人</strong>
+                        <strong>自动化发送机器人</strong>
                         <small
                           title={
-                            wecom.error ||
-                            (wecom.configured
-                              ? `Bot ID ${wecom.botId}`
+                            selectedWeComBot?.error ||
+                            (selectedWeComBot?.configured
+                              ? `Bot ID ${selectedWeComBot.botId}`
                               : undefined)
                           }
                         >
-                          {wecom.configured
-                            ? `${wecomConnectionLabel(wecom)} · Bot ID ${wecom.botId}`
-                            : "尚未配置 Bot ID 与 Secret"}
+                          {selectedWeComBot
+                            ? `${wecomConnectionLabel(selectedWeComBot)} · Bot ID ${selectedWeComBot.botId}`
+                            : "尚未选择机器人"}
                         </small>
-                        <small>所有自动化任务共用这个机器人连接</small>
+                        <small>每个任务固定一个发送身份；多个已启用机器人会同时在线</small>
                       </span>
                     </div>
-                    <button type="button" onClick={onConfigureWeCom}>
-                      {wecom.configured ? "修改机器人" : "配置机器人"}
-                    </button>
+                    <div className="automation-wecom-sender-actions">
+                      <select
+                        aria-label="选择自动化发送机器人"
+                        value={draft.wecomBotProfileId}
+                        onChange={(event) => changeWeComBot(event.currentTarget.value)}
+                        required
+                      >
+                        <option value="">选择机器人</option>
+                        {draft.wecomBotProfileId && !selectedWeComBot ? (
+                          <option value={draft.wecomBotProfileId}>
+                            原机器人不存在，请重新选择
+                          </option>
+                        ) : null}
+                        {automation.wecomBots.map((bot) => (
+                          <option value={bot.id} key={bot.id}>
+                            {bot.name} · {wecomConnectionLabel(bot)}
+                          </option>
+                        ))}
+                      </select>
+                      <button type="button" onClick={() => setBotDialogOpen(true)}>
+                        管理机器人
+                      </button>
+                    </div>
                   </div>
                 ) : null}
 
@@ -775,10 +1055,10 @@ export function AutomationPanel({
                           <select
                             aria-label="选择已发现的企业微信群"
                             value={selectedDiscoveredGroupId}
-                            disabled={!automation.discoveredWeComGroups.length}
+                            disabled={!discoveredGroupsForBot.length}
                             onChange={(event) => {
                               const chatId = event.currentTarget.value;
-                              const group = automation.discoveredWeComGroups.find(
+                              const group = discoveredGroupsForBot.find(
                                 (candidate) => candidate.chatId === chatId,
                               );
                               setSelectedDiscoveredGroupId(chatId);
@@ -787,12 +1067,17 @@ export function AutomationPanel({
                             }}
                           >
                             <option value="">
-                              {automation.discoveredWeComGroups.length
+                              {discoveredGroupsForBot.length
                                 ? "选择已发现的群"
-                                : "还没有发现群"}
+                                : draft.wecomBotProfileId
+                                  ? "这个机器人还没有发现群"
+                                  : "请先选择机器人"}
                             </option>
-                            {automation.discoveredWeComGroups.map((group) => (
-                              <option value={group.chatId} key={group.chatId}>
+                            {discoveredGroupsForBot.map((group) => (
+                              <option
+                                value={group.chatId}
+                                key={`${group.botProfileId}-${group.chatId}`}
+                              >
                                 {discoveredGroupLabel(group)}
                               </option>
                             ))}
@@ -846,7 +1131,7 @@ export function AutomationPanel({
                         >
                           {selectedWeComTargetIds.length ? (
                             selectedWeComTargetIds.map((targetId) => {
-                              const group = automation.discoveredWeComGroups.find(
+                              const group = discoveredGroupsForBot.find(
                                 (candidate) => candidate.chatId === targetId,
                               );
                               return (
@@ -910,7 +1195,7 @@ export function AutomationPanel({
                           </div>
                         </details>
                         <small>
-                          目标群首次 @机器人发送 `/chatid` 后会自动出现；群名称只保存在本机。
+                          目标群首次 @当前所选机器人发送 `/chatid` 后会自动出现；群名称只保存在本机并按机器人隔离。
                         </small>
                       </div>
                     ) : null}
@@ -1113,11 +1398,21 @@ export function AutomationPanel({
                       ) : null}
                       {run.deliveries.length ? (
                         <div className="automation-deliveries">
-                          {run.deliveries.map((delivery) => (
-                            <span key={delivery.targetId} title={delivery.error}>
-                              {delivery.targetId} · {deliveryStatusLabel(delivery.status)}
-                            </span>
-                          ))}
+                          {run.deliveries.map((delivery) => {
+                            const bot = automation.wecomBots.find(
+                              (candidate) =>
+                                candidate.id === delivery.botProfileId,
+                            );
+                            return (
+                              <span
+                                key={`${delivery.botProfileId ?? "legacy"}-${delivery.targetId}`}
+                                title={delivery.error}
+                              >
+                                {bot?.name ?? "未绑定机器人"} → {delivery.targetId} ·{" "}
+                                {deliveryStatusLabel(delivery.status)}
+                              </span>
+                            );
+                          })}
                         </div>
                       ) : null}
                       {run.result &&
@@ -1207,6 +1502,19 @@ export function AutomationPanel({
           </div>
         )}
       </section>
+      {botDialogOpen ? (
+        <AutomationWeComBotDialog
+          bots={automation.wecomBots}
+          onClose={() => setBotDialogOpen(false)}
+          onSaved={(botProfileId) =>
+            setDraft((current) =>
+              current.wecomBotProfileId
+                ? current
+                : { ...current, wecomBotProfileId: botProfileId },
+            )
+          }
+        />
+      ) : null}
     </div>
   );
 }

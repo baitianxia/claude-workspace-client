@@ -14,12 +14,14 @@ import type {
   ClaudeCodeJobResult,
 } from "../src/main/claude-code-job-runner";
 import type {
+  AutomationWeComBotProfile,
   ProjectRecord,
+  UpsertAutomationWeComBotRequest,
   UpsertAutomationJobRequest,
 } from "../src/shared/contracts";
 import type {
-  WeComBusinessMessageHandler,
-} from "../src/main/wecom-bridge";
+  AutomationWeComMessageHandler,
+} from "../src/main/automation-wecom-bot-manager";
 
 const temporaryDirectories: string[] = [];
 const services: AutomationService[] = [];
@@ -69,24 +71,55 @@ class FakeRunner implements AutomationRunner {
 }
 
 class FakeGateway extends EventEmitter implements AutomationWeComGateway {
-  handler: WeComBusinessMessageHandler | null = null;
-  readonly sent: Array<{ targetId: string; content: string }> = [];
+  handler: AutomationWeComMessageHandler | null = null;
+  readonly sent: Array<{
+    botProfileId: string;
+    targetId: string;
+    content: string;
+  }> = [];
   fail = false;
+  readonly bots: AutomationWeComBotProfile[] = [
+    {
+      id: "bot-profile-one",
+      name: "资讯机器人",
+      enabled: true,
+      configured: true,
+      hasSecret: true,
+      botId: "aibot-one",
+      status: "connected",
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ];
 
-  setBusinessMessageHandler(handler: WeComBusinessMessageHandler | null): void {
+  listBots(): AutomationWeComBotProfile[] {
+    return this.bots.map((bot) => ({ ...bot }));
+  }
+
+  async upsertBot(
+    _request: UpsertAutomationWeComBotRequest,
+  ): Promise<AutomationWeComBotProfile> {
+    return this.bots[0];
+  }
+
+  async deleteBot(): Promise<void> {}
+
+  setBusinessMessageHandler(handler: AutomationWeComMessageHandler | null): void {
     this.handler = handler;
   }
 
-  async sendMarkdown(targetId: string, content: string): Promise<void> {
+  async sendMarkdown(
+    botProfileId: string,
+    targetId: string,
+    content: string,
+  ): Promise<void> {
     if (this.fail) {
       throw new Error("gateway offline");
     }
-    this.sent.push({ targetId, content });
+    this.sent.push({ botProfileId, targetId, content });
   }
 
-  getState(): { status: string } {
-    return { status: "connected" };
-  }
+  dispose(): void {}
 }
 
 function request(
@@ -101,6 +134,7 @@ function request(
     allowedMcpServers: ["web", "mail"],
     prompt: "读取网页并整理。",
     emailRecipients: [],
+    wecomBotProfileId: "bot-profile-one",
     wecomTargetIds: ["group-one"],
     allowedWecomUserIds: ["zhangsan"],
     timeoutMinutes: 20,
@@ -176,16 +210,37 @@ describe("AutomationService", () => {
     });
     expect(runner.inputs).toHaveLength(1);
     expect(runner.inputs[0].projectRoot).toContain("project");
-    expect(gateway.sent[0]).toMatchObject({ targetId: "group-one" });
+    expect(gateway.sent[0]).toMatchObject({
+      botProfileId: "bot-profile-one",
+      targetId: "group-one",
+    });
     expect(gateway.sent[0].content).toContain(`[RPT-${completed.reportCode}]`);
   });
 
   it("routes authorized group follow-ups and persistently deduplicates msgid", async () => {
     const { service, runner, gateway } = await fixture();
     await service.upsertJob(request());
+    gateway.bots.push({
+      ...gateway.bots[0],
+      id: "bot-profile-two",
+      name: "运营机器人",
+      botId: "aibot-two",
+    });
     expect(gateway.handler).not.toBeNull();
 
+    const wrongBot = await gateway.handler!({
+      botProfileId: "bot-profile-two",
+      messageId: "wrong-bot",
+      chatId: "group-one",
+      userId: "zhangsan",
+      text: "分析影响",
+      quoteText: "",
+    });
+    expect(wrongBot).toMatchObject({ status: "rejected" });
+    expect(runner.inputs).toHaveLength(0);
+
     const chatIdResult = await gateway.handler!({
+      botProfileId: "bot-profile-one",
       messageId: "chat-id-query",
       chatId: "group-one",
       userId: "unknown",
@@ -193,12 +248,22 @@ describe("AutomationService", () => {
       quoteText: "",
     });
     expect(chatIdResult.message).toContain("group-one");
-    expect(service.getSnapshot().discoveredWeComGroups).toEqual([
-      expect.objectContaining({ chatId: "group-one" }),
-    ]);
+    expect(service.getSnapshot().discoveredWeComGroups).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          botProfileId: "bot-profile-one",
+          chatId: "group-one",
+        }),
+        expect.objectContaining({
+          botProfileId: "bot-profile-two",
+          chatId: "group-one",
+        }),
+      ]),
+    );
 
     await expect(
       service.updateWeComGroupAlias({
+        botProfileId: "bot-profile-one",
         chatId: "group-one",
         alias: "每日资讯群",
       }),
@@ -206,11 +271,16 @@ describe("AutomationService", () => {
       chatId: "group-one",
       alias: "每日资讯群",
     });
-    expect(service.getSnapshot().discoveredWeComGroups[0].alias).toBe(
-      "每日资讯群",
-    );
+    expect(
+      service
+        .getSnapshot()
+        .discoveredWeComGroups.find(
+          (group) => group.botProfileId === "bot-profile-one",
+        )?.alias,
+    ).toBe("每日资讯群");
 
     const unauthorized = await gateway.handler!({
+      botProfileId: "bot-profile-one",
       messageId: "unauthorized",
       chatId: "group-one",
       userId: "lisi",
@@ -220,6 +290,7 @@ describe("AutomationService", () => {
     expect(unauthorized.status).toBe("rejected");
 
     const message = {
+      botProfileId: "bot-profile-one",
       messageId: "message-one",
       chatId: "group-one",
       userId: "zhangsan",
@@ -240,7 +311,9 @@ describe("AutomationService", () => {
 
   it("reserves a job before persistence so simultaneous starts cannot overlap", async () => {
     const { service, runner } = await fixture();
-    const job = await service.upsertJob(request({ wecomTargetIds: [] }));
+    const job = await service.upsertJob(
+      request({ wecomBotProfileId: undefined, wecomTargetIds: [] }),
+    );
 
     const [first, second] = await Promise.allSettled([
       service.runJob(job.id),
@@ -268,6 +341,7 @@ describe("AutomationService", () => {
     });
 
     const unknown = await gateway.handler!({
+      botProfileId: "bot-profile-one",
       messageId: "unknown-report",
       chatId: "group-one",
       userId: "zhangsan",
@@ -277,6 +351,7 @@ describe("AutomationService", () => {
     expect(unknown).toMatchObject({ status: "rejected" });
 
     const wrongGroup = await gateway.handler!({
+      botProfileId: "bot-profile-one",
       messageId: "wrong-group",
       chatId: "group-two",
       userId: "zhangsan",
@@ -286,6 +361,7 @@ describe("AutomationService", () => {
     expect(wrongGroup.message).toContain("未投递到本群");
 
     const accepted = await gateway.handler!({
+      botProfileId: "bot-profile-one",
       messageId: "valid-quote",
       chatId: "group-one",
       userId: "zhangsan",
@@ -322,7 +398,9 @@ describe("AutomationService", () => {
     const { service, runner } = await fixture();
     runner.results.push({ status: "failed", error: "temporary failure" });
     runner.results.push(successResult());
-    const job = await service.upsertJob(request({ wecomTargetIds: [] }));
+    const job = await service.upsertJob(
+      request({ wecomBotProfileId: undefined, wecomTargetIds: [] }),
+    );
 
     const first = await service.runJob(job.id);
     await waitFor(() => {

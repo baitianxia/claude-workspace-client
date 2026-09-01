@@ -5,6 +5,7 @@ import { ClaudeLocator } from "./claude-locator";
 import { ClaudeHookServer } from "./claude-hook-server";
 import { AutomationService } from "./automation-service";
 import { AutomationStore } from "./automation-store";
+import { AutomationWeComBotManager } from "./automation-wecom-bot-manager";
 import { ClaudeCodeJobRunner } from "./claude-code-job-runner";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
@@ -120,6 +121,10 @@ async function startApplication(): Promise<void> {
     join(app.getPath("userData"), "workspace.json"),
   );
   await projectStore.initialize();
+  const automationStore = new AutomationStore(
+    join(app.getPath("userData"), "automation.json"),
+  );
+  await automationStore.initialize();
 
   const claudeLocator = new ClaudeLocator(projectStore);
   await claudeLocator.initialize();
@@ -153,19 +158,23 @@ async function startApplication(): Promise<void> {
     undefined,
     hookAvailabilityError,
   );
+  const automationWeComBots = new AutomationWeComBotManager(
+    automationStore,
+    safeStorage,
+    () => wecomBridge?.getState().botId ?? "",
+  );
   const wecomSettingsService = new WeComSettingsService(
     projectStore,
     wecomBridge,
     safeStorage,
+    (botId) => automationWeComBots.hasBotId(botId),
+    () => automationWeComBots.refreshReservedManagementBotId(),
   );
   wecomSettingsService.initialize();
   claudeHookServer?.on("hook", (event) =>
     wecomBridge?.handleClaudeHook(event),
   );
 
-  const automationStore = new AutomationStore(
-    join(app.getPath("userData"), "automation.json"),
-  );
   const automationRunner = new ClaudeCodeJobRunner(
     () => claudeLocator.requireExecutable(),
     join(app.getPath("userData"), "automation-runtime"),
@@ -174,7 +183,7 @@ async function startApplication(): Promise<void> {
     automationStore,
     automationRunner,
     (projectId) => projectStore.getProject(projectId),
-    wecomBridge,
+    automationWeComBots,
   );
   await automationService.initialize();
 

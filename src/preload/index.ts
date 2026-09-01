@@ -20,6 +20,8 @@ const IPC_CHANNELS: IpcChannelMap = {
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
   upsertAutomationJob: "workspace:upsert-automation-job",
+  upsertAutomationWeComBot: "workspace:upsert-automation-wecom-bot",
+  deleteAutomationWeComBot: "workspace:delete-automation-wecom-bot",
   updateAutomationWeComGroupAlias:
     "workspace:update-automation-wecom-group-alias",
   deleteAutomationJob: "workspace:delete-automation-job",
@@ -61,6 +63,10 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.updateWeComConfig, request),
   upsertAutomationJob: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.upsertAutomationJob, request),
+  upsertAutomationWeComBot: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.upsertAutomationWeComBot, request),
+  deleteAutomationWeComBot: (botProfileId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.deleteAutomationWeComBot, botProfileId),
   updateAutomationWeComGroupAlias: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.updateAutomationWeComGroupAlias, request),
   deleteAutomationJob: (jobId) =>

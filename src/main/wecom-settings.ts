@@ -37,11 +37,15 @@ export class WeComSettingsService {
     private readonly projectStore: ProjectStore,
     private readonly bridge: WeComConfigurator,
     private readonly secretProtector: SecretProtector,
+    private readonly isBotIdReserved: (botId: string) => boolean = () => false,
+    private readonly onConfigurationChanged: () => void = () => undefined,
   ) {}
 
   initialize(): WeComState {
     const stored = this.projectStore.getWeComSettings();
-    return this.bridge.configure(this.runtimeConfiguration(stored));
+    const state = this.bridge.configure(this.runtimeConfiguration(stored));
+    this.onConfigurationChanged();
+    return state;
   }
 
   async update(request: UpdateWeComConfigRequest): Promise<WeComState> {
@@ -64,6 +68,11 @@ export class WeComSettingsService {
       200,
       request.enabled,
     );
+    if (botId && this.isBotIdReserved(botId)) {
+      throw new Error(
+        "这个 Bot ID 已用于自动化推送机器人，不能同时作为 Claude Code 管理机器人。",
+      );
+    }
     const submittedSecret =
       request.secret === undefined
         ? ""
@@ -98,7 +107,9 @@ export class WeComSettingsService {
       encryptedSecret,
     };
     await this.projectStore.setWeComSettings(stored);
-    return this.bridge.configure(this.runtimeConfiguration(stored));
+    const state = this.bridge.configure(this.runtimeConfiguration(stored));
+    this.onConfigurationChanged();
+    return state;
   }
 
   private runtimeConfiguration(

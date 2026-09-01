@@ -16,6 +16,7 @@ import type {
   TerminalDataEvent,
   UpdateAutomationWeComGroupAliasRequest,
   UpsertAutomationJobRequest,
+  UpsertAutomationWeComBotRequest,
   UpdateWeComConfigRequest,
   UpdateProjectRequest,
   WriteTerminalRequest,
@@ -183,6 +184,20 @@ export function registerIpcHandlers(options: {
     IPC_CHANNELS.upsertAutomationJob,
     (_event, request: UpsertAutomationJobRequest) =>
       automationService.upsertJob(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.upsertAutomationWeComBot,
+    (_event, request: UpsertAutomationWeComBotRequest) =>
+      automationService.upsertWeComBot(request),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.deleteAutomationWeComBot,
+    (_event, botProfileId: unknown) =>
+      automationService.deleteWeComBot(
+        requireIdentifier(botProfileId, "Automation WeCom bot profile ID"),
+      ),
   );
 
   ipcMain.handle(

@@ -199,4 +199,28 @@ describe("WeComSettingsService", () => {
     ).rejects.toThrow("系统安全存储不可用");
     expect(store.getWeComSettings()).toBeUndefined();
   });
+
+  it("keeps the Claude Code management Bot ID separate from automation bots", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-workspace-wecom-"));
+    temporaryDirectories.push(root);
+    const store = new ProjectStore(join(root, "workspace.json"));
+    await store.initialize();
+    const fake = fakeConfigurator();
+    const service = new WeComSettingsService(
+      store,
+      fake.configurator,
+      protector,
+      (botId) => botId === "automation-bot",
+    );
+
+    await expect(
+      service.update({
+        enabled: true,
+        botId: "automation-bot",
+        targetUserId: "zhangsan",
+        secret: "secret",
+      }),
+    ).rejects.toThrow("自动化推送机器人");
+    expect(store.getWeComSettings()).toBeUndefined();
+  });
 });

@@ -7,6 +7,8 @@ export const IPC_CHANNELS = {
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
   upsertAutomationJob: "workspace:upsert-automation-job",
+  upsertAutomationWeComBot: "workspace:upsert-automation-wecom-bot",
+  deleteAutomationWeComBot: "workspace:delete-automation-wecom-bot",
   updateAutomationWeComGroupAlias:
     "workspace:update-automation-wecom-group-alias",
   deleteAutomationJob: "workspace:delete-automation-job",
