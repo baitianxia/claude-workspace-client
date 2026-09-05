@@ -917,6 +917,20 @@ button:disabled {
   height: 100%;
 }
 
+/*
+ * Claude Code renders its own prompt caret as a reverse-video cell. Keep
+ * xterm's native caret hidden so a delayed native-caret paint cannot appear
+ * at a second position beside the prompt caret.
+ */
+#root .terminal-canvas .xterm .xterm-rows .xterm-cursor {
+  animation: none !important;
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  color: inherit !important;
+  outline: 0 !important;
+}
+
 .terminal-canvas .xterm-viewport {
   scrollbar-color: #454039 #171614;
   scrollbar-width: thin;
