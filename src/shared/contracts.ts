@@ -5,6 +5,9 @@ export type SessionStatus =
   | "failed"
   | "interrupted";
 
+/** User-selectable application appearance. Persisted in workspace settings. */
+export type AppTheme = "dark" | "light";
+
 export interface ProjectRecord {
   id: string;
   name: string;
@@ -56,6 +59,9 @@ export interface WeComState {
   lastInboundAt?: number;
   lastInboundStatus?: WeComInboundStatus;
   lastInboundDetail?: string;
+  /** Most recent local Claude Hook delivery diagnostic. */
+  lastClaudeHookAt?: number;
+  lastClaudeHookDetail?: string;
 }
 
 export interface AssistantWeComBotProfile {
@@ -78,7 +84,16 @@ export interface AssistantProfileRecord {
   id: string;
   name: string;
   enabled: boolean;
-  projectId: string;
+  /**
+   * Absolute directory used by the assistant's Claude sessions. This is an
+   * assistant-owned path and is deliberately independent from ProjectStore.
+   */
+  projectPath: string;
+  /**
+   * Legacy workbench project id. Kept only so old assistant.json records can
+   * be migrated once; new records must not persist this association.
+   */
+  projectId?: string;
   instructions: string;
   /** The owner whose WeCom single-chat shares the local desktop conversation. */
   ownerWeComUserId: string;
@@ -195,6 +210,7 @@ export interface AppSnapshot {
   claudeExecutable: ClaudeExecutableState;
   wecom: WeComState;
   assistant: AssistantSnapshot;
+  theme: AppTheme;
 }
 
 export interface TerminalDataEvent {
@@ -310,13 +326,36 @@ export interface UpsertAssistantWeComBotRequest {
   secret?: string;
 }
 
+/**
+ * Bot details entered while creating or configuring one private assistant.
+ * The Secret crosses the IPC boundary only to be encrypted by the main
+ * process; it is never part of an AssistantProfileRecord or snapshot.
+ */
+export interface AssistantWeComBotDraft {
+  id?: string;
+  name: string;
+  enabled: boolean;
+  botId: string;
+  /** Empty or omitted keeps the Secret already stored for `id`. */
+  secret?: string;
+}
+
 export interface UpsertAssistantProfileRequest {
   id?: string;
   name: string;
   enabled: boolean;
-  projectId: string;
+  /** Directory used to run this assistant, independent from workbench projects. */
+  projectPath: string;
+  /** @deprecated Accepted only for one-time migration of old renderer clients. */
+  projectId?: string;
   instructions: string;
   ownerWeComUserId: string;
+  /**
+   * Direct bot configuration for this assistant. `null` explicitly removes a
+   * binding; an omitted value keeps the legacy `wecomBotProfileId` behavior.
+   */
+  wecomBot?: AssistantWeComBotDraft | null;
+  /** @deprecated Use `wecomBot`; accepted for older renderer clients only. */
   wecomBotProfileId?: string;
   timeoutMinutes: number;
   maxTurns: number;
@@ -340,16 +379,14 @@ export interface WriteTerminalRequest {
 
 export interface DesktopApi {
   getSnapshot(): Promise<AppSnapshot>;
+  setTheme(theme: AppTheme): Promise<AppTheme>;
   selectProjectDirectory(): Promise<ProjectRecord | null>;
+  selectAssistantProjectDirectory(): Promise<string | null>;
   updateProject(request: UpdateProjectRequest): Promise<ProjectRecord>;
   removeProject(projectId: string): Promise<void>;
   selectClaudeExecutable(): Promise<ClaudeExecutableState | null>;
   autoDetectClaudeExecutable(): Promise<ClaudeExecutableState>;
   updateWeComConfig(request: UpdateWeComConfigRequest): Promise<WeComState>;
-  upsertAssistantWeComBot(
-    request: UpsertAssistantWeComBotRequest,
-  ): Promise<AssistantWeComBotProfile>;
-  deleteAssistantWeComBot(botProfileId: string): Promise<void>;
   upsertAssistantProfile(
     request: UpsertAssistantProfileRequest,
   ): Promise<AssistantProfileRecord>;

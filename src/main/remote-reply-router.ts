@@ -48,6 +48,12 @@ export interface PendingRemoteReply extends RemoteAttention {
 
 export interface RemoteReplyAction {
   input: string;
+  /**
+   * Synthetic key presses that must be written separately. Ink-based Claude
+   * Code prompts can consume only the first escape sequence when several
+   * navigation keys are batched into one PTY write.
+   */
+  inputChunks?: string[];
   nextStage?: RemoteReplyStage;
   followUpMessage?: string;
 }
@@ -158,6 +164,31 @@ function multipleMenuSelectionInput(selections: number[]): string {
     currentSelection = selection;
   }
   return `${input}${TERMINAL_ENTER}`;
+}
+
+function singleMenuSelectionChunks(selection: number): string[] {
+  return [
+    ...Array.from({ length: Math.max(0, selection - 1) }, () => TERMINAL_DOWN),
+    TERMINAL_ENTER,
+  ];
+}
+
+function multipleMenuSelectionChunks(selections: number[]): string[] {
+  const ordered = [...new Set(selections)].sort((left, right) => left - right);
+  let currentSelection = 1;
+  const chunks: string[] = [];
+  for (const selection of ordered) {
+    chunks.push(
+      ...Array.from(
+        { length: Math.max(0, selection - currentSelection) },
+        () => TERMINAL_DOWN,
+      ),
+    );
+    chunks.push(TERMINAL_TOGGLE);
+    currentSelection = selection;
+  }
+  chunks.push(TERMINAL_ENTER);
+  return chunks;
 }
 
 type MenuTextMatch =
@@ -606,7 +637,30 @@ export function terminalActionForRemoteReply(
         return null;
       });
       if (encoded.every((answer): answer is string => answer !== null)) {
-        return { input: encoded.join("") };
+        const inputChunks = [
+          ...answers.flatMap((answer, index) => {
+            const labels = questionLabels[index] ?? [];
+            const answerSelections = questionSelections(answer, labels);
+            if (
+              questionModes[index] === "single" &&
+              answerSelections?.length === 1
+            ) {
+              return singleMenuSelectionChunks(answerSelections[0]);
+            }
+            if (
+              questionModes[index] === "multiple" &&
+              answerSelections &&
+              answerSelections.length > 0
+            ) {
+              return multipleMenuSelectionChunks(answerSelections);
+            }
+            return [];
+          }),
+          // A multi-question picker moves to the Submit tab after the last
+          // answer; a second Enter activates “Submit”.
+          TERMINAL_ENTER,
+        ];
+        return { input: inputChunks.join(""), inputChunks };
       }
     }
     throw new Error(

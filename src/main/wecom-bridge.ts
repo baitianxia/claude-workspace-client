@@ -61,6 +61,21 @@ export interface WeComClient {
   ): Promise<unknown>;
 }
 
+type WeComInboundMessageEvent =
+  | "message.text"
+  | "message.voice"
+  | "message.mixed"
+  | "message.image"
+  | "message.file"
+  | "message.video";
+
+interface TypedWeComClient {
+  on(
+    event: WeComInboundMessageEvent,
+    listener: (frame: WsFrame<BaseMessage>) => void,
+  ): unknown;
+}
+
 export type WeComClientFactory = (options: {
   botId: string;
   secret: string;
@@ -88,6 +103,10 @@ function copyState(state: WeComState): WeComState {
 
 function readableError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function trimmedInboundIdentifier(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -124,15 +143,28 @@ function quoteText(message: BaseMessage): string {
     text?: { content?: unknown };
     markdown?: { content?: unknown };
     voice?: { content?: unknown };
-    mixed?: { msg_item?: Array<{ text?: { content?: unknown } }> };
+    mixed?: { msg_item?: unknown };
   };
+  const mixedItems = Array.isArray(value.mixed?.msg_item)
+    ? value.mixed.msg_item
+    : [];
   const candidates = [
     value.content,
     value.quote_text,
     value.text?.content,
     value.markdown?.content,
     value.voice?.content,
-    ...(value.mixed?.msg_item?.map((item) => item.text?.content) ?? []),
+    ...mixedItems.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return [];
+      }
+      const text = (item as { text?: unknown }).text;
+      if (!text || typeof text !== "object" || Array.isArray(text)) {
+        return [];
+      }
+      const content = (text as { content?: unknown }).content;
+      return typeof content === "string" ? [content] : [];
+    }),
   ].filter(
     (candidate): candidate is string =>
       typeof candidate === "string" && candidate.trim().length > 0,
@@ -154,15 +186,24 @@ function incomingMessageText(message: BaseMessage): string {
   }
   const items = (
     message as BaseMessage & {
-      mixed?: { msg_item?: Array<{ text?: { content?: unknown } }> };
+      mixed?: { msg_item?: unknown };
     }
   ).mixed?.msg_item;
   return (
-    items
-      ?.flatMap((item) =>
-        typeof item.text?.content === "string" ? [item.text.content] : [],
-      )
-      .join("\n") ?? ""
+    (Array.isArray(items)
+      ? items.flatMap((item) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) {
+            return [];
+          }
+          const text = (item as { text?: unknown }).text;
+          if (!text || typeof text !== "object" || Array.isArray(text)) {
+            return [];
+          }
+          const content = (text as { content?: unknown }).content;
+          return typeof content === "string" ? [content] : [];
+        })
+      : []
+    ).join("\n")
   );
 }
 
@@ -185,7 +226,7 @@ function notificationMarkdown(
     (pending.questionSelectionModes?.length ?? 0) > 1
       ? {
           quoted:
-            "发送 `1;2,3`（每题可用编号或完整选项文字；问题间用分号或换行，多选项用逗号）",
+            "发送 `1;2,3`（每题可用编号或完整选项文字；问题间用分号或换行，多选项用逗号，全部回答后自动提交）",
           directExample: "1;2,3",
         }
       : pending.kind === "permission"
@@ -313,7 +354,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     return copyState(this.state);
   }
 
-  shouldInjectClaudeHooks(): boolean {
+  isClaudePushEnabled(): boolean {
     return Boolean(
       !this.availabilityError &&
         this.configuration.enabled &&
@@ -322,6 +363,11 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         this.configuration.hasSecret &&
         !this.configuration.configurationError,
     );
+  }
+
+  /** @deprecated Use isClaudePushEnabled; hook installation is independent. */
+  shouldInjectClaudeHooks(): boolean {
+    return this.isClaudePushEnabled();
   }
 
   configure(configuration: WeComRuntimeConfiguration): WeComState {
@@ -390,16 +436,23 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       });
       this.client = client;
       this.attachClient(client);
-      client.connect();
+      // Keep the bridge compatible with clients whose connect method is
+      // asynchronous. The bundled SDK returns synchronously, but an ignored
+      // rejected Promise would otherwise leave the status stuck at “连接中”.
+      void Promise.resolve(client.connect()).catch((error: unknown) => {
+        if (this.client === client) {
+          this.fail(`无法连接 Claude Code 终端控制机器人：${readableError(error)}`);
+        }
+      });
     } catch (error) {
-      this.fail(`无法连接企业微信智能机器人：${readableError(error)}`);
+      this.fail(`无法连接 Claude Code 终端控制机器人：${readableError(error)}`);
     }
     return this.getState();
   }
 
   handleClaudeHook(event: ClaudeHookEvent): void {
     if (
-      !this.shouldInjectClaudeHooks() ||
+      !this.isClaudePushEnabled() ||
       !this.sessionManager.isCurrentLaunch(
         event.workspaceSessionId,
         event.launchId,
@@ -408,6 +461,11 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       return;
     }
     const attention = attentionFromClaudeHook(event);
+    this.recordClaudeHook(
+      attention
+        ? `已收到 Claude Code ${event.payload.hook_event_name} 事件，正在推送。`
+        : `已收到 Claude Code ${event.payload.hook_event_name} 事件，但没有可推送的消息内容。`,
+    );
     if (!attention) {
       return;
     }
@@ -536,6 +594,33 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         });
       }
     });
+    // The SDK emits both a generic message event and a type-specific event.
+    // Subscribe to the latter as a compatibility path for clients that only
+    // expose typed callbacks; processedMessageIds keeps duplicate frames
+    // idempotent when both are emitted.
+    const typedClient = client as unknown as TypedWeComClient;
+    const typedEvents: WeComInboundMessageEvent[] = [
+      "message.text",
+      "message.voice",
+      "message.mixed",
+      "message.image",
+      "message.file",
+      "message.video",
+    ];
+    for (const event of typedEvents) {
+      typedClient.on(event, (frame) => {
+        if (this.client === client) {
+          void this.handleIncomingMessage(client, frame).catch((error: unknown) => {
+            if (this.client !== client) {
+              return;
+            }
+            const detail = `处理企业微信回复失败：${readableError(error)}`;
+            this.recordInbound("failed", detail);
+            void this.replyToMessage(client, frame, detail);
+          });
+        }
+      });
+    }
   }
 
   private async handleIncomingMessage(
@@ -546,10 +631,11 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     if (!message) {
       return;
     }
-    if (this.processedMessageIds.has(message.msgid)) {
+    const messageId = trimmedInboundIdentifier(message.msgid);
+    if (!messageId || this.processedMessageIds.has(messageId)) {
       return;
     }
-    this.processedMessageIds.add(message.msgid);
+    this.processedMessageIds.add(messageId);
     if (this.processedMessageIds.size > 2_000) {
       const oldest = this.processedMessageIds.values().next().value;
       if (typeof oldest === "string") {
@@ -567,7 +653,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     if (message.chattype === "group") {
       this.recordInbound(
         "ignored",
-        "Claude Code 管理机器人只处理终端远程回复；私人助理和自动化请使用独立的企业微信业务入口。",
+        "Claude Code 终端控制机器人只处理终端远程回复；私人助理请使用独立的企业微信智能机器人。",
       );
       return;
     }
@@ -632,10 +718,15 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       await this.replyToMessage(client, frame, detail);
       return;
     }
-    const written = this.sessionManager.writeRemoteReply(
-      pending.workspaceSessionId,
-      action.input,
-    );
+    const written = action.inputChunks
+      ? await this.sessionManager.writeRemoteReplySequence(
+          pending.workspaceSessionId,
+          action.inputChunks,
+        )
+      : this.sessionManager.writeRemoteReply(
+          pending.workspaceSessionId,
+          action.input,
+        );
     if (!written) {
       this.router.complete(pending.code);
       const detail = `回复码 ${pending.code} 对应的 Claude Code 进程已不可用，未发送任何输入。`;
@@ -725,6 +816,14 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     });
   }
 
+  private recordClaudeHook(detail: string): void {
+    this.updateState({
+      ...this.state,
+      lastClaudeHookAt: Date.now(),
+      lastClaudeHookDetail: detail,
+    });
+  }
+
   private async sendPending(pending: PendingRemoteReply): Promise<void> {
     const client = this.client;
     if (
@@ -732,6 +831,11 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       this.authenticatedClient !== client ||
       this.sendingCodes.has(pending.code)
     ) {
+      if (!client || this.authenticatedClient !== client) {
+        this.recordClaudeHook(
+          `已收到 Claude Code 消息，等待企业微信连接认证后发送（回复码 ${pending.code}）。`,
+        );
+      }
       return;
     }
     this.sendingCodes.add(pending.code);
@@ -760,6 +864,9 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       });
       if (this.client === client) {
         this.unsentCodes.delete(pending.code);
+        this.recordClaudeHook(
+          `Claude Code 消息已推送到 ${this.configuration.targetUserId}（回复码 ${pending.code}）。`,
+        );
         if (this.state.status === "error") {
           this.updateState({
             ...this.state,
@@ -770,7 +877,9 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       }
     } catch (error) {
       if (this.client === client) {
-        this.fail(`企业微信消息推送失败：${readableError(error)}`);
+        const detail = `企业微信消息推送失败：${readableError(error)}`;
+        this.recordClaudeHook(`Claude Code 消息推送失败：${readableError(error)}`);
+        this.fail(detail);
         this.scheduleRetry();
       }
     } finally {

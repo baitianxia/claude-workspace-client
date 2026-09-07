@@ -5,6 +5,11 @@ import {
   type PtySpawner,
   type SessionWorkspace,
 } from "../src/main/session-manager";
+import {
+  BRACKETED_PASTE_END,
+  BRACKETED_PASTE_START,
+  utf8ByteLength,
+} from "../src/shared/terminal-paste";
 
 interface FakePtyController {
   process: IPty;
@@ -109,6 +114,109 @@ describe("SessionManager", () => {
       [],
       expect.objectContaining({ cwd: session.cwd }),
     );
+  });
+
+  it("writes remote picker keys as separate PTY events", async () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => fake.process) as PtySpawner,
+      "win32",
+    );
+    const session = manager.createSession(project());
+
+    await expect(
+      manager.writeRemoteReplySequence(session.id, ["\x1b[B", "\r", "\r"]),
+    ).resolves.toBe(true);
+    expect(fake.writes).toEqual(["\x1b[B", "\r", "\r"]);
+  });
+
+  it("throttles large bracketed pastes without dropping Unicode text", async () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => fake.process) as PtySpawner,
+      "win32",
+    );
+    const session = manager.createSession(project());
+    const pasted = `${BRACKETED_PASTE_START}${"第一行🙂\r第二行\r".repeat(
+      90,
+    )}${BRACKETED_PASTE_END}`;
+
+    manager.write(session.id, pasted);
+    await new Promise<void>((resolve) => setTimeout(resolve, 120));
+
+    expect(fake.writes.join("")).toBe(pasted);
+    expect(fake.writes[0]).toBe(BRACKETED_PASTE_START);
+    expect(fake.writes.at(-1)).toBe(BRACKETED_PASTE_END);
+    expect(
+      fake.writes
+        .filter(
+          (chunk) =>
+            chunk !== BRACKETED_PASTE_START && chunk !== BRACKETED_PASTE_END,
+        )
+        .every((chunk) => utf8ByteLength(chunk) <= 512),
+    ).toBe(true);
+  });
+
+  it("uses the same lossless chunks for terminals without bracketed paste", async () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => fake.process) as PtySpawner,
+      "win32",
+    );
+    const session = manager.createSession(project());
+    const pasted = "a".repeat(2_048);
+
+    manager.write(session.id, pasted);
+    await new Promise<void>((resolve) => setTimeout(resolve, 80));
+
+    expect(fake.writes.join("")).toBe(pasted);
+    expect(fake.writes.every((chunk) => utf8ByteLength(chunk) <= 512)).toBe(
+      true,
+    );
+  });
+
+  it("keeps keystrokes queued behind an in-flight paste", async () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => fake.process) as PtySpawner,
+      "win32",
+    );
+    const session = manager.createSession(project());
+    const pasted = `${BRACKETED_PASTE_START}${"x".repeat(1_600)}${BRACKETED_PASTE_END}`;
+
+    manager.write(session.id, pasted);
+    manager.write(session.id, "after");
+    await new Promise<void>((resolve) => setTimeout(resolve, 120));
+
+    expect(fake.writes.join("")).toBe(`${pasted}after`);
+    expect(fake.writes.at(-1)).toBe("after");
+  });
+
+  it("does not replay a cancelled paste into a restarted process", async () => {
+    const first = fakePty();
+    const second = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process) as unknown as PtySpawner;
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      spawner,
+      "win32",
+    );
+    const session = manager.createSession(project());
+    const pasted = `${BRACKETED_PASTE_START}${"x".repeat(4_096)}${BRACKETED_PASTE_END}`;
+
+    manager.write(session.id, pasted);
+    first.emitExit(0);
+    manager.restartSession(session.id);
+    await new Promise<void>((resolve) => setTimeout(resolve, 80));
+
+    expect(second.writes).toEqual([]);
   });
 
   it("applies per-launch Claude arguments and environment on restart", () => {
@@ -308,6 +416,25 @@ describe("SessionManager", () => {
 
     expect(fake.killed).toBe(true);
     expect(manager.listSessions()).toEqual([]);
+  });
+
+  it("terminates the complete Windows process tree during shutdown", async () => {
+    const fake = fakePty();
+    const terminateTree = vi.fn(async () => undefined);
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => fake.process) as PtySpawner,
+      "win32",
+      [],
+      undefined,
+      terminateTree,
+    );
+    manager.createSession(project());
+
+    await manager.dispose();
+
+    expect(terminateTree).toHaveBeenCalledExactlyOnceWith(42);
+    expect(fake.killed).toBe(true);
   });
 
   it("terminates and removes an individual session", () => {

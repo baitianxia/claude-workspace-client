@@ -220,7 +220,7 @@ describe("WeComSettingsService", () => {
         targetUserId: "zhangsan",
         secret: "secret",
       }),
-    ).rejects.toThrow("企业微信业务入口");
+    ).rejects.toThrow("企业微信智能机器人");
     expect(store.getWeComSettings()).toBeUndefined();
   });
 });

@@ -85,16 +85,31 @@ function validMultilineText(value: string, maximum: number): boolean {
   );
 }
 
+function validPathText(value: string): boolean {
+  return (
+    [...value].length <= 4_000 &&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)
+  );
+}
+
 function normalizeProfile(value: unknown): AssistantProfileRecord | null {
   if (!value || typeof value !== "object") {
     return null;
   }
   const candidate = value as Partial<AssistantProfileRecord>;
+  const projectPath =
+    typeof candidate.projectPath === "string"
+      ? candidate.projectPath.trim()
+      : "";
+  const legacyProjectId =
+    typeof candidate.projectId === "string" ? candidate.projectId.trim() : "";
   if (
     typeof candidate.id !== "string" ||
     typeof candidate.name !== "string" ||
     typeof candidate.enabled !== "boolean" ||
-    typeof candidate.projectId !== "string" ||
+    (candidate.projectPath !== undefined &&
+      typeof candidate.projectPath !== "string") ||
+    (candidate.projectId !== undefined && typeof candidate.projectId !== "string") ||
     typeof candidate.instructions !== "string" ||
     typeof candidate.ownerWeComUserId !== "string" ||
     !optionalString(candidate.wecomBotProfileId) ||
@@ -108,7 +123,9 @@ function normalizeProfile(value: unknown): AssistantProfileRecord | null {
     !candidate.name.trim() ||
     [...candidate.name].length > 80 ||
     /\p{Cc}/u.test(candidate.name) ||
-    !validIdentifier(candidate.projectId) ||
+    (!projectPath && !legacyProjectId) ||
+    !validPathText(projectPath) ||
+    (legacyProjectId && !validIdentifier(legacyProjectId)) ||
     !validMultilineText(candidate.instructions, 4_000) ||
     !validIdentifier(candidate.ownerWeComUserId, true) ||
     (candidate.wecomBotProfileId !== undefined &&
@@ -126,7 +143,8 @@ function normalizeProfile(value: unknown): AssistantProfileRecord | null {
     id: candidate.id,
     name: candidate.name,
     enabled: candidate.enabled,
-    projectId: candidate.projectId,
+    projectPath,
+    ...(legacyProjectId ? { projectId: legacyProjectId } : {}),
     instructions: candidate.instructions,
     ownerWeComUserId: candidate.ownerWeComUserId,
     ...(candidate.wecomBotProfileId
@@ -426,13 +444,11 @@ export class AssistantStore {
             if (!bot || this.data.wecomBots.length >= MAX_ASSISTANT_WECOM_BOTS) {
               continue;
             }
-            const nameKey = bot.name.toLocaleLowerCase("zh-CN");
             const botIdKey = bot.botId.toLocaleLowerCase("en-US");
             if (
               this.data.wecomBots.some(
                 (existing) =>
                   existing.id === bot.id ||
-                  existing.name.toLocaleLowerCase("zh-CN") === nameKey ||
                   existing.botId.toLocaleLowerCase("en-US") === botIdKey,
               )
             ) {
@@ -472,14 +488,14 @@ export class AssistantStore {
     this.assertInitialized();
     const normalized = normalizeStoredWeComBot(bot);
     if (!normalized) {
-      throw new Error("企业微信助理入口格式无效。");
+      throw new Error("企业微信智能机器人配置格式无效。");
     }
     const index = this.data.wecomBots.findIndex(
       (candidate) => candidate.id === normalized.id,
     );
     if (index < 0) {
       if (this.data.wecomBots.length >= MAX_ASSISTANT_WECOM_BOTS) {
-        throw new Error(`企业微信助理入口最多可以配置 ${MAX_ASSISTANT_WECOM_BOTS} 个。`);
+        throw new Error(`企业微信智能机器人最多可以配置 ${MAX_ASSISTANT_WECOM_BOTS} 个。`);
       }
       this.data.wecomBots.push(normalized);
     } else {
@@ -495,13 +511,13 @@ export class AssistantStore {
         (profile) => profile.wecomBotProfileId === botProfileId,
       )
     ) {
-      throw new Error("仍有私人助理绑定这个企业微信入口，请先解除绑定。");
+      throw new Error("仍有私人助理绑定这个企业微信智能机器人，请先解除绑定。");
     }
     const next = this.data.wecomBots.filter(
       (candidate) => candidate.id !== botProfileId,
     );
     if (next.length === this.data.wecomBots.length) {
-      throw new Error("企业微信助理入口不存在或已经删除。");
+      throw new Error("企业微信智能机器人不存在或已经删除。");
     }
     this.data.wecomBots = next;
     await this.persist();
@@ -532,33 +548,37 @@ export class AssistantStore {
 
   async putProfile(profile: AssistantProfileRecord): Promise<void> {
     this.assertInitialized();
+    const normalized = normalizeProfile(profile);
+    if (!normalized) {
+      throw new Error("私人助理配置格式无效。");
+    }
     const index = this.data.profiles.findIndex(
-      (candidate) => candidate.id === profile.id,
+      (candidate) => candidate.id === normalized.id,
     );
     const existing = index < 0 ? undefined : this.data.profiles[index];
     if (
       existing?.ownerWeComUserId &&
-      profile.ownerWeComUserId !== existing.ownerWeComUserId
+      normalized.ownerWeComUserId !== existing.ownerWeComUserId
     ) {
       throw new Error("主人 userid 保存后不能更换。");
     }
     if (
-      profile.wecomBotProfileId &&
+      normalized.wecomBotProfileId &&
       this.data.profiles.some(
         (candidate) =>
-          candidate.id !== profile.id &&
-          candidate.wecomBotProfileId === profile.wecomBotProfileId,
+          candidate.id !== normalized.id &&
+          candidate.wecomBotProfileId === normalized.wecomBotProfileId,
       )
     ) {
-      throw new Error("这个企业微信入口已经绑定到其他私人助理。");
+      throw new Error("这个企业微信智能机器人已经绑定到其他私人助理。");
     }
     if (index < 0) {
       if (this.data.profiles.length >= MAX_ASSISTANT_PROFILES) {
         throw new Error(`私人助理最多可以配置 ${MAX_ASSISTANT_PROFILES} 个。`);
       }
-      this.data.profiles.push(clone(profile));
+      this.data.profiles.push(clone(normalized));
     } else {
-      this.data.profiles[index] = clone(profile);
+      this.data.profiles[index] = clone(normalized);
     }
     await this.persist();
   }

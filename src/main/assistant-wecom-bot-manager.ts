@@ -34,6 +34,8 @@ export interface AssistantWeComMessage {
 export interface AssistantWeComMessageResult {
   status: "accepted" | "rejected";
   message: string;
+  /** Local diagnostic only; never send this message back to the sender. */
+  silent?: boolean;
 }
 
 export type AssistantWeComMessageHandler = (
@@ -50,10 +52,43 @@ interface BotRuntime {
   client: WeComClient | null;
   authenticatedClient: WeComClient | null;
   supersededClient: WeComClient | null;
+  pendingInboundMessages: Map<string, PendingInboundMessage>;
+  processingMessageIds: Set<string>;
   processedMessageIds: Set<string>;
 }
 
+interface PendingInboundMessage {
+  client: WeComClient;
+  frame: WsFrame<BaseMessage>;
+  /**
+   * A route result is retained when only the acknowledgement failed. Retrying
+   * the acknowledgement must not execute commands such as /new twice.
+   */
+  routeResult?: AssistantWeComMessageResult;
+  retryCount: number;
+  expiresAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+type AssistantInboundMessageEvent =
+  | "message.text"
+  | "message.voice"
+  | "message.mixed"
+  | "message.image"
+  | "message.file"
+  | "message.video";
+
+interface AssistantInboundEventClient {
+  on(
+    event: AssistantInboundMessageEvent,
+    listener: (frame: WsFrame<BaseMessage>) => void,
+  ): unknown;
+}
+
 const MAX_MARKDOWN_BYTES = 18_000;
+const INBOUND_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 4_000, 8_000] as const;
+const INBOUND_RETRY_MAX_AGE_MS = 30_000;
+const MAX_PENDING_INBOUND_MESSAGES = 100;
 
 function readableError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -98,6 +133,10 @@ function validInboundIdentifier(value: string): boolean {
   );
 }
 
+function trimmedInboundIdentifier(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) {
     return value;
@@ -132,15 +171,28 @@ function quoteText(message: BaseMessage): string {
     text?: { content?: unknown };
     markdown?: { content?: unknown };
     voice?: { content?: unknown };
-    mixed?: { msg_item?: Array<{ text?: { content?: unknown } }> };
+    mixed?: { msg_item?: unknown };
   };
+  const mixedItems = Array.isArray(value.mixed?.msg_item)
+    ? value.mixed.msg_item
+    : [];
   const candidates = [
     value.content,
     value.quote_text,
     value.text?.content,
     value.markdown?.content,
     value.voice?.content,
-    ...(value.mixed?.msg_item?.map((item) => item.text?.content) ?? []),
+    ...mixedItems.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return [];
+      }
+      const text = (item as { text?: unknown }).text;
+      if (!text || typeof text !== "object" || Array.isArray(text)) {
+        return [];
+      }
+      const content = (text as { content?: unknown }).content;
+      return typeof content === "string" ? [content] : [];
+    }),
   ].filter(
     (candidate): candidate is string =>
       typeof candidate === "string" && candidate.trim().length > 0,
@@ -149,29 +201,46 @@ function quoteText(message: BaseMessage): string {
 }
 
 function incomingMessageText(message: BaseMessage): string {
-  const text = (message as BaseMessage & { text?: { content?: unknown } }).text
-    ?.content;
-  if (typeof text === "string") {
-    return text;
+  const flexible = message as BaseMessage & {
+    text?: string | { content?: unknown };
+    markdown?: string | { content?: unknown };
+    voice?: string | { content?: unknown };
+    mixed?: { msg_item?: unknown };
+  };
+  if (typeof flexible.text === "string") {
+    return flexible.text;
   }
-  const voice = (
-    message as BaseMessage & { voice?: { content?: unknown } }
-  ).voice?.content;
-  if (typeof voice === "string") {
-    return voice;
+  if (typeof flexible.text?.content === "string") {
+    return flexible.text.content;
   }
-  const items = (
-    message as BaseMessage & {
-      mixed?: { msg_item?: Array<{ text?: { content?: unknown } }> };
-    }
-  ).mixed?.msg_item;
-  return (
-    items
-      ?.flatMap((item) =>
-        typeof item.text?.content === "string" ? [item.text.content] : [],
-      )
-      .join("\n") ?? ""
-  );
+  if (typeof flexible.markdown === "string") {
+    return flexible.markdown;
+  }
+  if (typeof flexible.markdown?.content === "string") {
+    return flexible.markdown.content;
+  }
+  if (typeof flexible.voice === "string") {
+    return flexible.voice;
+  }
+  if (typeof flexible.voice?.content === "string") {
+    return flexible.voice.content;
+  }
+  const items = flexible.mixed?.msg_item;
+  if (!Array.isArray(items)) {
+    return "";
+  }
+  return items
+    .flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return [];
+      }
+      const text = (item as { text?: string | { content?: unknown } }).text;
+      if (typeof text === "string") {
+        return [text];
+      }
+      return typeof text?.content === "string" ? [text.content] : [];
+    })
+    .join("\n");
 }
 
 function isSupersededConnection(reason: string): boolean {
@@ -252,6 +321,11 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
     handler: AssistantWeComMessageHandler | null,
   ): void {
     this.messageHandler = handler;
+    if (handler) {
+      for (const runtime of this.runtimes.values()) {
+        this.wakePendingInboundMessages(runtime);
+      }
+    }
   }
 
   async upsertBot(
@@ -260,35 +334,27 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
   ): Promise<AssistantWeComBotProfile> {
     this.assertInitialized();
     if (!request || typeof request !== "object") {
-      throw new Error("企业微信助理入口请求无效。");
+      throw new Error("企业微信智能机器人配置请求无效。");
     }
     if (typeof request.enabled !== "boolean") {
-      throw new Error("企业微信助理入口启用状态无效。");
+      throw new Error("企业微信智能机器人启用状态无效。");
     }
     const id = request.id
       ? requireText(request.id, "机器人配置 ID", 200)
       : randomUUID();
     const existing = this.store.getStoredWeComBot(id);
     if (request.id && !existing) {
-      throw new Error("企业微信助理入口不存在或已经删除。");
+      throw new Error("企业微信智能机器人配置不存在或已经删除。");
     }
-    const name = requireText(request.name, "机器人名称", 80);
+    const name = requireText(request.name, "助理连接标识", 80);
     const botId = requireText(request.botId, "Bot ID", 200);
     if (/\s/u.test(botId)) {
       throw new Error("Bot ID 格式无效。");
     }
     if (existing && existing.botId !== botId) {
       throw new Error(
-        "已保存机器人的 Bot ID 不能修改；请新建机器人配置后再切换助理入口。",
+        "已保存连接的 Bot ID 不能修改；请在助理配置中先取消绑定，再绑定新的企业微信智能机器人。",
       );
-    }
-    const duplicateName = this.store.listStoredWeComBots().find(
-      (bot) =>
-        bot.id !== id &&
-        bot.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"),
-    );
-    if (duplicateName) {
-      throw new Error("已经存在同名企业微信助理入口。");
     }
     const duplicateBotId = this.store.listStoredWeComBots().find(
       (bot) =>
@@ -297,13 +363,13 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
           botId.toLocaleLowerCase("en-US"),
     );
     if (duplicateBotId) {
-      throw new Error("这个 Bot ID 已经配置为其他企业微信助理入口。");
+      throw new Error("这个 Bot ID 已经配置为其他企业微信智能机器人。");
     }
     if (
       this.getManagementBotId().trim().toLocaleLowerCase("en-US") ===
       botId.toLocaleLowerCase("en-US")
     ) {
-      throw new Error("这个 Bot ID 已用于 Claude Code 管理机器人，不能重复连接。");
+      throw new Error("这个 Bot ID 已用于 Claude Code 终端控制机器人，不能重复连接。");
     }
     const submittedSecret =
       request.secret === undefined ? "" : request.secret.trim();
@@ -323,7 +389,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
         .toString("base64");
     }
     if (request.enabled && !encryptedSecret) {
-      throw new Error("启用企业微信助理入口前必须填写 Secret。");
+      throw new Error("启用企业微信智能机器人前必须填写 Secret。");
     }
     const record: StoredAssistantWeComBot = {
       id,
@@ -348,6 +414,9 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       throw new Error(externalBlocker);
     }
     const runtime = this.runtimes.get(id);
+    if (runtime) {
+      this.clearPendingInboundMessages(runtime);
+    }
     runtime?.client?.disconnect();
     this.runtimes.delete(id);
     await this.store.removeStoredWeComBot(id);
@@ -366,7 +435,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
     }
     const client = runtime.client;
     if (!client || runtime.authenticatedClient !== client) {
-      throw new Error(`企业微信助理入口“${runtime.state.name}”尚未连接。`);
+      throw new Error(`企业微信智能机器人“${runtime.state.name}”尚未连接。`);
     }
     try {
       await client.sendMessage(target, {
@@ -403,6 +472,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
 
   dispose(): void {
     for (const runtime of this.runtimes.values()) {
+      this.clearPendingInboundMessages(runtime);
       runtime.client?.disconnect();
       runtime.client = null;
       runtime.authenticatedClient = null;
@@ -414,6 +484,9 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
 
   private configureRuntime(record: StoredAssistantWeComBot): void {
     const previous = this.runtimes.get(record.id);
+    if (previous) {
+      this.clearPendingInboundMessages(previous);
+    }
     previous?.client?.disconnect();
     const runtime: BotRuntime = {
       record: { ...record },
@@ -421,6 +494,8 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       client: null,
       authenticatedClient: null,
       supersededClient: null,
+      pendingInboundMessages: new Map<string, PendingInboundMessage>(),
+      processingMessageIds: new Set<string>(),
       processedMessageIds: new Set<string>(),
     };
     this.runtimes.set(record.id, runtime);
@@ -434,7 +509,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       runtime.state = {
         ...runtime.state,
         status: "error",
-        error: "这个 Bot ID 同时被配置为 Claude Code 管理机器人，已阻止重复连接。",
+        error: "这个 Bot ID 同时被配置为 Claude Code 终端控制机器人，已阻止重复连接。",
       };
       return;
     }
@@ -472,7 +547,18 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       const client = this.clientFactory({ botId: record.botId, secret });
       runtime.client = client;
       this.attachClient(runtime, client);
-      client.connect();
+      // The bundled SDK currently returns the client synchronously, but some
+      // compatible clients return a Promise. Observe both forms so a rejected
+      // connection cannot become an unhandled rejection with the UI stuck at
+      // “连接中”.
+      void Promise.resolve(client.connect()).catch((error: unknown) => {
+        if (this.runtimes.get(record.id) === runtime) {
+          this.failRuntime(
+            runtime,
+            `无法连接企业微信智能机器人：${readableError(error)}`,
+          );
+        }
+      });
     } catch (error) {
       this.failRuntime(
         runtime,
@@ -497,6 +583,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       runtime.supersededClient = null;
       runtime.state = { ...runtime.state, status: "connected", error: undefined };
       this.emit("stateChanged");
+      this.wakePendingInboundMessages(runtime);
     });
     client.on("reconnecting", () => {
       if (isCurrent()) {
@@ -549,20 +636,53 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
         this.emit("stateChanged");
       }
     });
-    client.on("message", (frame) => {
-      if (isCurrent()) {
-        void this.handleIncomingMessage(runtime, client, frame).catch(
-          (error: unknown) => {
-            if (!isCurrent()) {
-              return;
-            }
-            const detail = `处理企业微信自动化消息失败：${readableError(error)}`;
-            this.recordInbound(runtime, "failed", detail);
-            void this.replyToMessage(runtime, client, frame, detail);
-          },
+    const dispatchMessage = (frame: WsFrame<BaseMessage>) => {
+      this.dispatchIncomingMessage(runtime, client, frame);
+    };
+    client.on("message", dispatchMessage);
+    // The current SDK emits both the generic event and one typed event. Keep
+    // the typed subscriptions as a compatibility path for older/alternative
+    // clients that only expose message.text/message.voice/etc. The in-flight
+    // msgid set below makes the duplicate emission harmless.
+    const typedClient = client as unknown as AssistantInboundEventClient;
+    const typedEvents: AssistantInboundMessageEvent[] = [
+      "message.text",
+      "message.voice",
+      "message.mixed",
+      "message.image",
+      "message.file",
+      "message.video",
+    ];
+    for (const event of typedEvents) {
+      typedClient.on(event, dispatchMessage);
+    }
+  }
+
+  private dispatchIncomingMessage(
+    runtime: BotRuntime,
+    client: WeComClient,
+    frame: WsFrame<BaseMessage>,
+  ): void {
+    if (this.runtimes.get(runtime.record.id) !== runtime) {
+      return;
+    }
+    void this.handleIncomingMessage(runtime, client, frame).catch(
+      (error: unknown) => {
+        if (this.runtimes.get(runtime.record.id) !== runtime) {
+          return;
+        }
+        console.error("Failed to handle assistant WeCom message", error);
+        this.recordInbound(
+          runtime,
+          "failed",
+          "处理企业微信助理消息发生异常，正在本地重试。",
         );
-      }
-    });
+        const messageId = trimmedInboundIdentifier(frame.body?.msgid);
+        if (messageId && validInboundIdentifier(messageId)) {
+          this.scheduleInboundRetry(runtime, client, frame, messageId);
+        }
+      },
+    );
   }
 
   private async handleIncomingMessage(
@@ -574,7 +694,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
     if (!message) {
       return;
     }
-    const messageId = message.msgid?.trim();
+    const messageId = trimmedInboundIdentifier(message.msgid);
     if (!messageId || !validInboundIdentifier(messageId)) {
       this.recordInbound(
         runtime,
@@ -583,70 +703,247 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       );
       return;
     }
-    if (runtime.processedMessageIds.has(messageId)) {
+    if (
+      runtime.processingMessageIds.has(messageId) ||
+      runtime.processedMessageIds.has(messageId)
+    ) {
       return;
     }
-    runtime.processedMessageIds.add(messageId);
-    if (runtime.processedMessageIds.size > 2_000) {
-      const oldest = runtime.processedMessageIds.values().next().value;
-      if (typeof oldest === "string") {
-        runtime.processedMessageIds.delete(oldest);
+    runtime.processingMessageIds.add(messageId);
+    let processed = false;
+    try {
+      if (message.chattype !== "group" && message.chattype !== "single") {
+        this.recordInbound(
+          runtime,
+          "ignored",
+          "暂不支持这种企业微信会话类型。",
+        );
+        processed = true;
+        return;
       }
-    }
-    if (message.chattype !== "group" && message.chattype !== "single") {
+      const text = incomingMessageText(message).trim();
+      const userId = trimmedInboundIdentifier(message.from?.userid);
+      const chatId =
+        message.chattype === "group"
+          ? trimmedInboundIdentifier(message.chatid)
+          : userId;
+      if (
+        !text ||
+        !chatId ||
+        !userId ||
+        !validInboundIdentifier(chatId) ||
+        !validInboundIdentifier(userId)
+      ) {
+        this.recordInbound(
+          runtime,
+          "ignored",
+          "消息缺少可信文本或身份字段，已静默忽略。",
+        );
+        processed = true;
+        return;
+      }
+      if (!this.messageHandler) {
+        // Retain the callback in memory instead of depending on WeCom to resend
+        // it after the rest of the application has finished starting.
+        this.recordInbound(
+          runtime,
+          "received",
+          "私人助理消息路由尚未启动，正在本地重试。",
+        );
+        this.scheduleInboundRetry(runtime, client, frame, messageId);
+        return;
+      }
+      this.recordInbound(runtime, "received", "已收到消息，正在匹配业务路由。");
+      const pending = runtime.pendingInboundMessages.get(messageId);
+      const result =
+        pending?.routeResult ??
+        (await this.messageHandler({
+          botProfileId: runtime.record.id,
+          messageId,
+          chatType: message.chattype,
+          chatId,
+          userId,
+          text,
+          quoteText: quoteText(message).trim(),
+        }));
+      if (!result) {
+        // An inline bot connection can authenticate a few milliseconds before
+        // its assistant profile is committed. Retry the retained callback
+        // locally; an external same-msgid delivery can also complete it sooner.
+        this.recordInbound(
+          runtime,
+          "received",
+          "消息尚未匹配私人助理路由，正在本地重试。",
+        );
+        this.scheduleInboundRetry(runtime, client, frame, messageId);
+        return;
+      }
+      if (result.silent) {
+        this.recordInbound(runtime, "ignored", result.message);
+        processed = true;
+        return;
+      }
       this.recordInbound(
         runtime,
-        "ignored",
-        "暂不支持这种企业微信会话类型。",
+        result.status === "accepted" ? "routed" : "rejected",
+        result.message,
       );
+      // Only make this msgid terminal after the acknowledgement reached WeCom.
+      // If both the stream reply and fallback fail, a retry must be allowed;
+      // AssistantStore still prevents an accepted turn from executing twice.
+      processed = await this.replyToMessage(
+        runtime,
+        client,
+        frame,
+        result.message,
+      );
+      if (!processed) {
+        this.recordInbound(
+          runtime,
+          "failed",
+          "消息已进入本地路由，但企业微信确认回复失败，正在本地重试。",
+        );
+        this.scheduleInboundRetry(runtime, client, frame, messageId, result);
+      }
+    } finally {
+      runtime.processingMessageIds.delete(messageId);
+      if (processed) {
+        this.clearPendingInboundMessage(runtime, messageId);
+        this.rememberProcessedMessage(runtime, messageId);
+      }
+    }
+  }
+
+  private scheduleInboundRetry(
+    runtime: BotRuntime,
+    client: WeComClient,
+    frame: WsFrame<BaseMessage>,
+    messageId: string,
+    routeResult?: AssistantWeComMessageResult,
+  ): void {
+    if (
+      this.runtimes.get(runtime.record.id) !== runtime ||
+      runtime.processedMessageIds.has(messageId)
+    ) {
       return;
     }
-    const text = incomingMessageText(message).trim();
-    const userId = message.from?.userid?.trim();
-    const chatId =
-      message.chattype === "group" ? message.chatid?.trim() : userId;
+    const now = Date.now();
+    const pending = runtime.pendingInboundMessages.get(messageId) ?? {
+      client,
+      frame,
+      retryCount: 0,
+      expiresAt: now + INBOUND_RETRY_MAX_AGE_MS,
+      timer: null,
+    };
     if (
-      !text ||
-      !chatId ||
-      !userId ||
-      !validInboundIdentifier(chatId) ||
-      !validInboundIdentifier(userId)
+      !runtime.pendingInboundMessages.has(messageId) &&
+      runtime.pendingInboundMessages.size >= MAX_PENDING_INBOUND_MESSAGES
     ) {
       this.recordInbound(
         runtime,
-        "ignored",
-        "消息缺少可信文本或身份字段，已静默忽略。",
+        "failed",
+        "待处理企业微信消息过多，已暂缓本条消息，请稍后重试。",
       );
       return;
     }
-    if (!this.messageHandler) {
-      this.recordInbound(runtime, "ignored", "自动化业务路由尚未启动。");
+    pending.client = client;
+    pending.frame = frame;
+    if (routeResult) {
+      pending.routeResult = routeResult;
+    }
+    runtime.pendingInboundMessages.set(messageId, pending);
+    if (pending.timer) {
       return;
     }
-    this.recordInbound(runtime, "received", "已收到消息，正在匹配业务路由。");
-    const result = await this.messageHandler({
-      botProfileId: runtime.record.id,
-      messageId,
-      chatType: message.chattype,
-      chatId,
-      userId,
-      text,
-      quoteText: quoteText(message).trim(),
-    });
-    if (!result) {
+    if (
+      now >= pending.expiresAt ||
+      pending.retryCount >= INBOUND_RETRY_DELAYS_MS.length
+    ) {
+      runtime.pendingInboundMessages.delete(messageId);
       this.recordInbound(
         runtime,
-        "ignored",
-        "消息未匹配已启用的业务路由，已静默忽略。",
+        "failed",
+        "企业微信入站消息在本地重试后仍未完成，请检查助理绑定、连接和运行状态。",
       );
       return;
     }
-    this.recordInbound(
-      runtime,
-      result.status === "accepted" ? "routed" : "rejected",
-      result.message,
-    );
-    await this.replyToMessage(runtime, client, frame, result.message);
+    const delay = INBOUND_RETRY_DELAYS_MS[pending.retryCount];
+    pending.retryCount += 1;
+    pending.timer = setTimeout(() => {
+      pending.timer = null;
+      if (
+        this.runtimes.get(runtime.record.id) !== runtime ||
+        runtime.processedMessageIds.has(messageId)
+      ) {
+        runtime.pendingInboundMessages.delete(messageId);
+        return;
+      }
+      this.dispatchIncomingMessage(runtime, pending.client, pending.frame);
+    }, delay);
+    pending.timer.unref?.();
+  }
+
+  private wakePendingInboundMessages(runtime: BotRuntime): void {
+    // A retry may have been retained while the SDK was reconnecting. Use the
+    // runtime's current client before waking it so the acknowledgement cannot
+    // be attempted through a stale connection object supplied by an older
+    // callback.
+    if (runtime.client) {
+      for (const pending of runtime.pendingInboundMessages.values()) {
+        pending.client = runtime.client;
+      }
+    }
+    for (const [messageId, pending] of runtime.pendingInboundMessages) {
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
+      pending.timer = setTimeout(() => {
+        pending.timer = null;
+        if (
+          this.runtimes.get(runtime.record.id) !== runtime ||
+          runtime.processedMessageIds.has(messageId)
+        ) {
+          runtime.pendingInboundMessages.delete(messageId);
+          return;
+        }
+        this.dispatchIncomingMessage(runtime, pending.client, pending.frame);
+      }, 0);
+      pending.timer.unref?.();
+    }
+  }
+
+  private clearPendingInboundMessage(
+    runtime: BotRuntime,
+    messageId: string,
+  ): void {
+    const pending = runtime.pendingInboundMessages.get(messageId);
+    if (pending?.timer) {
+      clearTimeout(pending.timer);
+    }
+    runtime.pendingInboundMessages.delete(messageId);
+  }
+
+  private clearPendingInboundMessages(runtime: BotRuntime): void {
+    for (const pending of runtime.pendingInboundMessages.values()) {
+      if (pending.timer) {
+        clearTimeout(pending.timer);
+      }
+    }
+    runtime.pendingInboundMessages.clear();
+  }
+
+  private rememberProcessedMessage(
+    runtime: BotRuntime,
+    messageId: string,
+  ): void {
+    runtime.processedMessageIds.add(messageId);
+    if (runtime.processedMessageIds.size <= 2_000) {
+      return;
+    }
+    const oldest = runtime.processedMessageIds.values().next().value;
+    if (typeof oldest === "string") {
+      runtime.processedMessageIds.delete(oldest);
+    }
   }
 
   private async replyToMessage(
@@ -655,6 +952,13 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
     frame: WsFrameHeaders,
     content: string,
   ): Promise<boolean> {
+    // A callback can race a reconnect or a configuration replacement. Never
+    // send a reply through a client that is no longer the authenticated
+    // connection for this bot; the caller will retain the route result and
+    // retry once the current connection is ready.
+    if (runtime.client !== client || runtime.authenticatedClient !== client) {
+      return false;
+    }
     try {
       await client.replyStream(
         frame,
@@ -665,7 +969,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       return true;
     } catch (error) {
       console.error("Failed to reply to assistant WeCom message", error);
-      if (runtime.client !== client) {
+      if (runtime.client !== client || runtime.authenticatedClient !== client) {
         return false;
       }
       try {
@@ -708,7 +1012,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
   private requireRuntime(botProfileId: string): BotRuntime {
     const runtime = this.runtimes.get(botProfileId);
     if (!runtime) {
-      throw new Error("企业微信助理入口不存在或已经删除。");
+      throw new Error("企业微信智能机器人不存在或已经删除。");
     }
     return runtime;
   }

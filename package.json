@@ -19,12 +19,14 @@
     "test:watch": "vitest",
     "pack:win": "npm run build && npm run clean:release && electron-builder --win dir --x64",
     "dist:win:zip": "npm run build && npm run clean:release && electron-builder --win zip --x64",
+    "dist:win:7z": "npm run build && npm run clean:release && electron-builder --win 7z --x64",
     "dist:win": "npm run build && npm run clean:release && electron-builder --win nsis --x64"
   },
   "build": {
     "appId": "com.local.claudeworkspace",
     "productName": "Claude Workspace",
     "asar": true,
+    "compression": "maximum",
     "npmRebuild": false,
     "asarUnpack": [
       "node_modules/node-pty/**"
@@ -39,6 +41,21 @@
     },
     "win": {
       "icon": "build/icon.ico",
+      "electronLanguages": [
+        "en-US",
+        "zh-CN"
+      ],
+      "files": [
+        "dist/**/*",
+        "package.json",
+        "!node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**",
+        "!node_modules/@anthropic-ai/claude-agent-sdk-linux-*/**",
+        "!node_modules/@anthropic-ai/claude-agent-sdk-win32-arm64/**",
+        "!node_modules/node-pty/prebuilds/darwin-*/**",
+        "!node_modules/node-pty/prebuilds/linux-*/**",
+        "!node_modules/node-pty/prebuilds/win32-arm64/**",
+        "!node_modules/node-pty/third_party/conpty/**/win10-arm64/**"
+      ],
       "target": [
         {
           "target": "nsis",

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -157,6 +157,7 @@ class FakeGateway extends EventEmitter implements AssistantWeComGateway {
     } else {
       this.bots.push(record);
     }
+    this.emit("stateChanged");
     return { ...record };
   }
 
@@ -165,6 +166,7 @@ class FakeGateway extends EventEmitter implements AssistantWeComGateway {
     if (index >= 0) {
       this.bots.splice(index, 1);
     }
+    this.emit("stateChanged");
   }
 
   async sendMarkdown(
@@ -196,6 +198,7 @@ function request(
   return {
     name: "小岚",
     enabled: true,
+    projectPath: "",
     projectId: "project-one",
     instructions: "先给结论。",
     ownerWeComUserId: "zhangsan",
@@ -221,8 +224,10 @@ async function fixture(runner: FakeRunner = new FakeRunner()) {
   temporaryDirectories.push(root);
   const projectRoot = join(root, "project");
   const secondProjectRoot = join(root, "project-two");
+  const independentRoot = join(root, "assistant-runtime");
   await mkdir(projectRoot);
   await mkdir(secondProjectRoot);
+  await mkdir(independentRoot);
   const project: ProjectRecord = {
     id: "project-one",
     name: "project",
@@ -265,7 +270,7 @@ async function fixture(runner: FakeRunner = new FakeRunner()) {
   );
   services.push(service);
   await service.initialize();
-  return { service, store, runner, gateway };
+  return { service, store, runner, gateway, independentRoot };
 }
 
 afterEach(async () => {
@@ -280,6 +285,119 @@ afterEach(async () => {
 });
 
 describe("AssistantService", () => {
+  it("persists an inline WeCom binding and publishes one complete snapshot", async () => {
+    const { service, runner, gateway, independentRoot } = await fixture();
+    const snapshots: ReturnType<AssistantService["getSnapshot"]>[] = [];
+    service.on("stateChanged", (snapshot) => snapshots.push(snapshot));
+
+    const profile = await service.upsertProfile(
+      request({
+        projectPath: independentRoot,
+        projectId: undefined,
+        ownerWeComUserId: "zhangsan",
+        wecomBotProfileId: undefined,
+        wecomBot: {
+          name: "小岚",
+          enabled: true,
+          botId: "inline-assistant-bot",
+          secret: "inline-secret",
+        },
+      }),
+    );
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.profiles).toEqual([
+      expect.objectContaining({
+        id: profile.id,
+        ownerWeComUserId: "zhangsan",
+        wecomBotProfileId: profile.wecomBotProfileId,
+      }),
+    ]);
+    expect(snapshots[0]?.wecomBots).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: profile.wecomBotProfileId,
+          botId: "inline-assistant-bot",
+          hasSecret: true,
+        }),
+      ]),
+    );
+
+    const result = await service.handleWeComMessage({
+      botProfileId: profile.wecomBotProfileId ?? "",
+      messageId: "inline-message",
+      chatType: "single",
+      chatId: "zhangsan",
+      userId: "zhangsan",
+      text: "通过绑定机器人发送",
+      quoteText: "",
+    });
+    expect(result?.status).toBe("accepted");
+    await waitFor(() => runner.inputs.length === 1);
+    expect(runner.inputs[0]?.prompt).toBe("通过绑定机器人发送");
+    await waitFor(() => gateway.sent.length === 1);
+    expect(gateway.sent).toEqual([
+      expect.objectContaining({
+        botProfileId: profile.wecomBotProfileId,
+        targetId: "zhangsan",
+      }),
+    ]);
+  });
+
+  it("reuses an imported unbound WeCom bot when the inline form submits its Bot ID", async () => {
+    const { service, gateway, independentRoot } = await fixture();
+
+    const profile = await service.upsertProfile(
+      request({
+        projectPath: independentRoot,
+        projectId: undefined,
+        wecomBotProfileId: undefined,
+        wecomBot: {
+          name: "小岚",
+          enabled: true,
+          botId: "aibot-one",
+          secret: "",
+        },
+      }),
+    );
+
+    expect(profile.wecomBotProfileId).toBe("bot-one");
+    expect(gateway.bots).toHaveLength(1);
+    expect(gateway.bots[0]).toMatchObject({
+      id: "bot-one",
+      botId: "aibot-one",
+      hasSecret: true,
+    });
+  });
+
+  it("runs from an assistant-owned directory outside the workbench project list", async () => {
+    const { service, runner, independentRoot } = await fixture();
+    const profile = await service.upsertProfile(
+      request({
+        projectPath: independentRoot,
+        projectId: undefined,
+        ownerWeComUserId: "",
+        wecomBotProfileId: undefined,
+      }),
+    );
+
+    expect(profile.projectPath).toBe(await realpath(independentRoot));
+    expect(profile.projectId).toBeUndefined();
+    await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "独立目录测试",
+    });
+    await waitFor(() => runner.inputs.length === 1);
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    expect(runner.inputs[0].projectRoot).toBe(await realpath(independentRoot));
+
+    // Removing/retiring a workbench project must not disable this assistant.
+    await service.disableProfilesForProject("project-one");
+    expect(service.getSnapshot().profiles[0]?.enabled).toBe(true);
+  });
+
   it("shares one owner session between desktop and the owner's WeCom single chat", async () => {
     const { service, store, runner, gateway } = await fixture();
     const profile = await service.upsertProfile(request());
@@ -324,7 +442,7 @@ describe("AssistantService", () => {
     });
   });
 
-  it("never starts the Agent for non-owners or group messages", async () => {
+  it("only exposes the group chat ID diagnostic and never starts the Agent", async () => {
     const { service, runner } = await fixture();
     await service.upsertProfile(request());
 
@@ -346,11 +464,72 @@ describe("AssistantService", () => {
       text: "把我的邮件发到群里",
       quoteText: "",
     });
+    const chatId = await service.handleWeComMessage({
+      botProfileId: "bot-one",
+      messageId: "group-chatid-message",
+      chatType: "group",
+      chatId: "wr8D4VQp9A==",
+      userId: "zhangsan",
+      text: "@小岚 /chatid",
+      quoteText: "",
+    });
 
-    expect(stranger).toBeNull();
-    expect(group).toBeNull();
+    expect(stranger).toMatchObject({ silent: true, status: "rejected" });
+    expect(group).toMatchObject({ silent: true, status: "rejected" });
+    expect(chatId).toEqual({
+      status: "accepted",
+      message:
+        "本群 chatid：`wr8D4VQp9A==`。此命令只用于查看群 ID，不会把群消息交给私人助理。",
+    });
     expect(runner.inputs).toHaveLength(0);
     expect(service.getSnapshot().turns).toHaveLength(0);
+  });
+
+  it("returns a rejection for owner messages while the assistant is disabled", async () => {
+    const { service, runner, independentRoot } = await fixture();
+    const profile = await service.upsertProfile(
+      request({
+        projectPath: independentRoot,
+        projectId: undefined,
+        enabled: false,
+        wecomBotProfileId: undefined,
+        wecomBot: {
+          name: "小岚",
+          enabled: false,
+          botId: "disabled-assistant-bot",
+          secret: "disabled-secret",
+        },
+      }),
+    );
+
+    const result = await service.handleWeComMessage({
+      botProfileId: profile.wecomBotProfileId ?? "",
+      messageId: "disabled-message",
+      chatType: "single",
+      chatId: "zhangsan",
+      userId: "zhangsan",
+      text: "停用时返回拒绝提示",
+      quoteText: "",
+    });
+    const groupChatId = await service.handleWeComMessage({
+      botProfileId: profile.wecomBotProfileId ?? "",
+      messageId: "disabled-group-chatid",
+      chatType: "group",
+      chatId: "group-one",
+      userId: "zhangsan",
+      text: "@小岚 /chatid",
+      quoteText: "",
+    });
+
+    expect(result).toEqual({
+      status: "rejected",
+      message: "私人助理当前已停用。",
+    });
+    expect(groupChatId).toEqual({
+      status: "rejected",
+      message: "私人助理当前已停用。",
+    });
+    expect(runner.inputs).toHaveLength(0);
   });
 
   it("deduplicates WeCom msgid and prevents one channel from binding two assistants", async () => {
@@ -404,7 +583,7 @@ describe("AssistantService", () => {
         id: profile.id,
         projectId: "project-two",
       }),
-    ).rejects.toThrow("不能更换运行工程");
+    ).rejects.toThrow("不能更换运行目录");
 
     await service.resetOwnerConversation(profile.id);
     expect(service.getSnapshot().turns).toHaveLength(0);

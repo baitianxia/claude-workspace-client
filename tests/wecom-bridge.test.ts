@@ -320,7 +320,7 @@ describe("WeComBridge", () => {
       router,
       () => client as unknown as WeComClient,
     );
-    expect(bridge.shouldInjectClaudeHooks()).toBe(false);
+    expect(bridge.isClaudePushEnabled()).toBe(false);
     bridge.configure({
       enabled: true,
       botId: "bot-id",
@@ -328,7 +328,7 @@ describe("WeComBridge", () => {
       secret: "secret",
       hasSecret: true,
     });
-    expect(bridge.shouldInjectClaudeHooks()).toBe(true);
+    expect(bridge.isClaudePushEnabled()).toBe(true);
     client.emit("authenticated");
 
     bridge.handleClaudeHook(
@@ -361,6 +361,10 @@ describe("WeComBridge", () => {
       "zhangsan",
       "zhangsan",
     ]);
+    expect(bridge.getState()).toMatchObject({
+      lastClaudeHookAt: expect.any(Number),
+      lastClaudeHookDetail: expect.stringContaining("已推送到 zhangsan"),
+    });
     const callbackUserId = "wohR_KCgAAVrFf3pjqdWOLHCn12fH5nw";
 
     client.emit(
@@ -612,7 +616,13 @@ describe("WeComBridge", () => {
     );
 
     await vi.waitFor(() =>
-      expect(pty.writes).toEqual(["\x1b[12;34R", `\r${DOWN}\r`]),
+      expect(pty.writes).toEqual([
+        "\x1b[12;34R",
+        "\r",
+        DOWN,
+        "\r",
+        "\r",
+      ]),
     );
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "routed",
@@ -774,7 +784,7 @@ describe("WeComBridge", () => {
     );
     expect(bridge.getState()).toMatchObject({
       lastInboundStatus: "ignored",
-      lastInboundDetail: expect.stringContaining("企业微信业务入口"),
+      lastInboundDetail: expect.stringContaining("企业微信智能机器人"),
     });
     expect(client.replies).toEqual([]);
     expect(client.sent).toEqual([]);

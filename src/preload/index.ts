@@ -13,14 +13,14 @@ type IpcChannelMap = typeof import("../shared/ipc-channels").IPC_CHANNELS;
 // this map stays aligned with the main process without generating a local require().
 const IPC_CHANNELS: IpcChannelMap = {
   getSnapshot: "workspace:get-snapshot",
+  setTheme: "workspace:set-theme",
   selectProjectDirectory: "workspace:select-project-directory",
+  selectAssistantProjectDirectory: "workspace:select-assistant-project-directory",
   updateProject: "workspace:update-project",
   removeProject: "workspace:remove-project",
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
-  upsertAssistantWeComBot: "workspace:upsert-assistant-wecom-bot",
-  deleteAssistantWeComBot: "workspace:delete-assistant-wecom-bot",
   upsertAssistantProfile: "workspace:upsert-assistant-profile",
   deleteAssistantProfile: "workspace:delete-assistant-profile",
   sendAssistantMessage: "workspace:send-assistant-message",
@@ -48,8 +48,11 @@ const IPC_CHANNELS: IpcChannelMap = {
 
 const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.getSnapshot),
+  setTheme: (theme) => ipcRenderer.invoke(IPC_CHANNELS.setTheme, theme),
   selectProjectDirectory: () =>
     ipcRenderer.invoke(IPC_CHANNELS.selectProjectDirectory),
+  selectAssistantProjectDirectory: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.selectAssistantProjectDirectory),
   updateProject: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.updateProject, request),
   removeProject: (projectId) =>
@@ -60,10 +63,6 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.autoDetectClaudeExecutable),
   updateWeComConfig: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.updateWeComConfig, request),
-  upsertAssistantWeComBot: (request) =>
-    ipcRenderer.invoke(IPC_CHANNELS.upsertAssistantWeComBot, request),
-  deleteAssistantWeComBot: (botProfileId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.deleteAssistantWeComBot, botProfileId),
   upsertAssistantProfile: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.upsertAssistantProfile, request),
   deleteAssistantProfile: (assistantId) =>

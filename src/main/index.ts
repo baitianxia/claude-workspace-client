@@ -7,11 +7,13 @@ import { AssistantStore } from "./assistant-store";
 import { AssistantTaskService } from "./assistant-task-service";
 import { AssistantTaskStore } from "./assistant-task-store";
 import { AssistantWeComBotManager } from "./assistant-wecom-bot-manager";
+import { terminateTrackedClaudeProcesses } from "./claude-agent-sdk-process";
 import { ClaudeCodeAssistantRunner } from "./claude-code-assistant-runner";
 import { ClaudeCodeAssistantTaskRunner } from "./claude-code-assistant-task-runner";
 import { ClaudeHookServer } from "./claude-hook-server";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
+import { withTimeout } from "./promise-timeout";
 import { SessionManager } from "./session-manager";
 import { TemporaryWorkspace } from "./temporary-workspace";
 import { WeComBridge } from "./wecom-bridge";
@@ -27,14 +29,18 @@ let assistantService: AssistantService | null = null;
 let allowClose = false;
 let shutdownComplete = false;
 let shutdownPromise: Promise<void> | null = null;
+let forceExitTimer: NodeJS.Timeout | null = null;
 
-function createWindow(): BrowserWindow {
+const SHUTDOWN_STEP_TIMEOUT_MILLISECONDS = 8_000;
+const FORCE_EXIT_TIMEOUT_MILLISECONDS = 20_000;
+
+function createWindow(backgroundColor = "#12110f"): BrowserWindow {
   const window = new BrowserWindow({
     width: 1380,
     height: 860,
     minWidth: 980,
     minHeight: 640,
-    backgroundColor: "#12110f",
+    backgroundColor,
     title: "Claude Workspace",
     autoHideMenuBar: true,
     show: false,
@@ -148,15 +154,19 @@ async function startApplication(): Promise<void> {
     }`;
     console.error(hookAvailabilityError);
   }
+  // Install the local hook settings for every new Claude process. Delivery is
+  // still gated by WeComBridge when a callback arrives, so a process launched
+  // before the bot is enabled is already instrumented when the user later
+  // turns the connection on.
+  const hookLaunchOptions = claudeHookServer?.hookLaunchOptions.bind(
+    claudeHookServer,
+  );
   sessionManager = new SessionManager(
     () => claudeLocator.requireExecutable(),
     undefined,
     process.platform,
     projectStore.listSessions(),
-    (sessionId, launchId) =>
-      claudeHookServer && wecomBridge?.shouldInjectClaudeHooks()
-        ? claudeHookServer.hookLaunchOptions(sessionId, launchId)
-        : { args: [] },
+    hookLaunchOptions,
   );
   await projectStore.replaceSessions(sessionManager.listSessions());
 
@@ -175,11 +185,24 @@ async function startApplication(): Promise<void> {
     (botProfileId) => {
       const profile = assistantStore.findProfileByWeComBot(botProfileId);
       return profile
-        ? `私人助理“${profile.name}”仍绑定这个企业微信入口，请先解除绑定或删除助理。`
+        ? `私人助理“${profile.name}”仍绑定这个企业微信智能机器人，请先解除绑定或删除助理。`
         : undefined;
     },
   );
   assistantWeComBots = wecomAssistantEntries;
+  // Install the route before opening any assistant WebSocket. A bot can
+  // receive a callback immediately after authentication; defer handling until
+  // AssistantService has finished restoring its stores instead of silently
+  // dropping that first message during startup.
+  let resolveAssistantServiceReady: (service: AssistantService) => void = () => {
+    // Replaced by the promise executor below.
+  };
+  const assistantServiceReady = new Promise<AssistantService>((resolve) => {
+    resolveAssistantServiceReady = resolve;
+  });
+  wecomAssistantEntries.setMessageHandler(async (message) =>
+    (await assistantServiceReady).handleWeComMessage(message),
+  );
   const wecomSettingsService = new WeComSettingsService(
     projectStore,
     wecomBridge,
@@ -219,14 +242,11 @@ async function startApplication(): Promise<void> {
     assistantTasks,
   );
   await assistantService.initialize();
-  wecomAssistantEntries.setMessageHandler(async (message) => {
-    if (!assistantService) {
-      return null;
-    }
-    return assistantService.handleWeComMessage(message);
-  });
+  resolveAssistantServiceReady(assistantService);
 
-  mainWindow = createWindow();
+  mainWindow = createWindow(
+    projectStore.getTheme() === "light" ? "#f6f6f4" : "#12110f",
+  );
   const temporaryWorkspace = new TemporaryWorkspace(
     join(app.getPath("userData"), "temporary-workspaces"),
   );
@@ -278,6 +298,13 @@ app.on("before-quit", (event) => {
   if (shutdownPromise) {
     return;
   }
+  // Electron waits for every Node handle during normal quit. Keep a final
+  // watchdog so a broken third-party iterator or socket cannot leave the
+  // Windows client process alive forever after the user closed it.
+  forceExitTimer = setTimeout(() => {
+    console.error("Claude Workspace shutdown exceeded its safety deadline");
+    app.exit(0);
+  }, FORCE_EXIT_TIMEOUT_MILLISECONDS);
   shutdownPromise = (async () => {
     try {
       removeIpcHandlers?.();
@@ -286,8 +313,18 @@ app.on("before-quit", (event) => {
     }
     removeIpcHandlers = null;
     assistantWeComBots?.setMessageHandler(null);
+    // Start service disposal first so no new turns or schedules can be queued,
+    // then kill every tracked SDK process tree before waiting for workers.
+    const assistantDisposal = assistantService?.dispose();
     try {
-      await assistantService?.dispose();
+      await terminateTrackedClaudeProcesses();
+      if (assistantDisposal) {
+        await withTimeout(
+          assistantDisposal,
+          SHUTDOWN_STEP_TIMEOUT_MILLISECONDS,
+          "停止私人助理超过 8 秒。",
+        );
+      }
     } catch (error) {
       console.error("Failed to stop assistant during shutdown", error);
     }
@@ -298,15 +335,29 @@ app.on("before-quit", (event) => {
       console.error("Failed to stop WeCom during shutdown", error);
     }
     try {
-      sessionManager?.dispose();
+      if (sessionManager) {
+        await withTimeout(
+          sessionManager.dispose(),
+          SHUTDOWN_STEP_TIMEOUT_MILLISECONDS,
+          "停止 Claude Code 终端超过 8 秒。",
+        );
+      }
     } catch (error) {
       console.error("Failed to stop sessions during shutdown", error);
     }
     try {
-      await claudeHookServer?.stop();
+      const stopHooks = claudeHookServer?.stop();
+      if (stopHooks) {
+        await withTimeout(
+          stopHooks,
+          SHUTDOWN_STEP_TIMEOUT_MILLISECONDS,
+          "停止 Claude Code Hook 服务超过 8 秒。",
+        );
+      }
     } catch (error) {
       console.error("Failed to stop Claude hooks during shutdown", error);
     }
+    await terminateTrackedClaudeProcesses();
   })()
     .catch((error: unknown) => {
       console.error("Failed to shut down Claude Workspace cleanly", error);
@@ -315,4 +366,11 @@ app.on("before-quit", (event) => {
       shutdownComplete = true;
       app.quit();
     });
+});
+
+app.on("will-quit", () => {
+  if (forceExitTimer) {
+    clearTimeout(forceExitTimer);
+    forceExitTimer = null;
+  }
 });

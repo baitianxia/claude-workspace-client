@@ -5,6 +5,7 @@ import type {
   AssistantProfileRecord,
   AssistantSnapshot,
   AssistantTurnRecord,
+  AssistantWeComBotDraft,
   AssistantWeComBotProfile,
   ProjectRecord,
   SendAssistantMessageRequest,
@@ -16,6 +17,11 @@ import type {
   AssistantWeComMessageResult,
 } from "./assistant-wecom-bot-manager";
 import { AssistantStore } from "./assistant-store";
+import {
+  assistantRuntimePathKey,
+  legacyRuntimePath,
+  validateAssistantRuntimePath,
+} from "./assistant-runtime-path";
 import type { AssistantTaskService } from "./assistant-task-service";
 import type {
   AssistantTaskMcpServer,
@@ -28,6 +34,8 @@ const MAX_QUEUED_TURNS_PER_ASSISTANT = 10;
 const MAX_ASSISTANT_MESSAGE_CHARACTERS = 4_000;
 const MAX_ASSISTANT_INSTRUCTION_CHARACTERS = 4_000;
 const WECOM_DELIVERY_TIMEOUT_MILLISECONDS = 15_000;
+const CHAT_ID_COMMAND_PATTERN =
+  /(?:^|[^\p{L}\p{N}_])\/chatid(?=$|[^\p{L}\p{N}_])/iu;
 
 interface AssistantServiceEvents {
   stateChanged: [state: AssistantSnapshot];
@@ -66,6 +74,10 @@ function readableError(error: unknown): string {
       " ",
     )
     .slice(-8_000);
+}
+
+function isChatIdCommand(value: string): boolean {
+  return CHAT_ID_COMMAND_PATTERN.test(value.trim());
 }
 
 function requireText(
@@ -141,12 +153,22 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
   private initialized = false;
   private shuttingDown = false;
   private disposePromise: Promise<void> | null = null;
-  private readonly onNestedStateChanged = () => this.emitStateChanged();
+  private nestedStateChangeSuppressionDepth = 0;
+  private nestedStateChangePending = false;
+  private readonly onNestedStateChanged = () => {
+    if (this.nestedStateChangeSuppressionDepth > 0) {
+      this.nestedStateChangePending = true;
+      return;
+    }
+    this.emitStateChanged();
+  };
 
   constructor(
     private readonly store: AssistantStore,
     private readonly runner: AssistantRunner,
-    private readonly getProject: (projectId: string) => ProjectRecord | undefined,
+    private readonly getProject:
+      | ((projectId: string) => ProjectRecord | undefined)
+      | undefined,
     private readonly wecomBots: AssistantWeComGateway,
     private readonly tasks: AssistantTaskService,
     private readonly now: () => number = Date.now,
@@ -159,6 +181,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       return;
     }
     await this.store.initialize();
+    await this.migrateLegacyRuntimePaths();
     await this.store.recoverInterruptedTurns(this.now());
     await this.runner.initialize?.();
     await this.tasks.initialize();
@@ -206,28 +229,19 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     return this.hasRunningTurns() || this.tasks.hasRunningRuns();
   }
 
-  findBotDeletionBlocker(botProfileId: string): string | undefined {
-    const profile = this.store.findProfileByWeComBot(botProfileId);
-    return profile
-      ? `私人助理“${profile.name}”仍绑定这个企业微信入口，请先解除绑定或删除助理。`
-      : undefined;
-  }
-
-  async upsertWeComBot(
-    request: UpsertAssistantWeComBotRequest,
-  ): Promise<AssistantWeComBotProfile> {
-    return this.wecomBots.upsertBot(request);
-  }
-
-  async deleteWeComBot(botProfileId: string): Promise<void> {
-    const blocker = this.findBotDeletionBlocker(botProfileId);
-    if (blocker) {
-      throw new Error(blocker);
-    }
-    await this.wecomBots.deleteBot(botProfileId);
-  }
-
   async upsertProfile(
+    request: UpsertAssistantProfileRequest,
+  ): Promise<AssistantProfileRecord> {
+    // Saving an inline WeCom bot updates the bot runtime before the profile
+    // itself is persisted. Coalesce nested state events so the renderer never
+    // receives an intermediate snapshot that contains the new bot but still
+    // has the old (or missing) profile binding.
+    return this.withNestedStateChangesSuppressed(() =>
+      this.upsertProfileInternal(request),
+    );
+  }
+
+  private async upsertProfileInternal(
     request: UpsertAssistantProfileRequest,
   ): Promise<AssistantProfileRecord> {
     if (!request || typeof request !== "object") {
@@ -257,17 +271,37 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     ) {
       throw new Error("已经存在同名私人助理。");
     }
-    const projectId = requireText(request.projectId, "运行工程", 200);
-    if (!this.getProject(projectId)) {
-      throw new Error("私人助理关联的工程不存在。");
+    const requestedProjectPath = requireText(
+      request.projectPath ?? "",
+      "运行目录",
+      4_000,
+      { allowEmpty: true },
+    );
+    let projectPath: string;
+    if (requestedProjectPath) {
+      projectPath = await validateAssistantRuntimePath(requestedProjectPath);
+    } else if (request.projectId) {
+      const legacyProjectId = requireText(request.projectId, "运行工程", 200);
+      const legacyProject = this.getProject?.(legacyProjectId);
+      if (!legacyProject) {
+        throw new Error("旧助理关联的工程不存在，请重新选择运行目录。");
+      }
+      projectPath = await validateAssistantRuntimePath(legacyProject.rootPath);
+    } else {
+      throw new Error("请选择私人助理运行目录。");
     }
+    const existingProjectPath = existing
+      ? legacyRuntimePath(existing, this.getProject)
+      : undefined;
     if (
       existing &&
-      existing.projectId !== projectId &&
+      (!existingProjectPath ||
+        assistantRuntimePathKey(existingProjectPath) !==
+          assistantRuntimePathKey(projectPath)) &&
       (this.store.listTurnsForConversation(id).length > 0 ||
         this.tasks.hasAssistantData(id))
     ) {
-      throw new Error("私人助理产生过聊天或定时任务后不能更换运行工程，请新建助理。");
+      throw new Error("私人助理产生过聊天或定时任务后不能更换运行目录，请新建助理。");
     }
     const ownerWeComUserId = requireText(
       request.ownerWeComUserId,
@@ -284,15 +318,141 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     ) {
       throw new Error("主人 userid 保存后不能更换，请新建私人助理。");
     }
-    const wecomBotProfileId = request.wecomBotProfileId
-      ? requireText(request.wecomBotProfileId, "企业微信入口", 200)
-      : undefined;
-    if (wecomBotProfileId) {
-      if (!ownerWeComUserId) {
-        throw new Error("绑定企业微信入口前必须填写主人 userid。");
+
+    // New renderer clients submit the bot details together with the assistant
+    // profile. Keep accepting the old profile-id-only shape so an upgraded
+    // client can migrate without losing its existing binding.
+    // `undefined` is treated like an omitted field so older renderer builds
+    // that spread an optional value keep an existing binding. Use `null` to
+    // explicitly remove a binding.
+    const hasInlineBot = request.wecomBot !== undefined;
+    const inlineBot = hasInlineBot ? request.wecomBot : undefined;
+    if (
+      hasInlineBot &&
+      inlineBot !== null &&
+      (typeof inlineBot !== "object" || Array.isArray(inlineBot))
+    ) {
+      throw new Error("企业微信智能机器人配置格式无效。");
+    }
+    const legacyBotProfileId =
+      !hasInlineBot && request.wecomBotProfileId
+        ? requireText(request.wecomBotProfileId, "企业微信机器人配置", 200)
+        : undefined;
+    let wecomBotProfileId = hasInlineBot
+      ? undefined
+      : legacyBotProfileId ?? existing?.wecomBotProfileId;
+    const shouldBindBot = hasInlineBot
+      ? inlineBot !== null
+      : Boolean(wecomBotProfileId);
+    if (shouldBindBot && !ownerWeComUserId) {
+      throw new Error("绑定企业微信智能机器人前必须填写主人 userid。");
+    }
+    if (
+      legacyBotProfileId &&
+      !this.wecomBots.listBots().some((bot) => bot.id === legacyBotProfileId)
+    ) {
+      throw new Error("选择的企业微信智能机器人不存在，请在助理配置中重新配置。");
+    }
+    if (
+      hasInlineBot &&
+      inlineBot &&
+      typeof inlineBot.id === "string" &&
+      existing?.wecomBotProfileId &&
+      inlineBot.id !== existing.wecomBotProfileId
+    ) {
+      throw new Error(
+        "当前助理已经绑定其他企业微信智能机器人；请先取消绑定并保存，再绑定新的机器人。",
+      );
+    }
+    if (
+      hasInlineBot &&
+      inlineBot &&
+      typeof inlineBot.id === "string" &&
+      this.store
+        .listProfiles()
+        .some(
+          (profile) =>
+            profile.id !== id && profile.wecomBotProfileId === inlineBot.id,
+        )
+    ) {
+      throw new Error("这个企业微信智能机器人已经绑定到其他私人助理。");
+    }
+
+    // Finish validating every profile field before mutating the bot store.
+    // This keeps a rejected assistant save from creating a partially configured
+    // robot that is no longer reachable from the form.
+    const instructions = requireText(
+      request.instructions,
+      "助理指令",
+      MAX_ASSISTANT_INSTRUCTION_CHARACTERS,
+      { allowEmpty: true, multiline: true },
+    );
+    const timeoutMinutes = requireInteger(
+      request.timeoutMinutes,
+      "超时分钟",
+      1,
+      120,
+    );
+    const maxTurns = requireInteger(request.maxTurns, "最大轮数", 1, 100);
+
+    let createdInlineBotId: string | undefined;
+    if (hasInlineBot && inlineBot) {
+      let inlineBotRequest = inlineBot as AssistantWeComBotDraft;
+      const knownInlineBot = inlineBotRequest.id
+        ? this.wecomBots.listBots().some(
+            (bot) => bot.id === inlineBotRequest.id,
+          )
+        : false;
+      if (
+        inlineBotRequest.id &&
+        !knownInlineBot &&
+        existing?.wecomBotProfileId === inlineBotRequest.id
+      ) {
+        // The profile and bot snapshots can briefly arrive in different IPC
+        // events. If the current profile still points at the missing record,
+        // let the submitted Bot ID recreate that connection instead of
+        // leaving the configuration form permanently unusable.
+        inlineBotRequest = { ...inlineBotRequest, id: undefined };
       }
-      if (!this.wecomBots.listBots().some((bot) => bot.id === wecomBotProfileId)) {
-        throw new Error("选择的企业微信助理入口不存在。");
+      // A legacy upgrade may already have a saved, currently unbound bot with
+      // the same Bot ID. Reuse that record so configuring the assistant does
+      // not fail with a duplicate-ID error or create a second long connection.
+      // Never reuse a record that another assistant owns.
+      if (!inlineBotRequest.id && typeof inlineBotRequest.botId === "string") {
+        const botIdKey = inlineBotRequest.botId.trim().toLocaleLowerCase("en-US");
+        const reusableBot = this.wecomBots
+          .listBots()
+          .find(
+            (bot) =>
+              bot.botId.toLocaleLowerCase("en-US") === botIdKey,
+          );
+        if (reusableBot) {
+          const owner = this.store.findProfileByWeComBot(reusableBot.id);
+          if (owner && owner.id !== id) {
+            throw new Error("这个企业微信智能机器人已经绑定到其他私人助理。");
+          }
+          inlineBotRequest = { ...inlineBotRequest, id: reusableBot.id };
+        }
+      }
+      const savedBot = await this.wecomBots.upsertBot(
+        inlineBotRequest,
+      );
+      wecomBotProfileId = savedBot.id;
+      if (!inlineBotRequest.id) {
+        createdInlineBotId = savedBot.id;
+      }
+      if (
+        this.store
+          .listProfiles()
+          .some(
+            (profile) =>
+              profile.id !== id && profile.wecomBotProfileId === savedBot.id,
+          )
+      ) {
+        if (createdInlineBotId) {
+          await this.wecomBots.deleteBot(createdInlineBotId).catch(() => undefined);
+        }
+        throw new Error("这个企业微信智能机器人已经绑定到其他私人助理。");
       }
     }
     const timestamp = this.now();
@@ -300,24 +460,42 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       id,
       name,
       enabled: request.enabled,
-      projectId,
-      instructions: requireText(
-        request.instructions,
-        "助理指令",
-        MAX_ASSISTANT_INSTRUCTION_CHARACTERS,
-        { allowEmpty: true, multiline: true },
-      ),
+      projectPath,
+      instructions,
       ownerWeComUserId,
       ...(wecomBotProfileId ? { wecomBotProfileId } : {}),
-      timeoutMinutes: requireInteger(request.timeoutMinutes, "超时分钟", 1, 120),
-      maxTurns: requireInteger(request.maxTurns, "最大轮数", 1, 100),
+      timeoutMinutes,
+      maxTurns,
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
     };
     if (existing) {
       await this.runner.close(id);
     }
-    await this.store.putProfile(profile);
+    try {
+      await this.store.putProfile(profile);
+    } catch (error) {
+      // A newly created bot has no other owner at this point. Remove it if
+      // profile persistence fails so a rejected save does not leave a hidden
+      // orphan connection behind.
+      if (createdInlineBotId) {
+        await this.wecomBots.deleteBot(createdInlineBotId).catch(() => undefined);
+      }
+      throw error;
+    }
+    if (
+      existing?.wecomBotProfileId &&
+      existing.wecomBotProfileId !== wecomBotProfileId
+    ) {
+      // The old binding is no longer reachable from the profile. Disconnect
+      // and remove it from the internal credential store; failure here should
+      // not roll back a successfully saved assistant configuration.
+      await this.wecomBots
+        .deleteBot(existing.wecomBotProfileId)
+        .catch((error: unknown) =>
+          console.error("Failed to remove replaced assistant WeCom bot", error),
+        );
+    }
     if (!profile.enabled) {
       await this.tasks.disableTasksForAssistant(profile.id);
     }
@@ -326,7 +504,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
   }
 
   async deleteProfile(assistantId: string): Promise<void> {
-    this.requireProfile(assistantId);
+    const profile = this.requireProfile(assistantId);
     if (this.hasActiveTurns(assistantId)) {
       throw new Error("私人助理仍有消息正在处理，暂时不能删除。");
     }
@@ -336,6 +514,13 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     await this.runner.close(assistantId);
     await this.tasks.removeAssistant(assistantId);
     await this.store.removeProfile(assistantId);
+    if (profile.wecomBotProfileId) {
+      await this.wecomBots
+        .deleteBot(profile.wecomBotProfileId)
+        .catch((error: unknown) =>
+          console.error("Failed to remove deleted assistant WeCom bot", error),
+        );
+    }
     this.emitStateChanged();
   }
 
@@ -437,13 +622,53 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     message: AssistantWeComMessage,
   ): Promise<AssistantWeComMessageResult | null> => {
     const profile = this.store.findProfileByWeComBot(message.botProfileId);
-    if (
-      !profile ||
-      message.chatType !== "single" ||
-      !profile.ownerWeComUserId ||
-      message.userId !== profile.ownerWeComUserId
-    ) {
+    if (!profile) {
       return null;
+    }
+    if (message.chatType !== "single") {
+      // A group may ask for its own WeCom chat ID as a diagnostic. This is a
+      // deliberately narrow exception: it never opens the assistant session
+      // or routes arbitrary group content to Claude. Other group messages
+      // remain silent and never enter the owner's assistant session.
+      if (message.chatType === "group" && isChatIdCommand(message.text)) {
+        if (!profile.enabled) {
+          return {
+            status: "rejected",
+            message: "私人助理当前已停用。",
+          };
+        }
+        const chatId = message.chatId.trim();
+        if (!chatId) {
+          return {
+            status: "rejected",
+            message: "本条群聊消息缺少 chatid，无法返回群 ID。",
+          };
+        }
+        return {
+          status: "accepted",
+          message: `本群 chatid：\`${chatId}\`。此命令只用于查看群 ID，不会把群消息交给私人助理。`,
+        };
+      }
+      return {
+        status: "rejected",
+        message: "当前只接受主人单聊，群聊消息已静默忽略。",
+        silent: true,
+      };
+    }
+    if (!profile.ownerWeComUserId) {
+      return {
+        status: "rejected",
+        message: "尚未配置主人 userid，消息已静默忽略。请在助理配置中填写真实 userid。",
+        silent: true,
+      };
+    }
+    if (message.userId !== profile.ownerWeComUserId) {
+      return {
+        status: "rejected",
+        message:
+          "发送者不是当前助理配置的主人 userid，消息已静默忽略。若机器人由非企业超级管理员创建，企业微信回调可能返回加密 userid，请使用回调值或改用超级管理员创建的机器人。",
+        silent: true,
+      };
     }
     const duplicate = this.store.findTurnByMessageId(
       message.botProfileId,
@@ -453,7 +678,10 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       return { status: "accepted", message: "这条消息已经接收，不会重复执行。" };
     }
     if (!profile.enabled) {
-      return { status: "rejected", message: "私人助理当前已停用。" };
+      return {
+        status: "rejected",
+        message: "私人助理当前已停用。",
+      };
     }
     const command = message.text.trim().toLocaleLowerCase("en-US");
     if (command === "/help") {
@@ -573,8 +801,8 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     if (!profile.enabled) {
       throw new Error("私人助理当前已停用。");
     }
-    if (!this.getProject(profile.projectId)) {
-      throw new Error("私人助理关联的工程已经被移除。");
+    if (!legacyRuntimePath(profile, this.getProject)) {
+      throw new Error("私人助理没有配置可用的运行目录，请在配置中重新选择。");
     }
     return profile;
   }
@@ -673,14 +901,15 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         return;
       }
       let profile: AssistantProfileRecord;
-      let project: ProjectRecord | undefined;
+      let projectRoot: string;
       let taskMcpServer: AssistantTaskMcpServer;
       try {
         profile = this.requireEnabledProfile(turn.assistantId);
-        project = this.getProject(profile.projectId);
-        if (!project) {
-          throw new Error("私人助理关联的工程已经被移除。");
+        const configuredPath = legacyRuntimePath(profile, this.getProject);
+        if (!configuredPath) {
+          throw new Error("私人助理没有配置可用的运行目录，请在配置中重新选择。");
         }
+        projectRoot = await validateAssistantRuntimePath(configuredPath);
         taskMcpServer = await this.tasks.createMcpServer(profile.id);
       } catch (error) {
         await this.finishTurn(turn, {
@@ -702,7 +931,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         result = await this.runner.run({
           turnId: running.id,
           profile,
-          projectRoot: project.rootPath,
+          projectRoot,
           prompt: running.request,
           taskMcpServer,
           onSessionId: async (sessionId) => {
@@ -776,8 +1005,66 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
   }
 
   private emitStateChanged(): void {
-    if (this.initialized) {
-      this.emit("stateChanged", this.getSnapshot());
+    if (!this.initialized) {
+      return;
+    }
+    if (this.nestedStateChangeSuppressionDepth > 0) {
+      this.nestedStateChangePending = true;
+      return;
+    }
+    this.emit("stateChanged", this.getSnapshot());
+  }
+
+  private async withNestedStateChangesSuppressed<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    this.nestedStateChangeSuppressionDepth += 1;
+    try {
+      return await operation();
+    } finally {
+      this.nestedStateChangeSuppressionDepth -= 1;
+      if (
+        this.nestedStateChangeSuppressionDepth === 0 &&
+        this.nestedStateChangePending
+      ) {
+        this.nestedStateChangePending = false;
+        this.emitStateChanged();
+      }
+    }
+  }
+
+  /**
+   * Older assistant.json files stored a workbench project id. Resolve that id
+   * once to an absolute path and then drop the id so future workbench changes
+   * cannot disable or redirect the assistant.
+   */
+  private async migrateLegacyRuntimePaths(): Promise<void> {
+    for (const profile of this.store.listProfiles()) {
+      if (!profile.projectId) {
+        continue;
+      }
+      if (profile.projectPath.trim()) {
+        const migrated = { ...profile };
+        delete migrated.projectId;
+        await this.store.putProfile(migrated).catch((error: unknown) => {
+          console.error("Failed to migrate assistant runtime path", error);
+        });
+        continue;
+      }
+      const legacyProject = this.getProject?.(profile.projectId);
+      if (!legacyProject) {
+        continue;
+      }
+      try {
+        const migratedPath = await validateAssistantRuntimePath(
+          legacyProject.rootPath,
+        );
+        const migrated = { ...profile, projectPath: migratedPath };
+        delete migrated.projectId;
+        await this.store.putProfile(migrated);
+      } catch (error) {
+        console.error("Failed to migrate assistant runtime path", error);
+      }
     }
   }
 }

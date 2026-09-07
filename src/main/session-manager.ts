@@ -7,10 +7,19 @@ import type {
   TerminalDataEvent,
   TerminalSnapshot,
 } from "../shared/contracts";
+import {
+  TERMINAL_PASTE_CHUNK_DELAY_MS,
+  shouldThrottleTerminalInput,
+  splitTerminalPaste,
+} from "../shared/terminal-paste";
 import { createClaudeLaunchSpec } from "./claude-executable";
+import { terminateProcessTree } from "./process-tree";
 import { nextSessionTitle } from "./session-title";
 
 const MAX_TERMINAL_BUFFER_LENGTH = 2_000_000;
+// Claude Code's Ink picker reads one keypress per PTY write. A short gap keeps
+// consecutive arrow/Enter events distinct on Windows ConPTY and Unix PTYs.
+const REMOTE_INPUT_KEY_DELAY_MS = 35;
 
 interface ManagedSession {
   record: SessionRecord;
@@ -18,6 +27,18 @@ interface ManagedSession {
   launchId: string | null;
   terminalBuffer: string;
   sequence: number;
+}
+
+interface InputQueueItem {
+  run: () => boolean | Promise<boolean>;
+  resolve: (value: boolean) => void;
+  reject: (reason: unknown) => void;
+}
+
+interface InputQueue {
+  items: InputQueueItem[];
+  running: boolean;
+  cancelled: boolean;
 }
 
 export interface SessionInputEvent {
@@ -35,6 +56,8 @@ export type ClaudeSessionLaunchOptionsProvider = (
   sessionId: string,
   launchId: string,
 ) => ClaudeSessionLaunchOptions;
+
+export type SessionProcessTreeTerminator = (pid: number) => Promise<void>;
 
 export interface SessionManagerEvents {
   data: [event: TerminalDataEvent];
@@ -105,6 +128,12 @@ export function describeClaudeSpawnError(error: unknown): string {
 
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private readonly sessions = new Map<string, ManagedSession>();
+  /**
+   * PTY input is serialized per session. A paste may take a few milliseconds
+   * per chunk, and a later keystroke or remote reply must not overtake it.
+   */
+  private readonly inputQueues = new Map<string, InputQueue>();
+  private readonly terminateTree: SessionProcessTreeTerminator;
 
   constructor(
     private readonly getClaudeExecutable: () => string,
@@ -112,8 +141,14 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     private readonly platform: NodeJS.Platform = process.platform,
     initialSessions: SessionRecord[] = [],
     private readonly getLaunchOptions?: ClaudeSessionLaunchOptionsProvider,
+    terminateTree?: SessionProcessTreeTerminator,
   ) {
     super();
+    this.terminateTree =
+      terminateTree ??
+      (platform === "win32"
+        ? (pid) => terminateProcessTree(pid, { platform })
+        : async () => undefined);
     for (const initial of initialSessions) {
       if (this.sessions.has(initial.id)) {
         continue;
@@ -214,6 +249,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       throw new Error("会话仍在运行，不能重启。");
     }
 
+    this.cancelQueuedInput(sessionId);
     session.process = null;
     session.launchId = null;
     session.record.status = "starting";
@@ -275,11 +311,80 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   }
 
   write(sessionId: string, data: string): void {
-    this.writeInput(sessionId, data, "local");
+    this.validateTerminalInput(data);
+    const processHandle = this.runningProcess(sessionId);
+    if (!processHandle) {
+      return;
+    }
+
+    // xterm emits bracketed-paste markers when Claude Code enables paste mode.
+    // For terminals without that mode, the size check in
+    // shouldThrottleTerminalInput is a conservative fallback. In either case
+    // the payload is queued so a user's next keystroke cannot be interleaved.
+    if (shouldThrottleTerminalInput(data) || this.hasQueuedInput(sessionId)) {
+      void this.enqueueInput(sessionId, () =>
+        shouldThrottleTerminalInput(data)
+          ? this.writePastedInput(
+              sessionId,
+              processHandle,
+              data,
+              "local",
+            )
+          : this.writeInput(sessionId, data, "local", processHandle),
+      ).catch(() => undefined);
+      return;
+    }
+
+    this.writeInput(sessionId, data, "local", processHandle);
   }
 
   writeRemoteReply(sessionId: string, data: string): boolean {
-    return this.writeInput(sessionId, data, "remote");
+    this.validateTerminalInput(data);
+    const processHandle = this.runningProcess(sessionId);
+    if (!processHandle) {
+      return false;
+    }
+    if (this.hasQueuedInput(sessionId)) {
+      // This method is intentionally synchronous for the WeCom bridge API.
+      // Report that the live process accepted the request, then put it behind
+      // any in-flight paste; the expected process guard prevents stale input
+      // from being written after a restart.
+      void this.enqueueInput(sessionId, () =>
+        this.writeInput(sessionId, data, "remote", processHandle),
+      ).catch(() => undefined);
+      return true;
+    }
+    return this.writeInput(sessionId, data, "remote", processHandle);
+  }
+
+  async writeRemoteReplySequence(
+    sessionId: string,
+    chunks: string[],
+  ): Promise<boolean> {
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      return false;
+    }
+    if (chunks.some((chunk) => typeof chunk !== "string")) {
+      throw new Error("Terminal input chunks must be strings.");
+    }
+    const totalLength = chunks.reduce((total, chunk) => total + chunk.length, 0);
+    if (totalLength > 100_000) {
+      throw new Error("Terminal input is too large.");
+    }
+    const processHandle = this.runningProcess(sessionId);
+    if (!processHandle) {
+      return false;
+    }
+    const inputChunks = [...chunks];
+    return this.enqueueInput(sessionId, () =>
+      this.writeInputSequence(
+        sessionId,
+        processHandle,
+        inputChunks,
+        "remote",
+        REMOTE_INPUT_KEY_DELAY_MS,
+      ),
+    );
   }
 
   isCurrentLaunch(sessionId: string, launchId: string): boolean {
@@ -293,10 +398,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     sessionId: string,
     data: string,
     source: SessionInputEvent["source"],
+    expectedProcess?: IPty,
   ): boolean {
-    if (data.length > 100_000) {
-      throw new Error("Terminal input is too large.");
-    }
+    this.validateTerminalInput(data);
     const session = this.sessions.get(sessionId);
     if (!session || session.record.status !== "running") {
       return false;
@@ -304,8 +408,139 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session.process) {
       return false;
     }
+    if (expectedProcess && session.process !== expectedProcess) {
+      return false;
+    }
     session.process.write(data);
     this.emit("input", { sessionId, source, data });
+    return true;
+  }
+
+  private validateTerminalInput(data: string): void {
+    if (typeof data !== "string") {
+      throw new Error("Terminal data must be a string.");
+    }
+    if (data.length > 100_000) {
+      throw new Error("Terminal input is too large.");
+    }
+  }
+
+  private runningProcess(sessionId: string): IPty | null {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.record.status !== "running" || !session.process) {
+      return null;
+    }
+    return session.process;
+  }
+
+  private hasQueuedInput(sessionId: string): boolean {
+    const queue = this.inputQueues.get(sessionId);
+    return Boolean(
+      queue &&
+        !queue.cancelled &&
+        (queue.running || queue.items.length > 0),
+    );
+  }
+
+  /** Add one input operation to the session's FIFO and start its drain loop. */
+  private enqueueInput(
+    sessionId: string,
+    run: () => boolean | Promise<boolean>,
+  ): Promise<boolean> {
+    let queue = this.inputQueues.get(sessionId);
+    if (!queue || queue.cancelled) {
+      queue = { items: [], running: false, cancelled: false };
+      this.inputQueues.set(sessionId, queue);
+    }
+
+    const queued = queue;
+    const result = new Promise<boolean>((resolve, reject) => {
+      queued.items.push({ run, resolve, reject });
+    });
+    if (!queued.running) {
+      queued.running = true;
+      void this.drainInputQueue(sessionId, queued);
+    }
+    return result;
+  }
+
+  private async drainInputQueue(
+    sessionId: string,
+    queue: InputQueue,
+  ): Promise<void> {
+    while (!queue.cancelled && queue.items.length > 0) {
+      const item = queue.items.shift();
+      if (!item) {
+        continue;
+      }
+      try {
+        item.resolve(await item.run());
+      } catch (error) {
+        item.reject(error);
+      }
+    }
+
+    // Requests that were waiting when a process was removed/restarted should
+    // resolve as rejected writes rather than remain pending forever.
+    if (queue.cancelled) {
+      for (const item of queue.items.splice(0)) {
+        item.resolve(false);
+      }
+    }
+    queue.running = false;
+    if (this.inputQueues.get(sessionId) === queue) {
+      this.inputQueues.delete(sessionId);
+    }
+  }
+
+  private cancelQueuedInput(sessionId: string): void {
+    const queue = this.inputQueues.get(sessionId);
+    if (!queue) {
+      return;
+    }
+    queue.cancelled = true;
+    for (const item of queue.items.splice(0)) {
+      item.resolve(false);
+    }
+    this.inputQueues.delete(sessionId);
+  }
+
+  private writePastedInput(
+    sessionId: string,
+    expectedProcess: IPty,
+    data: string,
+    source: SessionInputEvent["source"],
+  ): Promise<boolean> {
+    const chunks = splitTerminalPaste(data);
+    return this.writeInputSequence(
+      sessionId,
+      expectedProcess,
+      chunks,
+      source,
+      TERMINAL_PASTE_CHUNK_DELAY_MS,
+    );
+  }
+
+  private async writeInputSequence(
+    sessionId: string,
+    expectedProcess: IPty,
+    chunks: string[],
+    source: SessionInputEvent["source"],
+    delayMs: number,
+  ): Promise<boolean> {
+    if (chunks.length === 0) {
+      return false;
+    }
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (!this.writeInput(sessionId, chunks[index], source, expectedProcess)) {
+        return false;
+      }
+      if (index < chunks.length - 1 && delayMs > 0) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, delayMs);
+        });
+      }
+    }
     return true;
   }
 
@@ -325,10 +560,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   stop(sessionId: string): void {
     const session = this.sessions.get(sessionId);
-    if (!session || session.record.status !== "running") {
+    if (
+      !session ||
+      (session.record.status !== "running" &&
+        session.record.status !== "starting")
+    ) {
       return;
     }
-    session.process?.kill();
+    this.cancelQueuedInput(sessionId);
+    if (session.process) {
+      void this.terminateSessionProcess(session.process);
+    }
   }
 
   removeSession(sessionId: string): SessionRecord {
@@ -340,8 +582,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       session.record.status === "running" ||
       session.record.status === "starting"
     ) {
-      session.process?.kill();
+      if (session.process) {
+        void this.terminateSessionProcess(session.process);
+      }
     }
+    this.cancelQueuedInput(sessionId);
     this.sessions.delete(sessionId);
     return { ...session.record };
   }
@@ -350,6 +595,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     for (const session of [...this.sessions.values()]) {
       if (session.record.projectId === projectId) {
         this.stop(session.record.id);
+        this.cancelQueuedInput(session.record.id);
         this.sessions.delete(session.record.id);
       }
     }
@@ -357,7 +603,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   hasRunningSessions(): boolean {
     return [...this.sessions.values()].some(
-      (session) => session.record.status === "running",
+      (session) =>
+        session.record.status === "running" ||
+        session.record.status === "starting",
     );
   }
 
@@ -372,11 +620,40 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     };
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    const terminations: Promise<void>[] = [];
     for (const session of this.sessions.values()) {
-      if (session.record.status === "running") {
-        session.process?.kill();
+      this.cancelQueuedInput(session.record.id);
+      if (
+        (session.record.status === "running" ||
+          session.record.status === "starting") &&
+        session.process
+      ) {
+        terminations.push(this.terminateSessionProcess(session.process));
       }
+    }
+    await Promise.allSettled(terminations);
+  }
+
+  private async terminateSessionProcess(processHandle: IPty): Promise<void> {
+    const pid = Number(processHandle.pid);
+    if (this.platform !== "win32") {
+      try {
+        processHandle.kill();
+      } catch {
+        // The PTY may have exited already.
+      }
+      return;
+    }
+    // On Windows taskkill must see the wrapper before the direct handle is
+    // closed, otherwise its Claude descendant can become orphaned.
+    if (Number.isInteger(pid) && pid > 0) {
+      await this.terminateTree(pid).catch(() => undefined);
+    }
+    try {
+      processHandle.kill();
+    } catch {
+      // The PTY may have exited while the tree termination command was running.
     }
   }
 
@@ -443,6 +720,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session || session.process !== processHandle) {
       return;
     }
+    this.cancelQueuedInput(sessionId);
     session.process = null;
     session.launchId = null;
     session.record.status = "exited";

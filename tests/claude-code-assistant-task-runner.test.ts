@@ -18,6 +18,7 @@ function taskInput(
     id: "assistant-one",
     name: "小岚",
     enabled: true,
+    projectPath: "/project",
     projectId: "project-one",
     instructions: "先给结论。",
     ownerWeComUserId: "zhangsan",
@@ -119,6 +120,13 @@ describe("ClaudeCodeAssistantTaskRunner", () => {
     expect(options).not.toHaveProperty("resume");
     expect(options.abortController).toBe(abortController);
     expect(options.maxTurns).toBe(12);
+    expect(options.disallowedTools).toEqual([
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "ScheduleWakeup",
+      "RemoteTrigger",
+    ]);
   });
 
   it("uses the Windows script wrapper for npm-installed Claude Code", () => {

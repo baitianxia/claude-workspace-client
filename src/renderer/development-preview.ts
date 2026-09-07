@@ -1,4 +1,5 @@
 import type {
+  AppTheme,
   AppSnapshot,
   AssistantProfileRecord,
   AssistantStateChangedEvent,
@@ -90,6 +91,7 @@ const previewSnapshot: AppSnapshot = {
     path: "C:\\Users\\developer\\.local\\bin\\claude.exe",
     source: "detected",
   },
+  theme: "dark",
   wecom: {
     enabled: true,
     configured: true,
@@ -104,7 +106,7 @@ const previewSnapshot: AppSnapshot = {
         id: "assistant-shadow",
         name: "小岚",
         enabled: true,
-        projectId: "mall-service",
+        projectPath: "D:\\workspace\\assistant-shadow",
         instructions: "作为我的私人研究助理，先给结论，再补充关键依据。",
         ownerWeComUserId: "developer",
         wecomBotProfileId: "assistant-shadow-bot",
@@ -156,12 +158,15 @@ const previewSnapshot: AppSnapshot = {
     wecomBots: [
       {
         id: "assistant-shadow-bot",
-        name: "小岚 · 企业微信入口",
+        name: "小岚",
         enabled: true,
         configured: true,
         hasSecret: true,
         botId: "aibot-preview-shadow",
         status: "connected",
+        lastInboundAt: now - 24_000,
+        lastInboundStatus: "routed",
+        lastInboundDetail: "已路由到主人会话。",
         createdAt: now - 300_000,
         updatedAt: now - 300_000,
       },
@@ -218,7 +223,7 @@ const previewSnapshot: AppSnapshot = {
         finishedAt: now - 25_000,
         scheduledFor: now - 34_000,
         error: "邮箱 MCP 连接已失效，Claude Code 无法读取邮件；任务未静默跳过。",
-        deliveryError: "企业微信入口暂时离线，失败通知未送达。",
+        deliveryError: "企业微信智能机器人暂时离线，失败通知未送达。",
       },
     ],
     runningConversationIds: [],
@@ -320,7 +325,11 @@ new file mode 100644
 };
 
 export function installDevelopmentPreview(): void {
+  const previewParams = new URLSearchParams(window.location.search);
+  const previewTheme: AppTheme =
+    previewParams.get("theme") === "light" ? "light" : "dark";
   let snapshot = structuredClone(previewSnapshot);
+  snapshot.theme = previewTheme;
   let clipboardText = "";
   const sessionListeners = new Set<(event: SessionChangedEvent) => void>();
   const terminalListeners = new Set<(event: TerminalDataEvent) => void>();
@@ -329,7 +338,7 @@ export function installDevelopmentPreview(): void {
     (event: AssistantStateChangedEvent) => void
   >();
 
-  if (new URLSearchParams(window.location.search).has("autoConfirm")) {
+  if (previewParams.has("autoConfirm")) {
     window.confirm = () => true;
   }
 
@@ -351,7 +360,7 @@ export function installDevelopmentPreview(): void {
     }
   };
 
-  if (new URLSearchParams(window.location.search).has("unreadDemo")) {
+  if (previewParams.has("unreadDemo")) {
     window.setTimeout(() => {
       for (const listener of terminalListeners) {
         listener({ sessionId: "ui-upgrade", data: "new output", sequence: 1 });
@@ -361,7 +370,13 @@ export function installDevelopmentPreview(): void {
 
   const api: DesktopApi = {
     getSnapshot: async () => structuredClone(snapshot),
+    setTheme: async (theme) => {
+      snapshot.theme = theme;
+      return snapshot.theme;
+    },
     selectProjectDirectory: async () => null,
+    selectAssistantProjectDirectory: async () =>
+      "D:\\workspace\\assistant-shadow",
     updateProject: async ({ projectId, alias, pinned }) => {
       const project = snapshot.projects.find((item) => item.id === projectId);
       if (!project) {
@@ -397,7 +412,7 @@ export function installDevelopmentPreview(): void {
           (bot) => bot.botId === request.botId.trim(),
         )
       ) {
-        throw new Error("这个 Bot ID 已用于企业微信助理入口。");
+        throw new Error("这个 Bot ID 已用于私人助理的企业微信智能机器人。");
       }
       snapshot.wecom = {
         enabled: request.enabled,
@@ -414,75 +429,110 @@ export function installDevelopmentPreview(): void {
       publishWeCom();
       return { ...snapshot.wecom };
     },
-    upsertAssistantWeComBot: async (request) => {
-      const existing = request.id
-        ? snapshot.assistant.wecomBots.find((bot) => bot.id === request.id)
-        : undefined;
-      if (existing && existing.botId !== request.botId.trim()) {
-        throw new Error("已保存机器人的 Bot ID 不能修改。");
-      }
-      if (
-        request.botId.trim() === snapshot.wecom.botId ||
-        snapshot.assistant.wecomBots.some(
-          (bot) => bot.id !== existing?.id && bot.botId === request.botId.trim(),
-        )
-      ) {
-        throw new Error("这个 Bot ID 已被其他机器人使用。");
-      }
-      const timestamp = Date.now();
-      const bot: AssistantWeComBotProfile = {
-        id: existing?.id ?? crypto.randomUUID(),
-        name: request.name.trim(),
-        enabled: request.enabled,
-        configured: Boolean(
-          request.botId.trim() && (request.secret?.trim() || existing?.hasSecret),
-        ),
-        hasSecret: Boolean(request.secret?.trim() || existing?.hasSecret),
-        botId: request.botId.trim(),
-        status: request.enabled ? ("connected" as const) : ("disabled" as const),
-        createdAt: existing?.createdAt ?? timestamp,
-        updatedAt: timestamp,
-      };
-      snapshot.assistant.wecomBots = [
-        ...snapshot.assistant.wecomBots.filter(
-          (candidate) => candidate.id !== bot.id,
-        ),
-        bot,
-      ];
-      publishAssistant();
-      return structuredClone(bot);
-    },
-    deleteAssistantWeComBot: async (botProfileId) => {
-      if (
-        snapshot.assistant.profiles.some(
-          (profile) => profile.wecomBotProfileId === botProfileId,
-        )
-      ) {
-        throw new Error("仍有私人助理绑定这个企业微信入口。");
-      }
-      snapshot.assistant.wecomBots = snapshot.assistant.wecomBots.filter(
-        (bot) => bot.id !== botProfileId,
-      );
-      publishAssistant();
-    },
     upsertAssistantProfile: async (request) => {
       const existing = request.id
         ? snapshot.assistant.profiles.find((profile) => profile.id === request.id)
         : undefined;
+      // `undefined` behaves like an omitted field for compatibility with
+      // older renderer payloads; `null` is the explicit unbind value.
+      const hasInlineBot = request.wecomBot !== undefined;
+      const inlineBot = hasInlineBot ? request.wecomBot : undefined;
+      let botProfileId = hasInlineBot
+        ? undefined
+        : request.wecomBotProfileId ?? existing?.wecomBotProfileId;
+      const oldBotId = existing?.wecomBotProfileId;
+      if (hasInlineBot && inlineBot) {
+        let existingBot = inlineBot.id
+          ? snapshot.assistant.wecomBots.find((bot) => bot.id === inlineBot.id)
+          : undefined;
+        if (inlineBot.id && !existingBot) {
+          throw new Error("企业微信智能机器人配置不存在或已经删除。");
+        }
+        // Match the main-process migration path: an imported, currently
+        // unbound bot can be selected by its Bot ID even when the renderer has
+        // not yet received its generated profile ID.
+        if (!inlineBot.id && typeof inlineBot.botId === "string") {
+          existingBot = snapshot.assistant.wecomBots.find(
+            (bot) =>
+              bot.botId.toLocaleLowerCase("en-US") ===
+              inlineBot.botId.trim().toLocaleLowerCase("en-US"),
+          );
+        }
+        if (
+          existingBot &&
+          snapshot.assistant.profiles.some(
+            (profile) =>
+              profile.id !== existing?.id &&
+              profile.wecomBotProfileId === existingBot?.id,
+          )
+        ) {
+          throw new Error("这个企业微信智能机器人已经绑定到其他私人助理。");
+        }
+        if (
+          existingBot &&
+          existingBot.botId !== inlineBot.botId.trim()
+        ) {
+          throw new Error("已保存连接的 Bot ID 不能修改。");
+        }
+        if (
+          inlineBot.botId.trim() === snapshot.wecom.botId ||
+          snapshot.assistant.wecomBots.some(
+            (bot) =>
+              bot.id !== existingBot?.id && bot.botId === inlineBot.botId.trim(),
+          )
+        ) {
+          throw new Error("这个 Bot ID 已被其他机器人使用。");
+        }
+        const timestamp = Date.now();
+        const bot: AssistantWeComBotProfile = {
+          id: existingBot?.id ?? crypto.randomUUID(),
+          name: inlineBot.name.trim(),
+          enabled: inlineBot.enabled,
+          configured: Boolean(
+            inlineBot.botId.trim() && (inlineBot.secret?.trim() || existingBot?.hasSecret),
+          ),
+          hasSecret: Boolean(inlineBot.secret?.trim() || existingBot?.hasSecret),
+          botId: inlineBot.botId.trim(),
+          status: inlineBot.enabled ? "connected" : "disabled",
+          ...(existingBot?.lastInboundAt === undefined
+            ? {}
+            : { lastInboundAt: existingBot.lastInboundAt }),
+          ...(existingBot?.lastInboundStatus
+            ? { lastInboundStatus: existingBot.lastInboundStatus }
+            : {}),
+          ...(existingBot?.lastInboundDetail
+            ? { lastInboundDetail: existingBot.lastInboundDetail }
+            : {}),
+          createdAt: existingBot?.createdAt ?? timestamp,
+          updatedAt: timestamp,
+        };
+        snapshot.assistant.wecomBots = [
+          ...snapshot.assistant.wecomBots.filter((candidate) => candidate.id !== bot.id),
+          bot,
+        ];
+        botProfileId = bot.id;
+      }
       if (
-        request.wecomBotProfileId &&
+        botProfileId &&
         snapshot.assistant.profiles.some(
           (profile) =>
-            profile.id !== existing?.id &&
-            profile.wecomBotProfileId === request.wecomBotProfileId,
+            profile.id !== existing?.id && profile.wecomBotProfileId === botProfileId,
         )
       ) {
-        throw new Error("这个企业微信入口已经绑定到其他私人助理。");
+        throw new Error("这个企业微信智能机器人已经绑定到其他私人助理。");
       }
       const timestamp = Date.now();
       const profile: AssistantProfileRecord = {
-        ...request,
         id: existing?.id ?? crypto.randomUUID(),
+        name: request.name,
+        enabled: request.enabled,
+        projectPath: request.projectPath,
+        ...(request.projectId ? { projectId: request.projectId } : {}),
+        instructions: request.instructions,
+        ownerWeComUserId: request.ownerWeComUserId,
+        ...(botProfileId ? { wecomBotProfileId: botProfileId } : {}),
+        timeoutMinutes: request.timeoutMinutes,
+        maxTurns: request.maxTurns,
         createdAt: existing?.createdAt ?? timestamp,
         updatedAt: timestamp,
       };
@@ -505,13 +555,26 @@ export function installDevelopmentPreview(): void {
           updatedAt: timestamp,
         });
       }
+      if (oldBotId && oldBotId !== botProfileId) {
+        snapshot.assistant.wecomBots = snapshot.assistant.wecomBots.filter(
+          (bot) => bot.id !== oldBotId,
+        );
+      }
       publishAssistant();
       return structuredClone(profile);
     },
     deleteAssistantProfile: async (assistantId) => {
+      const deletedProfile = snapshot.assistant.profiles.find(
+        (profile) => profile.id === assistantId,
+      );
       snapshot.assistant.profiles = snapshot.assistant.profiles.filter(
         (profile) => profile.id !== assistantId,
       );
+      if (deletedProfile?.wecomBotProfileId) {
+        snapshot.assistant.wecomBots = snapshot.assistant.wecomBots.filter(
+          (bot) => bot.id !== deletedProfile.wecomBotProfileId,
+        );
+      }
       snapshot.assistant.conversations = snapshot.assistant.conversations.filter(
         (conversation) => conversation.assistantId !== assistantId,
       );

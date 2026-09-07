@@ -22,6 +22,7 @@ function profile(): AssistantProfileRecord {
     id: "assistant-one",
     name: "小岚",
     enabled: true,
+    projectPath: "/project",
     projectId: "project-one",
     instructions: "先给结论。",
     ownerWeComUserId: "zhangsan",

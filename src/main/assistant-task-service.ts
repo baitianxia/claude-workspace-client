@@ -12,6 +12,10 @@ import type {
   ProjectRecord,
 } from "../shared/contracts";
 import { AssistantTaskStore } from "./assistant-task-store";
+import {
+  legacyRuntimePath,
+  validateAssistantRuntimePath,
+} from "./assistant-runtime-path";
 import type {
   ClaudeCodeAssistantTaskInput,
   ClaudeCodeAssistantTaskResult,
@@ -121,7 +125,9 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
     private readonly getProfile: (
       assistantId: string,
     ) => AssistantProfileRecord | undefined,
-    private readonly getProject: (projectId: string) => ProjectRecord | undefined,
+    private readonly getProject:
+      | ((projectId: string) => ProjectRecord | undefined)
+      | undefined,
     private readonly wecomBots: AssistantTaskWeComGateway,
     private readonly now: () => number = Date.now,
   ) {
@@ -451,15 +457,16 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
       if (!profile.enabled) {
         throw new Error("任务所属私人助理当前已停用。");
       }
-      const project = this.getProject(profile.projectId);
-      if (!project) {
-        throw new Error("任务所属私人助理的工程已经被移除。");
+      const configuredPath = legacyRuntimePath(profile, this.getProject);
+      if (!configuredPath) {
+        throw new Error("任务所属私人助理没有配置可用的运行目录。");
       }
+      const projectRoot = await validateAssistantRuntimePath(configuredPath);
       result = await this.runner.run({
         runId: running.id,
         profile,
         task,
-        projectRoot: project.rootPath,
+        projectRoot,
         ...(running.scheduledFor === undefined
           ? {}
           : { scheduledFor: running.scheduledFor }),

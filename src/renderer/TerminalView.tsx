@@ -1,7 +1,11 @@
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
-import type { SessionRecord, TerminalDataEvent } from "../shared/contracts";
+import type {
+  AppTheme,
+  SessionRecord,
+  TerminalDataEvent,
+} from "../shared/contracts";
 import { consumeTerminalShortcut } from "../shared/terminal-shortcuts";
 import { TerminalOutputScheduler } from "./terminal-output-scheduler";
 
@@ -9,19 +13,72 @@ interface TerminalViewProps {
   session: SessionRecord;
   active: boolean;
   focusRequest: number;
+  theme: AppTheme;
 }
+
+const TERMINAL_THEMES: Record<AppTheme, ITheme> = {
+  dark: {
+    background: "#171614",
+    foreground: "#e7e1d8",
+    cursor: "#d97757",
+    cursorAccent: "#171614",
+    selectionBackground: "#66504688",
+    black: "#26231f",
+    red: "#d2685e",
+    green: "#8fa66b",
+    yellow: "#d3a254",
+    blue: "#7797b7",
+    magenta: "#a783a5",
+    cyan: "#72a6a0",
+    white: "#ddd7ce",
+    brightBlack: "#706a62",
+    brightRed: "#e27b70",
+    brightGreen: "#a4bc7c",
+    brightYellow: "#e5b76b",
+    brightBlue: "#8eafd0",
+    brightMagenta: "#bd99bb",
+    brightCyan: "#8abdb6",
+    brightWhite: "#f7f2eb",
+  },
+  light: {
+    background: "#ffffff",
+    foreground: "#292724",
+    cursor: "#a94f2f",
+    cursorAccent: "#ffffff",
+    selectionBackground: "#c9d8e8",
+    black: "#292724",
+    red: "#b33b32",
+    green: "#4c712e",
+    yellow: "#8a5a05",
+    blue: "#2d5f92",
+    magenta: "#7a4d7d",
+    cyan: "#1f6d6a",
+    white: "#f4f2ee",
+    brightBlack: "#6f6a64",
+    brightRed: "#c24c42",
+    brightGreen: "#5e873b",
+    brightYellow: "#a36d09",
+    brightBlue: "#3d73ad",
+    brightMagenta: "#955e98",
+    brightCyan: "#2a8580",
+    brightWhite: "#ffffff",
+  },
+};
 
 export function TerminalView({
   session,
   active,
   focusRequest,
+  theme,
 }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const activeRef = useRef(active);
   const focusPendingRef = useRef(false);
+  const themeRef = useRef(theme);
   activeRef.current = active;
+  themeRef.current = theme;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -39,29 +96,7 @@ export function TerminalView({
       lineHeight: 1.28,
       letterSpacing: 0,
       scrollback: 12_000,
-      theme: {
-        background: "#171614",
-        foreground: "#e7e1d8",
-        cursor: "#d97757",
-        cursorAccent: "#171614",
-        selectionBackground: "#66504688",
-        black: "#26231f",
-        red: "#d2685e",
-        green: "#8fa66b",
-        yellow: "#d3a254",
-        blue: "#7797b7",
-        magenta: "#a783a5",
-        cyan: "#72a6a0",
-        white: "#ddd7ce",
-        brightBlack: "#706a62",
-        brightRed: "#e27b70",
-        brightGreen: "#a4bc7c",
-        brightYellow: "#e5b76b",
-        brightBlue: "#8eafd0",
-        brightMagenta: "#bd99bb",
-        brightCyan: "#8abdb6",
-        brightWhite: "#f7f2eb",
-      },
+      theme: TERMINAL_THEMES[themeRef.current],
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
@@ -139,19 +174,24 @@ export function TerminalView({
       window.claudeWorkspace.writeTerminal({ sessionId: session.id, data });
     });
 
+    // Clipboard writes are asynchronous in the main process. Serialize them
+    // so a quick Ctrl/Cmd+C followed by Ctrl/Cmd+V always reads the new text.
+    let clipboardWritePromise: Promise<void> = Promise.resolve();
+
     const copySelection = () => {
       const selection = terminal.getSelection();
       if (!selection) {
         return;
       }
-      void window.claudeWorkspace
-        .writeClipboardText(selection)
-        .catch(() => undefined);
+      clipboardWritePromise = clipboardWritePromise
+        .catch(() => undefined)
+        .then(() => window.claudeWorkspace.writeClipboardText(selection));
     };
 
     const pasteClipboard = () => {
-      void window.claudeWorkspace
-        .readClipboardText()
+      void clipboardWritePromise
+        .catch(() => undefined)
+        .then(() => window.claudeWorkspace.readClipboardText())
         .then((text) => {
           if (!disposed && text) {
             terminal.paste(text);
@@ -181,6 +221,24 @@ export function TerminalView({
     };
     container.addEventListener("contextmenu", handleContextMenu);
 
+    // xterm normally owns the paste event on its hidden textarea. Capturing it
+    // at the canvas keeps multiline clipboard text intact when the browser or
+    // an IME dispatches a native paste event before xterm's listener runs.
+    const handlePaste = (event: ClipboardEvent) => {
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      event.preventDefault();
+      event.stopPropagation();
+      if (!disposed && text) {
+        terminal.paste(text);
+      } else if (!disposed) {
+        // Some Windows clipboard providers do not expose text on the native
+        // event. Fall back to the same serialized read used by Ctrl+V rather
+        // than allowing xterm and the browser to race with two paste paths.
+        pasteClipboard();
+      }
+    };
+    container.addEventListener("paste", handlePaste, true);
+
     const resizeTerminal = () => {
       if (container.clientWidth < 40 || container.clientHeight < 40) {
         return;
@@ -208,6 +266,7 @@ export function TerminalView({
       disposed = true;
       observer.disconnect();
       container.removeEventListener("contextmenu", handleContextMenu);
+      container.removeEventListener("paste", handlePaste, true);
       inputDisposable.dispose();
       unsubscribe();
       outputScheduler.dispose();
@@ -216,6 +275,13 @@ export function TerminalView({
       fitAddonRef.current = null;
     };
   }, [session.id]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (terminal) {
+      terminal.options.theme = TERMINAL_THEMES[theme];
+    }
+  }, [theme]);
 
   useEffect(() => {
     if (!active) {
@@ -255,7 +321,7 @@ export function TerminalView({
       <div
         className="terminal-canvas"
         ref={containerRef}
-        title="选中文本后按 Ctrl+C 或右键复制；按 Ctrl+V 粘贴"
+        title="选中文本后按 Ctrl+C 或右键复制；按 Ctrl+V 粘贴。大段内容可能显示为 [Pasted text #N +… lines]；普通提示提交时仍会保留完整内容。"
       />
       {session.status !== "running" && session.status !== "starting" ? (
         <div className="terminal-status-banner">

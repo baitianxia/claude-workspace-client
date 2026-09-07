@@ -25,6 +25,7 @@ function profile(id = "assistant-one"): AssistantProfileRecord {
     id,
     name: id === "assistant-one" ? "小岚" : "小舟",
     enabled: true,
+    projectPath: process.cwd(),
     projectId: "project-one",
     instructions: "先给结论。",
     ownerWeComUserId: "zhangsan",
@@ -190,6 +191,22 @@ describe("AssistantTaskService", () => {
         targetId: "zhangsan",
         content: expect.stringContaining("定时任务未完成"),
       }),
+    ]);
+  });
+
+  it("delivers a successful run through the task assistant's bound bot", async () => {
+    const { service, gateway } = await fixture();
+    const task = await createTask(service);
+
+    await service.runTaskNow("assistant-one", task.id);
+    await waitFor(() => gateway.sent.length === 1);
+
+    expect(gateway.sent).toEqual([
+      {
+        botProfileId: "bot-one",
+        targetId: "zhangsan",
+        content: expect.stringContaining("### 定时任务：每日简报"),
+      },
     ]);
   });
 

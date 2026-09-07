@@ -19,6 +19,8 @@ const temporaryDirectories: string[] = [];
 class FakeClient extends EventEmitter implements WeComClient {
   connected = false;
   disconnected = false;
+  failReplies = false;
+  failSends = false;
   readonly sent: Array<{ targetId: string; body: SendMsgBody }> = [];
   readonly replies: string[] = [];
 
@@ -32,6 +34,9 @@ class FakeClient extends EventEmitter implements WeComClient {
   }
 
   async sendMessage(targetId: string, body: SendMsgBody): Promise<unknown> {
+    if (this.failSends) {
+      throw new Error("send failed");
+    }
     this.sent.push({ targetId, body });
     return {};
   }
@@ -41,6 +46,9 @@ class FakeClient extends EventEmitter implements WeComClient {
     _streamId: string,
     content: string,
   ): Promise<unknown> {
+    if (this.failReplies) {
+      throw new Error("reply failed");
+    }
     this.replies.push(content);
     return {};
   }
@@ -156,7 +164,11 @@ describe("AssistantWeComBotManager", () => {
         chatId: message.chatId,
       });
       return message.messageId === "message-ignored"
-        ? null
+        ? {
+            status: "rejected",
+            message: "这条消息不是主人消息，已静默忽略。",
+            silent: true,
+          }
         : { status: "accepted", message: "已登记" };
     });
     clients.get("operations-bot")?.emit("message", groupMessage("message-one"));
@@ -213,7 +225,200 @@ describe("AssistantWeComBotManager", () => {
         botId: "claude-management-bot",
         secret: "secret",
       }),
-    ).rejects.toThrow("Claude Code 管理机器人");
+    ).rejects.toThrow("Claude Code 终端控制机器人");
+    manager.dispose();
+  });
+
+  it("records silent route diagnostics without replying to unauthorized messages", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-silent-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantStore(join(root, "assistant.json"));
+    await store.initialize();
+    const client = new FakeClient();
+    const manager = new AssistantWeComBotManager(
+      store,
+      protector,
+      () => "claude-management-bot",
+      () => client,
+    );
+    await manager.initialize();
+    const bot = await manager.upsertBot({
+      name: "助理",
+      enabled: true,
+      botId: "assistant-bot",
+      secret: "secret",
+    });
+    client.emit("authenticated");
+    manager.setMessageHandler(async () => ({
+      status: "rejected",
+      message: "发送者不是主人，已静默忽略。",
+      silent: true,
+    }));
+    client.emit("message", singleMessage("silent-message"));
+    await waitFor(
+      () => manager.listBots().find((entry) => entry.id === bot.id)?.lastInboundStatus === "ignored",
+    );
+    expect(client.replies).toHaveLength(0);
+    expect(manager.listBots().find((entry) => entry.id === bot.id)?.lastInboundDetail).toContain("静默");
+    manager.dispose();
+  });
+
+  it("accepts SDK typed message events and does not process their generic duplicate twice", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-typed-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantStore(join(root, "assistant.json"));
+    await store.initialize();
+    const client = new FakeClient();
+    const manager = new AssistantWeComBotManager(
+      store,
+      protector,
+      () => "claude-management-bot",
+      () => client,
+    );
+    await manager.initialize();
+    const bot = await manager.upsertBot({
+      name: "助理",
+      enabled: true,
+      botId: "assistant-typed-bot",
+      secret: "secret",
+    });
+    client.emit("authenticated");
+    const inbound: string[] = [];
+    manager.setMessageHandler(async (message) => {
+      inbound.push(message.messageId);
+      return { status: "accepted", message: "已收到" };
+    });
+    const frame = singleMessage("typed-message");
+    client.emit("message.text", frame);
+    client.emit("message", frame);
+    await waitFor(() => inbound.length === 1);
+    expect(inbound).toEqual(["typed-message"]);
+    expect(client.replies).toEqual(["已收到"]);
+    expect(manager.listBots().find((entry) => entry.id === bot.id)).toMatchObject({
+      lastInboundStatus: "routed",
+    });
+    manager.dispose();
+  });
+
+  it("leaves a message retryable when the route is temporarily unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-retry-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantStore(join(root, "assistant.json"));
+    await store.initialize();
+    const client = new FakeClient();
+    const manager = new AssistantWeComBotManager(
+      store,
+      protector,
+      () => "claude-management-bot",
+      () => client,
+    );
+    await manager.initialize();
+    await manager.upsertBot({
+      name: "助理",
+      enabled: true,
+      botId: "assistant-retry-bot",
+      secret: "secret",
+    });
+    client.emit("authenticated");
+
+    // The first delivery can race service startup. It must not permanently
+    // consume the msgid before a later WeCom retry reaches the route.
+    const frame = singleMessage("retry-message");
+    client.emit("message", frame);
+    await waitFor(() =>
+      manager.listBots().some((entry) =>
+        entry.lastInboundDetail?.includes("本地重试"),
+      ),
+    );
+
+    const inbound: string[] = [];
+    manager.setMessageHandler(async (message) => {
+      inbound.push(message.messageId);
+      return { status: "accepted", message: "已重新接收" };
+    });
+    client.emit("message", singleMessage("retry-message"));
+    await waitFor(() => inbound.length === 1);
+    expect(client.replies).toContain("已重新接收");
+    manager.dispose();
+  });
+
+  it("retries a temporarily unavailable route locally without a second WeCom delivery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-local-retry-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantStore(join(root, "assistant.json"));
+    await store.initialize();
+    const client = new FakeClient();
+    const manager = new AssistantWeComBotManager(
+      store,
+      protector,
+      () => "claude-management-bot",
+      () => client,
+    );
+    await manager.initialize();
+    await manager.upsertBot({
+      name: "助理",
+      enabled: true,
+      botId: "assistant-local-retry-bot",
+      secret: "secret",
+    });
+    client.emit("authenticated");
+
+    const inbound: string[] = [];
+    client.emit("message", singleMessage("local-retry-message"));
+    await waitFor(() =>
+      manager.listBots().some((entry) =>
+        entry.lastInboundDetail?.includes("本地重试"),
+      ),
+    );
+    manager.setMessageHandler(async (message) => {
+      inbound.push(message.messageId);
+      return { status: "accepted", message: "本地重试后已接收" };
+    });
+
+    await waitFor(() => inbound.length === 1);
+    expect(inbound).toEqual(["local-retry-message"]);
+    expect(client.replies).toContain("本地重试后已接收");
+    manager.dispose();
+  });
+
+  it("allows a same-msgid retry when both acknowledgement paths fail", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-ack-retry-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantStore(join(root, "assistant.json"));
+    await store.initialize();
+    const client = new FakeClient();
+    const manager = new AssistantWeComBotManager(
+      store,
+      protector,
+      () => "claude-management-bot",
+      () => client,
+    );
+    await manager.initialize();
+    await manager.upsertBot({
+      name: "助理",
+      enabled: true,
+      botId: "assistant-ack-retry-bot",
+      secret: "secret",
+    });
+    client.emit("authenticated");
+    let attempts = 0;
+    manager.setMessageHandler(async () => {
+      attempts += 1;
+      return { status: "accepted", message: `第 ${attempts} 次` };
+    });
+
+    client.failReplies = true;
+    client.failSends = true;
+    client.emit("message", singleMessage("ack-retry-message"));
+    await waitFor(() =>
+      manager.listBots().some((entry) => entry.lastInboundStatus === "failed"),
+    );
+    client.failReplies = false;
+    client.failSends = false;
+    client.emit("message", singleMessage("ack-retry-message"));
+    await waitFor(() => client.replies.includes("第 1 次"));
+    expect(attempts).toBe(1);
+    expect(client.replies).toContain("第 1 次");
     manager.dispose();
   });
 });

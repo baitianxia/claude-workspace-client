@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import type {
+  AppTheme,
   ProjectRecord,
   SessionRecord,
   SessionStatus,
@@ -27,6 +28,7 @@ export interface StoredWeComSettings {
 interface AppSettings {
   claudeExecutable?: string;
   wecom?: StoredWeComSettings;
+  theme?: AppTheme;
 }
 
 interface StoreData {
@@ -50,6 +52,8 @@ const SESSION_STATUSES = new Set<SessionStatus>([
   "failed",
   "interrupted",
 ]);
+
+const APP_THEMES = new Set<AppTheme>(["dark", "light"]);
 
 function cloneEmptyStore(): StoreData {
   return {
@@ -175,6 +179,10 @@ function parseStore(raw: string): StoreData {
     };
   }
 
+  if (settings.theme !== undefined && !APP_THEMES.has(settings.theme)) {
+    throw new Error("Workspace settings contain an invalid theme.");
+  }
+
   const rawSessions = parsed.version === 1 ? [] : parsed.sessions;
   if (!Array.isArray(rawSessions)) {
     throw new Error("Workspace data contains an invalid session list.");
@@ -197,6 +205,7 @@ function parseStore(raw: string): StoreData {
         ? { claudeExecutable: settings.claudeExecutable }
         : {}),
       ...(wecom ? { wecom } : {}),
+      ...(settings.theme ? { theme: settings.theme } : {}),
     },
   };
 }
@@ -354,6 +363,20 @@ export class ProjectStore {
     } else {
       delete this.data.settings.claudeExecutable;
     }
+    await this.persist();
+  }
+
+  getTheme(): AppTheme {
+    this.assertInitialized();
+    return this.data.settings.theme ?? "dark";
+  }
+
+  async setTheme(theme: AppTheme): Promise<void> {
+    this.assertInitialized();
+    if (!APP_THEMES.has(theme)) {
+      throw new Error("Workspace theme is invalid.");
+    }
+    this.data.settings.theme = theme;
     await this.persist();
   }
 

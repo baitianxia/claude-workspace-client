@@ -574,11 +574,25 @@ describe("RemoteReplyRouter", () => {
     ).pending;
 
     expect(terminalInputForRemoteReply(pending, "2;1,3;4")).toBe(
-      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`,
+      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r\r`,
     );
     expect(terminalInputForRemoteReply(pending, "B;C,E;I")).toBe(
-      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`,
+      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r\r`,
     );
+    expect(terminalActionForRemoteReply(pending, "2;1,3;4").inputChunks).toEqual([
+      DOWN,
+      "\r",
+      " ",
+      DOWN,
+      DOWN,
+      " ",
+      "\r",
+      DOWN,
+      DOWN,
+      DOWN,
+      "\r",
+      "\r",
+    ]);
 
     const lineSeparated = router.resolve(
       "zhangsan",
@@ -593,6 +607,6 @@ describe("RemoteReplyRouter", () => {
         lineSeparated.pending,
         lineSeparated.reply,
       ),
-    ).toBe(`${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r`);
+    ).toBe(`${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r\r`);
   });
 });

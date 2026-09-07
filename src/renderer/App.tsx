@@ -6,8 +6,10 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import type {
+  AppTheme,
   AppSnapshot,
   ClaudeExecutableState,
   ProjectRecord,
@@ -20,6 +22,7 @@ import {
   projectDisplayName,
   type WorkspaceSearchItem,
 } from "./workspace-search";
+import type { AssistantSelection } from "./AssistantPanel";
 
 const WorkspaceChangesPanel = lazy(async () => {
   const module = await import("./WorkspaceChangesPanel");
@@ -88,20 +91,17 @@ function wecomInboundLabel(state: AppSnapshot["wecom"]): string | null {
   return `${time} · ${state.lastInboundDetail}`;
 }
 
-function assistantStatusLabel(snapshot: AppSnapshot): string {
-  const profiles = snapshot.assistant.profiles;
-  if (!profiles.length) {
-    return "尚未创建助理";
+function wecomClaudeHookLabel(state: AppSnapshot["wecom"]): string | null {
+  if (!state.lastClaudeHookAt || !state.lastClaudeHookDetail) {
+    return null;
   }
-  if (snapshot.assistant.runningConversationIds.length) {
-    return `${snapshot.assistant.runningConversationIds.length} 个助理正在思考`;
-  }
-  const enabled = profiles.filter((profile) => profile.enabled).length;
-  const tasks = snapshot.assistant.tasks.filter((task) => task.enabled).length;
-  if (snapshot.assistant.schedulerError) {
-    return `${enabled}/${profiles.length} 个可用 · 定时任务调度异常`;
-  }
-  return `${enabled}/${profiles.length} 个可用 · ${tasks} 个定时任务启用`;
+  const time = new Date(state.lastClaudeHookAt).toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return `${time} · ${state.lastClaudeHookDetail}`;
 }
 
 function upsertSession(
@@ -120,6 +120,33 @@ function upsertSession(
 const COLLAPSED_PROJECTS_KEY = "claude-workspace.collapsed-projects.v1";
 const ACTIVE_SELECTION_KEY = "claude-workspace.active-selection.v1";
 const TEMPORARY_GROUP_KEY = "__temporary-sessions__";
+
+type SidebarMode = "assistant" | "claude";
+
+function handleSidebarTabKeyDown(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  current: SidebarMode,
+  onModeChange: (mode: SidebarMode) => void,
+): void {
+  let next: SidebarMode | null = null;
+  if (event.key === "ArrowLeft") {
+    next = current === "assistant" ? "claude" : "assistant";
+  } else if (event.key === "ArrowRight") {
+    next = current === "assistant" ? "claude" : "assistant";
+  } else if (event.key === "Home") {
+    next = "assistant";
+  } else if (event.key === "End") {
+    next = "claude";
+  }
+  if (!next) {
+    return;
+  }
+  event.preventDefault();
+  onModeChange(next);
+  window.requestAnimationFrame(() => {
+    document.getElementById(`sidebar-tab-${next}`)?.focus();
+  });
+}
 
 interface ActiveSelection {
   projectId?: string;
@@ -174,6 +201,9 @@ function loadCollapsedProjectIds(): Set<string> {
 
 export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("claude");
+  const [assistantSelection, setAssistantSelection] =
+    useState<AssistantSelection | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [collapsedProjectIds, setCollapsedProjectIds] = useState(
@@ -192,7 +222,6 @@ export function App() {
   const [wecomBotIdDraft, setWeComBotIdDraft] = useState("");
   const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
   const [wecomSecretDraft, setWeComSecretDraft] = useState("");
-  const [assistantPanelOpen, setAssistantPanelOpen] = useState(false);
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -459,6 +488,13 @@ export function App() {
     return grouped;
   }, [sessions]);
 
+  const theme: AppTheme = snapshot?.theme ?? "dark";
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+  }, [theme]);
+
   const runAction = async (action: () => Promise<void>) => {
     setBusy(true);
     setError(null);
@@ -469,6 +505,18 @@ export function App() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const updateTheme = (nextTheme: AppTheme) => {
+    if (busy || nextTheme === theme) {
+      return;
+    }
+    void runAction(async () => {
+      const savedTheme = await window.claudeWorkspace.setTheme(nextTheme);
+      setSnapshot((current) =>
+        current ? { ...current, theme: savedTheme } : current,
+      );
+    });
   };
 
   const requestTerminalFocus = () => {
@@ -845,6 +893,25 @@ export function App() {
     setWeComSettingsOpen(true);
   };
 
+  const openSidebarMode = (mode: SidebarMode) => {
+    setSidebarMode(mode);
+  };
+
+  const openAssistantProfile = (id: string) => {
+    setAssistantSelection({ mode: "profile", id });
+    openSidebarMode("assistant");
+  };
+
+  const openAssistantConfig = (id: string) => {
+    setAssistantSelection({ mode: "profile", id, editing: true });
+    openSidebarMode("assistant");
+  };
+
+  const openNewAssistant = () => {
+    setAssistantSelection({ mode: "new" });
+    openSidebarMode("assistant");
+  };
+
   const saveWeComSettings = (event: FormEvent) => {
     event.preventDefault();
     void runAction(async () => {
@@ -971,8 +1038,29 @@ export function App() {
     unreadSessionIds.has(session.id),
   ).length;
 
+  const effectiveAssistantSelection: AssistantSelection =
+    assistantSelection?.mode === "new"
+      ? assistantSelection
+      : assistantSelection?.mode === "profile" &&
+          snapshot.assistant.profiles.some(
+            (profile) => profile.id === assistantSelection.id,
+          )
+        ? assistantSelection
+        : snapshot.assistant.profiles[0]
+          ? { mode: "profile", id: snapshot.assistant.profiles[0].id }
+          : { mode: "new" };
+  const selectedAssistant =
+    effectiveAssistantSelection.mode === "profile"
+      ? snapshot.assistant.profiles.find(
+          (profile) => profile.id === effectiveAssistantSelection.id,
+        )
+      : undefined;
+  const selectedAssistantRunning = selectedAssistant
+    ? snapshot.assistant.runningConversationIds.includes(selectedAssistant.id)
+    : false;
+
   return (
-    <main className="app-shell">
+    <main className="app-shell" data-theme={theme}>
       <aside className="sidebar">
         <header className="sidebar-header">
           <div className="brand-row">
@@ -982,9 +1070,32 @@ export function App() {
               <p>本地多工程控制台</p>
             </div>
           </div>
+          <div className="appearance-control">
+            <span className="appearance-label">背景</span>
+            <div className="theme-switcher" role="group" aria-label="背景主题">
+              <button
+                className={`theme-choice ${theme === "dark" ? "theme-choice--active" : ""}`}
+                type="button"
+                aria-pressed={theme === "dark"}
+                onClick={() => updateTheme("dark")}
+                disabled={busy}
+              >
+                暗色
+              </button>
+              <button
+                className={`theme-choice ${theme === "light" ? "theme-choice--active" : ""}`}
+                type="button"
+                aria-pressed={theme === "light"}
+                onClick={() => updateTheme("light")}
+                disabled={busy}
+              >
+                白色
+              </button>
+            </div>
+          </div>
         </header>
 
-        <section className="claude-runtime-card">
+        <section className="claude-runtime-card sidebar-shared-runtime-card">
           <div className="runtime-heading">
             <span
               className={`status-dot ${snapshot.claudeExecutable.path ? "status-dot--online" : "status-dot--offline"}`}
@@ -998,6 +1109,9 @@ export function App() {
                     : "自动发现"
                   : "无法启动会话"}
               </span>
+              <span className="runtime-description">
+                私人助理与开发工作台共用 Claude Code 运行环境
+              </span>
             </div>
           </div>
           <div className="runtime-actions">
@@ -1010,69 +1124,196 @@ export function App() {
           </div>
         </section>
 
-        <section className="claude-runtime-card wecom-runtime-card">
-          <div className="runtime-heading">
-            <span
-              className={`status-dot ${
-                snapshot.wecom.status === "connected"
-                  ? "status-dot--online"
-                  : snapshot.wecom.status === "connecting"
-                    ? "status-dot--pending"
-                    : "status-dot--offline"
-              }`}
-            />
-            <div>
-              <strong>Claude Code 管理机器人</strong>
-              <span title={snapshot.wecom.error}>
-                {wecomStatusLabel(snapshot.wecom)}
-              </span>
-              {wecomInboundLabel(snapshot.wecom) ? (
-                <span
-                  className={`wecom-inbound-status wecom-inbound-status--${snapshot.wecom.lastInboundStatus ?? "received"}`}
-                  title={snapshot.wecom.lastInboundDetail}
+        <nav className="sidebar-mode-tabs" role="tablist" aria-label="产品区域">
+          <button
+            id="sidebar-tab-assistant"
+            className={sidebarMode === "assistant" ? "sidebar-mode-tab sidebar-mode-tab--active" : "sidebar-mode-tab"}
+            type="button"
+            role="tab"
+            aria-selected={sidebarMode === "assistant"}
+            aria-controls="sidebar-panel-assistant"
+            tabIndex={sidebarMode === "assistant" ? 0 : -1}
+            onClick={() => openSidebarMode("assistant")}
+            onKeyDown={(event) =>
+              handleSidebarTabKeyDown(
+                event,
+                "assistant",
+                openSidebarMode,
+              )
+            }
+          >
+            私人助理
+          </button>
+          <button
+            id="sidebar-tab-claude"
+            className={sidebarMode === "claude" ? "sidebar-mode-tab sidebar-mode-tab--active" : "sidebar-mode-tab"}
+            type="button"
+            role="tab"
+            aria-selected={sidebarMode === "claude"}
+            aria-controls="sidebar-panel-claude"
+            tabIndex={sidebarMode === "claude" ? 0 : -1}
+            title="本机工程、Claude Code 会话和终端远程控制"
+            onClick={() => openSidebarMode("claude")}
+            onKeyDown={(event) =>
+              handleSidebarTabKeyDown(
+                event,
+                "claude",
+                openSidebarMode,
+              )
+            }
+          >
+            开发工作台
+          </button>
+        </nav>
+
+        <section
+          id="sidebar-panel-assistant"
+          className="sidebar-tab-panel sidebar-assistant-panel"
+          role="tabpanel"
+          aria-labelledby="sidebar-tab-assistant"
+          hidden={sidebarMode !== "assistant"}
+        >
+          <section className="sidebar-assistant-section">
+            <h3 className="sidebar-subsection-label">私人助理</h3>
+            <p className="assistant-sidebar-intro">
+              主人专属 Agent · 会话与定时任务在右侧工作区打开
+            </p>
+            <nav className="assistant-sidebar-list" aria-label="私人助理列表">
+              {snapshot.assistant.profiles.map((profile) => {
+                const thinking = snapshot.assistant.runningConversationIds.includes(
+                  profile.id,
+                );
+                const open = snapshot.assistant.openConversationIds.includes(
+                  profile.id,
+                );
+                const active =
+                  effectiveAssistantSelection.mode === "profile" &&
+                  effectiveAssistantSelection.id === profile.id;
+                return (
+                  <button
+                    key={profile.id}
+                    type="button"
+                    className={
+                      active
+                        ? "assistant-list-row assistant-list-row--active"
+                        : "assistant-list-row"
+                    }
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => openAssistantProfile(profile.id)}
+                  >
+                    <span className="assistant-avatar">
+                      {profile.name.slice(0, 1)}
+                    </span>
+                    <span>
+                      <strong>{profile.name}</strong>
+                      <small>
+                        {thinking
+                          ? "正在思考"
+                          : open
+                            ? "会话在线"
+                            : profile.enabled
+                              ? "等待主人"
+                              : "已停用"}
+                      </small>
+                    </span>
+                    <span
+                      className={`status-dot ${thinking ? "status-dot--pending" : open ? "status-dot--online" : "status-dot--offline"}`}
+                    />
+                  </button>
+                );
+              })}
+            </nav>
+            {!snapshot.assistant.profiles.length ? (
+              <div className="assistant-sidebar-empty">
+                还没有助理，点击下方新建。
+              </div>
+            ) : null}
+            <div className="assistant-sidebar-actions">
+              {selectedAssistant ? (
+                <button
+                  type="button"
+                  className="new-session-button assistant-sidebar-action"
+                  title={`配置 ${selectedAssistant.name}`}
+                  onClick={() => openAssistantConfig(selectedAssistant.id)}
+                  disabled={busy || selectedAssistantRunning}
                 >
-                  {wecomInboundLabel(snapshot.wecom)}
-                </span>
+                  <span aria-hidden="true">⚙</span> 配置当前助理
+                </button>
               ) : null}
+              <button
+                type="button"
+                className="new-session-button assistant-sidebar-action"
+                onClick={openNewAssistant}
+                disabled={busy}
+              >
+                <span aria-hidden="true">＋</span> 新建助理
+              </button>
             </div>
-          </div>
-          <div className="runtime-actions">
-            <button type="button" onClick={openWeComSettings} disabled={busy}>
-              {snapshot.wecom.configured ? "修改配置" : "开始配置"}
-            </button>
-          </div>
+            <div className="assistant-list-note">
+              本地与主人企微单聊共享一个会话；群内 @机器人发送 /chatid 可查看群 ID，其他群消息静默忽略。
+            </div>
+          </section>
         </section>
 
-        <section className="claude-runtime-card automation-runtime-card">
-          <div className="runtime-heading">
-            <span
-              className={`status-dot ${
-                snapshot.assistant.runningConversationIds.length
-                  ? "status-dot--pending"
-                  : snapshot.assistant.profiles.some((profile) => profile.enabled)
-                    ? "status-dot--online"
-                    : "status-dot--offline"
-              }`}
-            />
-            <div>
-              <strong>私人助理 Agent</strong>
-              <span>{assistantStatusLabel(snapshot)}</span>
-            </div>
-          </div>
-          <div className="runtime-actions">
-            <button
-              type="button"
-              onClick={() => setAssistantPanelOpen(true)}
-              disabled={busy || !snapshot.claudeExecutable.path}
-            >
-              {snapshot.assistant.profiles.length ? "打开对话" : "创建助理"}
-            </button>
-          </div>
-        </section>
+        <section
+          id="sidebar-panel-claude"
+          className="sidebar-tab-panel sidebar-claude-panel"
+          role="tabpanel"
+          aria-labelledby="sidebar-tab-claude"
+          hidden={sidebarMode !== "claude"}
+        >
+          <section className="sidebar-management-section">
+            <h3 className="sidebar-subsection-label">远程终端</h3>
+            <section className="claude-runtime-card wecom-runtime-card">
+              <div className="runtime-heading">
+                <span
+                  className={`status-dot ${
+                    snapshot.wecom.status === "connected"
+                      ? "status-dot--online"
+                      : snapshot.wecom.status === "connecting"
+                        ? "status-dot--pending"
+                        : "status-dot--offline"
+                  }`}
+                />
+                <div>
+                  <strong>Claude Code 终端控制机器人</strong>
+                  <span title={snapshot.wecom.error}>
+                    {wecomStatusLabel(snapshot.wecom)}
+                  </span>
+                  <span className="runtime-description">
+                    仅用于交互式终端的远程确认与通知
+                  </span>
+                  {wecomInboundLabel(snapshot.wecom) ? (
+                    <span
+                      className={`wecom-inbound-status wecom-inbound-status--${snapshot.wecom.lastInboundStatus ?? "received"}`}
+                      title={snapshot.wecom.lastInboundDetail}
+                    >
+                      {wecomInboundLabel(snapshot.wecom)}
+                    </span>
+                  ) : null}
+                  {wecomClaudeHookLabel(snapshot.wecom) ? (
+                    <span
+                      className="runtime-description"
+                      title={snapshot.wecom.lastClaudeHookDetail}
+                    >
+                      {wecomClaudeHookLabel(snapshot.wecom)}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="runtime-actions">
+                <button type="button" onClick={openWeComSettings} disabled={busy}>
+                  {snapshot.wecom.configured ? "修改配置" : "开始配置"}
+                </button>
+              </div>
+            </section>
+          </section>
 
-        <div className="section-heading">
-          <span>工程与会话</span>
-          <div className="section-heading-actions">
+          <section className="sidebar-workspace-section">
+          <h3 className="sidebar-subsection-label">工作区</h3>
+          <div className="section-heading">
+            <span>工程与会话</span>
+            <div className="section-heading-actions">
             <button
               className="icon-button icon-button--search"
               type="button"
@@ -1101,10 +1342,10 @@ export function App() {
             >
               ＋
             </button>
+            </div>
           </div>
-        </div>
 
-        <nav className="project-list" aria-label="工程与会话">
+          <nav className="project-list" aria-label="工程与会话">
           <section
             className={`project-group temporary-group ${temporarySelected ? "project-group--active" : ""}`}
           >
@@ -1315,21 +1556,42 @@ export function App() {
               </section>
             );
           })}
-        </nav>
+          </nav>
 
-        <button
-          className="add-project-button"
-          type="button"
-          onClick={addProject}
-          disabled={busy}
-        >
-          <span>＋</span>
-          选择工程文件夹
-        </button>
+          <button
+            className="add-project-button"
+            type="button"
+            onClick={addProject}
+            disabled={busy}
+          >
+            <span>＋</span>
+            选择工程文件夹
+          </button>
+        </section>
+
+        </section>
       </aside>
 
       <section className="workspace-panel">
-        {activeSession ? (
+        {sidebarMode === "assistant" ? (
+          <Suspense
+            fallback={
+              <div className="assistant-page assistant-page--loading">
+                正在加载私人助理…
+              </div>
+            }
+          >
+            <AssistantPanel
+              embedded
+              assistant={snapshot.assistant}
+              projects={projects}
+              selection={effectiveAssistantSelection}
+              onSelectionChange={(selection) => setAssistantSelection(selection)}
+            />
+          </Suspense>
+        ) : (
+          <>
+            {activeSession ? (
           <>
             <header className="workspace-toolbar">
               <div className="toolbar-title">
@@ -1424,6 +1686,7 @@ export function App() {
                   session={session}
                   active={session.id === activeSessionId}
                   focusRequest={terminalFocusRequest}
+                  theme={theme}
                 />
               ))}
             </div>
@@ -1521,6 +1784,8 @@ export function App() {
             />
           </Suspense>
         ) : null}
+          </>
+        )}
       </section>
       {quickSwitcherOpen ? (
         <QuickSwitcher
@@ -1533,19 +1798,6 @@ export function App() {
           onSelect={selectWorkspaceItem}
         />
       ) : null}
-      {assistantPanelOpen ? (
-        <Suspense
-          fallback={
-            <div className="assistant-backdrop">正在加载私人助理…</div>
-          }
-        >
-          <AssistantPanel
-            assistant={snapshot.assistant}
-            projects={projects}
-            onClose={() => setAssistantPanelOpen(false)}
-          />
-        </Suspense>
-      ) : null}
       {wecomSettingsOpen ? (
         <div className="settings-backdrop" role="presentation">
           <form
@@ -1557,7 +1809,7 @@ export function App() {
           >
             <header>
               <div>
-                <h2 id="wecom-settings-title">Claude Code 管理机器人</h2>
+                <h2 id="wecom-settings-title">Claude Code 终端控制机器人</h2>
                 <p>专门接收 Claude Code 状态并把回复精确路由回终端。</p>
               </div>
               <button
@@ -1578,8 +1830,8 @@ export function App() {
                 }
               />
               <span>
-                <strong>启用 Claude Code 远程管理</strong>
-                <small>此连接只管理终端会话；私人助理入口在助理配置中单独管理</small>
+                <strong>启用终端控制机器人连接</strong>
+                <small>只处理终端会话；企业微信智能机器人在每个助理配置中直接绑定</small>
               </span>
             </label>
             <label className="settings-field">
@@ -1589,7 +1841,7 @@ export function App() {
                 value={wecomBotIdDraft}
                 maxLength={200}
                 autoComplete="off"
-                placeholder="企业微信智能机器人 Bot ID"
+                placeholder="终端控制机器人 Bot ID"
                 onChange={(event) =>
                   setWeComBotIdDraft(event.currentTarget.value)
                 }
@@ -1606,7 +1858,7 @@ export function App() {
                 placeholder={
                   snapshot.wecom.hasSecret
                     ? "已安全保存；留空表示不修改"
-                    : "企业微信智能机器人 Secret"
+                    : "终端控制机器人 Secret"
                 }
                 onChange={(event) =>
                   setWeComSecretDraft(event.currentTarget.value)
@@ -1632,9 +1884,10 @@ export function App() {
               Secret 使用操作系统安全存储加密。这个机器人只负责 Claude Code
               终端远程回复。每条待回复消息都有独立回复码，
               多个 Claude Code 进程同时等待时也会精确路由；引用机器人消息回复时
-              无需重复输入回复码。启用后请新建或重启需要远程回复的 Claude Code
-              会话。它不能与企业微信助理入口复用 Bot ID；同一组 Bot ID/Secret
-              同时只能连接一个客户端。
+              无需重复输入回复码。新建的 Claude Code 会话会自动加载本机 Hook；
+              如果会话是在本版本修复前启动的，请重启一次。卡片下方会显示最近一次
+              Hook 和推送诊断。它不能与私人助理的企业微信智能机器人复用 Bot ID；
+              同一组 Bot ID/Secret 同时只能连接一个客户端。
             </div>
             <footer>
               <button

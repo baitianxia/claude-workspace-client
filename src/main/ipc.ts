@@ -5,7 +5,10 @@ import {
   Notification,
   type BrowserWindow,
 } from "electron";
+import { realpath, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import type {
+  AppTheme,
   SendAssistantMessageRequest,
   AppSnapshot,
   CreateSessionRequest,
@@ -16,7 +19,6 @@ import type {
   SessionRecord,
   TerminalDataEvent,
   UpsertAssistantProfileRequest,
-  UpsertAssistantWeComBotRequest,
   UpdateWeComConfigRequest,
   UpdateProjectRequest,
   WriteTerminalRequest,
@@ -97,9 +99,25 @@ export function registerIpcHandlers(options: {
     claudeExecutable: claudeLocator.getState(),
     wecom: wecomBridge.getState(),
     assistant: assistantService.getSnapshot(),
+    theme: projectStore.getTheme(),
   });
 
   ipcMain.handle(IPC_CHANNELS.getSnapshot, getSnapshot);
+
+  ipcMain.handle(
+    IPC_CHANNELS.setTheme,
+    async (_event, theme: unknown): Promise<AppTheme> => {
+      if (theme !== "dark" && theme !== "light") {
+        throw new Error("Workspace theme is invalid.");
+      }
+      await projectStore.setTheme(theme);
+      // Keep the native window surface in sync while the renderer applies its
+      // scoped palette. This also avoids a dark flash around transparent UI
+      // surfaces when the user switches to the light theme.
+      window.setBackgroundColor(theme === "light" ? "#f6f6f4" : "#12110f");
+      return projectStore.getTheme();
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.selectProjectDirectory, async () => {
     const selection = await dialog.showOpenDialog(window, {
@@ -111,6 +129,23 @@ export function registerIpcHandlers(options: {
       return null;
     }
     return projectStore.addProject(selection.filePaths[0]);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.selectAssistantProjectDirectory, async () => {
+    const selection = await dialog.showOpenDialog(window, {
+      title: "选择私人助理运行目录",
+      buttonLabel: "使用此目录",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (selection.canceled || selection.filePaths.length === 0) {
+      return null;
+    }
+    const absolutePath = resolve(selection.filePaths[0]);
+    const details = await stat(absolutePath);
+    if (!details.isDirectory()) {
+      throw new Error("私人助理运行目录必须是文件夹。");
+    }
+    return realpath(absolutePath);
   });
 
   ipcMain.handle(
@@ -142,7 +177,6 @@ export function registerIpcHandlers(options: {
     IPC_CHANNELS.removeProject,
     async (_event, projectId: unknown) => {
       const validatedId = requireIdentifier(projectId, "Project ID");
-      await assistantService.disableProfilesForProject(validatedId);
       sessionManager.removeProjectSessions(validatedId);
       await projectStore.removeProject(validatedId);
     },
@@ -178,20 +212,6 @@ export function registerIpcHandlers(options: {
     IPC_CHANNELS.updateWeComConfig,
     (_event, request: UpdateWeComConfigRequest) =>
       wecomSettingsService.update(request),
-  );
-
-  ipcMain.handle(
-    IPC_CHANNELS.upsertAssistantWeComBot,
-    (_event, request: UpsertAssistantWeComBotRequest) =>
-      assistantService.upsertWeComBot(request),
-  );
-
-  ipcMain.handle(
-    IPC_CHANNELS.deleteAssistantWeComBot,
-    (_event, botProfileId: unknown) =>
-      assistantService.deleteWeComBot(
-        requireIdentifier(botProfileId, "Assistant WeCom bot profile ID"),
-      ),
   );
 
   ipcMain.handle(

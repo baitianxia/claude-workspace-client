@@ -172,6 +172,48 @@ describe("ProjectStore", () => {
     expect(reloaded.listSessions()).toEqual([session]);
   });
 
+  it("defaults to a dark theme and persists a selected theme", async () => {
+    const root = await temporaryDirectory();
+    const storePath = join(root, "workspace.json");
+    const store = new ProjectStore(storePath);
+    await store.initialize();
+
+    expect(store.getTheme()).toBe("dark");
+
+    await store.setTheme("light");
+    expect(store.getTheme()).toBe("light");
+
+    const reloaded = new ProjectStore(storePath);
+    await reloaded.initialize();
+    expect(reloaded.getTheme()).toBe("light");
+  });
+
+  it("rejects an invalid persisted theme and backs up the workspace", async () => {
+    const root = await temporaryDirectory();
+    const storePath = join(root, "workspace.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 4,
+        projects: [],
+        sessions: [],
+        settings: { theme: "sepia" },
+      }),
+      "utf8",
+    );
+    const store = new ProjectStore(storePath);
+
+    await store.initialize();
+
+    expect(store.getTheme()).toBe("dark");
+    const entries = await import("node:fs/promises").then(({ readdir }) =>
+      readdir(root),
+    );
+    expect(entries.some((entry) => entry.startsWith("workspace.json.corrupt-"))).toBe(
+      true,
+    );
+  });
+
   it("migrates version 1 workspace data without losing projects", async () => {
     const root = await temporaryDirectory();
     const storePath = join(root, "workspace.json");

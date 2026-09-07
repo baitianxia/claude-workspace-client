@@ -18,6 +18,7 @@ function profile(
     id: "assistant-one",
     name: "小岚",
     enabled: true,
+    projectPath: "/project",
     projectId: "project-one",
     instructions: "先给结论。",
     ownerWeComUserId: "zhangsan",
@@ -49,6 +50,8 @@ class FakeQuery {
   private readonly waiters: Array<(value: IteratorResult<unknown>) => void> = [];
   private ended = false;
 
+  constructor(private readonly endOnClose = true) {}
+
   push(value: unknown): void {
     if (this.ended) {
       return;
@@ -67,6 +70,13 @@ class FakeQuery {
 
   close(): void {
     this.closeCalls += 1;
+    if (!this.endOnClose) {
+      return;
+    }
+    this.end();
+  }
+
+  end(): void {
     if (this.ended) {
       return;
     }
@@ -134,7 +144,7 @@ function automaticFactory(state: {
 }
 
 describe("ClaudeCodeAssistantRunner", () => {
-  it("uses the owner's complete local Claude Code capability set", () => {
+  it("keeps the owner's local capabilities but routes scheduling through the app", () => {
     const taskServer = {} as never;
     const options = buildAssistantSdkOptions(
       input({ taskMcpServer: taskServer }),
@@ -151,11 +161,20 @@ describe("ClaudeCodeAssistantRunner", () => {
       allowDangerouslySkipPermissions: true,
       persistSession: true,
       mcpServers: { assistant_tasks: taskServer },
+      disallowedTools: [
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "ScheduleWakeup",
+        "RemoteTrigger",
+      ],
     });
     expect(options).not.toHaveProperty("resume");
     expect(options).not.toHaveProperty("maxTurns");
     expect(JSON.stringify(options)).not.toContain("allowedMcpServers");
-    expect(JSON.stringify(options)).not.toContain("disallowedTools");
+    expect(String(options.systemPrompt && JSON.stringify(options.systemPrompt))).toContain(
+      "mcp__assistant_tasks__*",
+    );
   });
 
   it("keeps one live streaming query for consecutive owner messages", async () => {
@@ -227,6 +246,50 @@ describe("ClaudeCodeAssistantRunner", () => {
     expect(state.queries[0].closeCalls).toBeGreaterThan(0);
 
     await runner.close("assistant-one");
+  });
+
+  it("detaches a closed session without waiting for SDK iterator shutdown", async () => {
+    const state: {
+      calls: Array<Parameters<ClaudeSdkQueryFactory>[0]>;
+      queries: FakeQuery[];
+    } = { calls: [], queries: [] };
+    const runner = new ClaudeCodeAssistantRunner(
+      () => "/usr/bin/claude",
+      ((parameters: Parameters<ClaudeSdkQueryFactory>[0]) => {
+        state.calls.push(parameters);
+        const query = new FakeQuery(false);
+        state.queries.push(query);
+        const stream = parameters.prompt;
+        if (typeof stream === "string") {
+          throw new Error("owner chat must use streaming input");
+        }
+        query.push({
+          type: "system",
+          subtype: "init",
+          session_id: SESSION_ID,
+        });
+        void (async () => {
+          for await (const message of stream) {
+            query.push(successResult((message as { uuid?: string }).uuid ?? "", "完成"));
+          }
+        })();
+        return query as unknown as ReturnType<ClaudeSdkQueryFactory>;
+      }) as ClaudeSdkQueryFactory,
+    );
+
+    await runner.run(input());
+    const closePromise = runner.close("assistant-one");
+    await expect(
+      Promise.race([
+        closePromise.then(() => "closed"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+      ]),
+    ).resolves.toBe("closed");
+    expect(runner.listOpenAssistantIds()).toEqual([]);
+
+    // Let the fake SDK iterator finish so the test does not leave a pending
+    // async loop behind. A real SDK query may take much longer to observe EOF.
+    state.queries[0]?.end();
   });
 
   it("rejects an invalid persisted resume id before starting Claude Code", () => {
