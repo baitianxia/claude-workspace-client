@@ -108,6 +108,8 @@ function normalizeSessionRecord(value: unknown): SessionRecord | null {
     typeof candidate.status !== "string" ||
     !SESSION_STATUSES.has(candidate.status as SessionStatus) ||
     typeof candidate.createdAt !== "number" ||
+    (candidate.skipPermissions !== undefined &&
+      typeof candidate.skipPermissions !== "boolean") ||
     (candidate.exitCode !== undefined && typeof candidate.exitCode !== "number") ||
     (candidate.error !== undefined && typeof candidate.error !== "string")
   ) {
@@ -121,6 +123,9 @@ function normalizeSessionRecord(value: unknown): SessionRecord | null {
     cwd: candidate.cwd,
     status: candidate.status as SessionStatus,
     createdAt: candidate.createdAt,
+    ...(candidate.skipPermissions === undefined
+      ? {}
+      : { skipPermissions: candidate.skipPermissions }),
     ...(candidate.exitCode === undefined ? {} : { exitCode: candidate.exitCode }),
     ...(candidate.error === undefined ? {} : { error: candidate.error }),
   };

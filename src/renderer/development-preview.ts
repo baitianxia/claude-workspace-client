@@ -699,6 +699,7 @@ export function installDevelopmentPreview(): void {
         cwd,
         status: "running",
         createdAt: Date.now(),
+        ...(request.skipPermissions === true ? { skipPermissions: true } : {}),
       };
       snapshot.sessions.push(session);
       publishSession(session);

@@ -451,6 +451,47 @@ button:focus-visible {
   font-weight: 700;
 }
 
+.session-launch-control {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 6px;
+  margin: 0 12px 10px;
+}
+
+.session-launch-control label {
+  color: #b9afa4;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.session-launch-control select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 6px;
+  border: 1px solid #48423c;
+  border-radius: 7px;
+  color: #e9e3da;
+  background: #211e1a;
+  font: inherit;
+  font-size: 11px;
+}
+
+.session-launch-control select:focus-visible {
+  outline: 2px solid #cf7658;
+  outline-offset: 2px;
+}
+
+.session-launch-control select:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.session-launch-control > span {
+  color: #8d847b;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .project-list {
   min-height: 0;
   flex: 1;
@@ -4910,6 +4951,20 @@ button:disabled {
 }
 
 .app-shell[data-theme="light"] .runtime-heading .runtime-description {
+  color: var(--light-muted);
+}
+
+.app-shell[data-theme="light"] .session-launch-control label {
+  color: var(--light-text-soft);
+}
+
+.app-shell[data-theme="light"] .session-launch-control select {
+  border-color: var(--light-border-strong);
+  color: var(--light-text);
+  background: #ffffff;
+}
+
+.app-shell[data-theme="light"] .session-launch-control > span {
   color: var(--light-muted);
 }
 

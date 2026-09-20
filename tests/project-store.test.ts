@@ -172,6 +172,31 @@ describe("ProjectStore", () => {
     expect(reloaded.listSessions()).toEqual([session]);
   });
 
+  it.each([undefined, false, true])(
+    "preserves session permission mode across reload with skipPermissions=%s",
+    async (skipPermissions) => {
+      const root = await temporaryDirectory();
+      const storePath = join(root, "workspace.json");
+      const session: SessionRecord = {
+        id: "permission-session",
+        projectId: null,
+        title: "权限模式会话",
+        cwd: root,
+        status: "interrupted",
+        createdAt: 789,
+        ...(skipPermissions === undefined ? {} : { skipPermissions }),
+      };
+      const store = new ProjectStore(storePath);
+      await store.initialize();
+
+      await store.replaceSessions([session]);
+      const reloaded = new ProjectStore(storePath);
+      await reloaded.initialize();
+
+      expect(reloaded.listSessions()).toEqual([session]);
+    },
+  );
+
   it("defaults to a dark theme and persists a selected theme", async () => {
     const root = await temporaryDirectory();
     const storePath = join(root, "workspace.json");

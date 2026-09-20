@@ -116,6 +116,37 @@ describe("SessionManager", () => {
     );
   });
 
+  it("only skips permissions for the session that explicitly opts in", () => {
+    const spawner = vi.fn(() => fakePty().process) as PtySpawner;
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      spawner,
+      "darwin",
+    );
+
+    const optedIn = manager.createSession(project(), undefined, true);
+    const defaultSession = manager.createSession(project());
+    const normalSession = manager.createSession(project(), undefined, false);
+
+    expect(optedIn.skipPermissions).toBe(true);
+    expect(defaultSession.skipPermissions).not.toBe(true);
+    expect(normalSession.skipPermissions).not.toBe(true);
+    expect(spawner).toHaveBeenNthCalledWith(
+      1,
+      "/usr/local/bin/claude",
+      ["--dangerously-skip-permissions"],
+      expect.objectContaining({ cwd: optedIn.cwd }),
+    );
+    for (const call of [2, 3]) {
+      expect(spawner).toHaveBeenNthCalledWith(
+        call,
+        "/usr/local/bin/claude",
+        [],
+        expect.objectContaining({ cwd: defaultSession.cwd }),
+      );
+    }
+  });
+
   it("writes remote picker keys as separate PTY events", async () => {
     const fake = fakePty();
     const manager = new SessionManager(
@@ -219,55 +250,62 @@ describe("SessionManager", () => {
     expect(second.writes).toEqual([]);
   });
 
-  it("applies per-launch Claude arguments and environment on restart", () => {
-    const first = fakePty();
-    const second = fakePty();
-    const spawner = vi
-      .fn()
-      .mockReturnValueOnce(first.process)
-      .mockReturnValueOnce(second.process) as unknown as PtySpawner;
-    const launchIds: string[] = [];
-    const manager = new SessionManager(
-      () => "C:\\Tools\\claude.exe",
-      spawner,
-      "win32",
-      [],
-      (_sessionId, launchId) => {
-        launchIds.push(launchId);
-        return {
-          args: ["--settings", launchId],
-          env: { CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchId}` },
-        };
-      },
-    );
+  it.each([false, true])(
+    "applies per-launch Claude arguments and environment on restart with skipPermissions=%s",
+    (skipPermissions) => {
+      const first = fakePty();
+      const second = fakePty();
+      const spawner = vi
+        .fn()
+        .mockReturnValueOnce(first.process)
+        .mockReturnValueOnce(second.process) as unknown as PtySpawner;
+      const launchIds: string[] = [];
+      const manager = new SessionManager(
+        () => "C:\\Tools\\claude.exe",
+        spawner,
+        "win32",
+        [],
+        (_sessionId, launchId) => {
+          launchIds.push(launchId);
+          return {
+            args: ["--settings", launchId],
+            env: { CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchId}` },
+          };
+        },
+      );
 
-    const created = manager.createSession(project());
-    first.emitExit(0);
-    manager.restartSession(created.id);
+      const created = manager.createSession(project(), undefined, skipPermissions);
+      first.emitExit(0);
+      const restarted = manager.restartSession(created.id);
+      const permissionArgs = skipPermissions
+        ? ["--dangerously-skip-permissions"]
+        : [];
 
-    expect(launchIds).toHaveLength(2);
-    expect(launchIds[0]).not.toBe(launchIds[1]);
-    expect(spawner).toHaveBeenNthCalledWith(
-      1,
-      "C:\\Tools\\claude.exe",
-      ["--settings", launchIds[0]],
-      expect.objectContaining({
-        env: expect.objectContaining({
-          CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[0]}`,
+      expect(launchIds).toHaveLength(2);
+      expect(launchIds[0]).not.toBe(launchIds[1]);
+      expect(restarted.skipPermissions === true).toBe(skipPermissions);
+      expect(spawner).toHaveBeenNthCalledWith(
+        1,
+        "C:\\Tools\\claude.exe",
+        ["--settings", launchIds[0], ...permissionArgs],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[0]}`,
+          }),
         }),
-      }),
-    );
-    expect(spawner).toHaveBeenNthCalledWith(
-      2,
-      "C:\\Tools\\claude.exe",
-      ["--settings", launchIds[1]],
-      expect.objectContaining({
-        env: expect.objectContaining({
-          CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[1]}`,
+      );
+      expect(spawner).toHaveBeenNthCalledWith(
+        2,
+        "C:\\Tools\\claude.exe",
+        ["--settings", launchIds[1], ...permissionArgs],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[1]}`,
+          }),
         }),
-      }),
-    );
-  });
+      );
+    },
+  );
 
   it("forwards terminal input, output, resize and exit state", () => {
     const fake = fakePty();
@@ -509,38 +547,51 @@ describe("SessionManager", () => {
     ]);
   });
 
-  it("restores persisted labels and marks previously running sessions interrupted", () => {
-    const fake = fakePty();
-    const spawner = vi.fn(() => fake.process) as PtySpawner;
-    const manager = new SessionManager(
-      () => "C:\\Tools\\claude.exe",
-      spawner,
-      "win32",
-      [
-        {
-          id: "persisted-session",
-          projectId: "project-one",
-          title: "历史会话",
-          cwd: "C:\\work\\mall",
-          status: "running",
-          createdAt: 12,
-        },
-      ],
-    );
+  it.each([undefined, false, true])(
+    "restores persisted labels and permission mode with skipPermissions=%s",
+    (skipPermissions) => {
+      const fake = fakePty();
+      const spawner = vi.fn(() => fake.process) as PtySpawner;
+      const manager = new SessionManager(
+        () => "C:\\Tools\\claude.exe",
+        spawner,
+        "win32",
+        [
+          {
+            id: "persisted-session",
+            projectId: "project-one",
+            title: "历史会话",
+            cwd: "C:\\work\\mall",
+            status: "running",
+            createdAt: 12,
+            ...(skipPermissions === undefined ? {} : { skipPermissions }),
+          },
+        ],
+      );
 
-    expect(spawner).not.toHaveBeenCalled();
-    expect(manager.listSessions()).toEqual([
-      expect.objectContaining({
-        id: "persisted-session",
-        title: "历史会话",
-        status: "interrupted",
-      }),
-    ]);
-    expect(manager.getTerminalSnapshot("persisted-session").data).toContain(
-      "/resume",
-    );
-    expect(manager.renameSession("persisted-session", "继续排查").title).toBe(
-      "继续排查",
-    );
-  });
+      expect(spawner).not.toHaveBeenCalled();
+      expect(manager.listSessions()).toEqual([
+        expect.objectContaining({
+          id: "persisted-session",
+          title: "历史会话",
+          status: "interrupted",
+        }),
+      ]);
+      expect(manager.getTerminalSnapshot("persisted-session").data).toContain(
+        "/resume",
+      );
+      expect(manager.renameSession("persisted-session", "继续排查").title).toBe(
+        "继续排查",
+      );
+
+      const restarted = manager.restartSession("persisted-session");
+
+      expect(restarted.skipPermissions).toBe(skipPermissions);
+      expect(spawner).toHaveBeenCalledWith(
+        "C:\\Tools\\claude.exe",
+        skipPermissions === true ? ["--dangerously-skip-permissions"] : [],
+        expect.objectContaining({ cwd: "C:\\work\\mall" }),
+      );
+    },
+  );
 });

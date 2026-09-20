@@ -270,6 +270,12 @@ export function registerIpcHandlers(options: {
       if (request.title !== undefined && typeof request.title !== "string") {
         throw new Error("Session title is invalid.");
       }
+      if (
+        request.skipPermissions !== undefined &&
+        typeof request.skipPermissions !== "boolean"
+      ) {
+        throw new Error("Session permission mode is invalid.");
+      }
       let projectId: string | null;
       let cwd: string;
       if (request.scope === "project") {
@@ -291,6 +297,7 @@ export function registerIpcHandlers(options: {
       const session = sessionManager.createSession(
         { projectId, cwd },
         request.title,
+        request.skipPermissions,
       );
       await projectStore.replaceSessions(sessionManager.listSessions());
       return session;
