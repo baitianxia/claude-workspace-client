@@ -93,7 +93,9 @@ function wecomInboundLabel(state: AppSnapshot["wecom"]): string | null {
 
 function wecomClaudeHookLabel(state: AppSnapshot["wecom"]): string | null {
   if (!state.lastClaudeHookAt || !state.lastClaudeHookDetail) {
-    return null;
+    return state.enabled && state.configured
+      ? "尚未收到 Claude Code 事件；请在新建或重启的会话中触发一次通知。"
+      : null;
   }
   const time = new Date(state.lastClaudeHookAt).toLocaleTimeString("zh-CN", {
     hour: "2-digit",

@@ -4,6 +4,7 @@ const DEFAULT_PENDING_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const ROUTE_CODE_LENGTH = 8;
 const TERMINAL_DOWN = "\x1b[B";
+const TERMINAL_TAB = "\t";
 const TERMINAL_ENTER = "\r";
 const TERMINAL_TOGGLE = " ";
 
@@ -16,7 +17,7 @@ export type RemoteAttentionKind =
   | "elicitation"
   | "agent";
 
-export type RemoteInputMode = "menu" | "text";
+export type RemoteInputMode = "menu" | "text" | "none";
 
 export type RemoteReplyStage =
   | "permission-denial-reason"
@@ -166,29 +167,39 @@ function multipleMenuSelectionInput(selections: number[]): string {
   return `${input}${TERMINAL_ENTER}`;
 }
 
-function singleMenuSelectionChunks(selection: number): string[] {
-  return [
-    ...Array.from({ length: Math.max(0, selection - 1) }, () => TERMINAL_DOWN),
-    TERMINAL_ENTER,
-  ];
+/**
+ * Claude Code's multi-question AskUserQuestion wizard is a different menu
+ * from the ordinary one-question picker. A digit selects the option and
+ * advances to the next question, so using Down/Enter here can select a stale
+ * pointer after the wizard rerenders.
+ */
+function wizardSingleSelectionInput(selection: number): string {
+  return String(selection);
 }
 
-function multipleMenuSelectionChunks(selections: number[]): string[] {
-  const ordered = [...new Set(selections)].sort((left, right) => left - right);
-  let currentSelection = 1;
-  const chunks: string[] = [];
-  for (const selection of ordered) {
-    chunks.push(
-      ...Array.from(
-        { length: Math.max(0, selection - currentSelection) },
-        () => TERMINAL_DOWN,
-      ),
-    );
-    chunks.push(TERMINAL_TOGGLE);
-    currentSelection = selection;
-  }
-  chunks.push(TERMINAL_ENTER);
-  return chunks;
+function wizardSingleSelectionChunks(selection: number): string[] {
+  return [wizardSingleSelectionInput(selection)];
+}
+
+/**
+ * In a wizard multi-select question, digits toggle options without advancing.
+ * Tab moves to the next question (or the Submit review), and the final Enter
+ * is emitted by the caller after all questions have been answered.
+ */
+function wizardMultipleSelectionInput(selections: number[]): string {
+  return `${[...new Set(selections)]
+    .sort((left, right) => left - right)
+    .map(String)
+    .join("")}${TERMINAL_TAB}`;
+}
+
+function wizardMultipleSelectionChunks(selections: number[]): string[] {
+  return [
+    ...[...new Set(selections)]
+      .sort((left, right) => left - right)
+      .map(String),
+    TERMINAL_TAB,
+  ];
 }
 
 type MenuTextMatch =
@@ -314,6 +325,16 @@ export class RemoteReplyRouter {
     const fingerprint = attentionFingerprint(attention);
 
     if (existing) {
+      // A generic permission notification has no menu metadata. It must not
+      // invalidate a detailed permission/question/plan prompt for this launch.
+      if (
+        attention.inputMode === "none" &&
+        existing.inputMode === "menu" &&
+        existing.launchId === attention.launchId &&
+        existing.claudeSessionId === attention.claudeSessionId
+      ) {
+        return { shouldSend: false, pending: { ...existing } };
+      }
       if (
         (attention.kind === "idle" && existing.kind !== "idle") ||
         existing.fingerprint === fingerprint
@@ -366,7 +387,7 @@ export class RemoteReplyRouter {
       return {
         status: "rejected",
         message:
-          "未找到回复码。为避免多个 Claude Code 会话串线，请按“回复码 回复内容”的格式发送。" +
+          "未找到回复码。该机器人只处理 Claude Code 终端通知；请引用通知回复，或按“回复码 回复内容”的格式发送。私人助理消息请发送到助理绑定的独立机器人。" +
           this.pendingSummary(userId),
       };
     }
@@ -435,7 +456,7 @@ export class RemoteReplyRouter {
   }
 
   private pendingSummary(userId: string): string {
-    const entries = this.listForUser(userId);
+    const entries = this.listForUser(userId).filter((entry) => entry.inputMode !== "none");
     if (entries.length === 0) {
       return " 当前没有待回复消息。";
     }
@@ -485,6 +506,10 @@ export function terminalActionForRemoteReply(
   const normalized = normalizedReplyText(reply);
   if (!normalized) {
     throw new Error("回复内容不能为空。");
+  }
+
+  if (pending.inputMode === "none") {
+    throw new Error("这条通知未提供完整权限选项，请回到开发工作台查看并确认，或回复后续带选项的权限通知。");
   }
 
   if (pending.replyStage) {
@@ -625,14 +650,14 @@ export function terminalActionForRemoteReply(
           questionModes[index] === "single" &&
           answerSelections?.length === 1
         ) {
-          return singleMenuSelectionInput(answerSelections[0]);
+          return wizardSingleSelectionInput(answerSelections[0]);
         }
         if (
           questionModes[index] === "multiple" &&
           answerSelections &&
           answerSelections.length > 0
         ) {
-          return multipleMenuSelectionInput(answerSelections);
+          return wizardMultipleSelectionInput(answerSelections);
         }
         return null;
       });
@@ -645,19 +670,19 @@ export function terminalActionForRemoteReply(
               questionModes[index] === "single" &&
               answerSelections?.length === 1
             ) {
-              return singleMenuSelectionChunks(answerSelections[0]);
+              return wizardSingleSelectionChunks(answerSelections[0]);
             }
             if (
               questionModes[index] === "multiple" &&
               answerSelections &&
               answerSelections.length > 0
             ) {
-              return multipleMenuSelectionChunks(answerSelections);
+              return wizardMultipleSelectionChunks(answerSelections);
             }
             return [];
           }),
-          // A multi-question picker moves to the Submit tab after the last
-          // answer; a second Enter activates “Submit”.
+          // Answering the last question moves to the Submit review; Enter
+          // activates “Submit answers”.
           TERMINAL_ENTER,
         ];
         return { input: inputChunks.join(""), inputChunks };

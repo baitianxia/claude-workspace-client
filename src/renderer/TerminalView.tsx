@@ -97,6 +97,9 @@ export function TerminalView({
       letterSpacing: 0,
       scrollback: 12_000,
       theme: TERMINAL_THEMES[themeRef.current],
+      // Claude Code uses bright white and arbitrary ANSI colors for emphasis.
+      // Keep those cells readable when the light palette has a white background.
+      minimumContrastRatio: themeRef.current === "light" ? 4.5 : 1,
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
@@ -280,6 +283,7 @@ export function TerminalView({
     const terminal = terminalRef.current;
     if (terminal) {
       terminal.options.theme = TERMINAL_THEMES[theme];
+      terminal.options.minimumContrastRatio = theme === "light" ? 4.5 : 1;
     }
   }, [theme]);
 

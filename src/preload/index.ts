@@ -73,8 +73,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.resetAssistantConversation, assistantId),
   closeAssistantConversation: (assistantId) =>
     ipcRenderer.invoke(IPC_CHANNELS.closeAssistantConversation, assistantId),
-  cancelAssistantTurn: (conversationId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.cancelAssistantTurn, conversationId),
+  cancelAssistantTurn: (conversationId, turnId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.cancelAssistantTurn, conversationId, turnId),
   createSession: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.createSession, request),
   restartSession: (sessionId) =>

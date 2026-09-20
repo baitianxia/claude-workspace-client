@@ -22,6 +22,7 @@ import {
   type PendingRemoteReply,
 } from "./remote-reply-router";
 import type { SessionManager, SessionInputEvent } from "./session-manager";
+import { describeWeComError as readableError } from "./wecom-error";
 
 export interface WeComRuntimeConfiguration {
   enabled: boolean;
@@ -99,10 +100,6 @@ function defaultClientFactory(options: {
 
 function copyState(state: WeComState): WeComState {
   return { ...state };
-}
-
-function readableError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function trimmedInboundIdentifier(value: unknown): string {
@@ -260,19 +257,22 @@ function notificationMarkdown(
               };
   const prefix = [
     `# ${pending.title}`,
-    `> 回复码：\`${pending.code}\``,
+    ...(pending.inputMode === "none" ? [] : [`> 回复码：\`${pending.code}\``]),
     `> 工程：${workspace}`,
     `> 会话：${session.title}`,
     `> 工作目录：${session.cwd}`,
     "",
   ].join("\n");
-  const suffix = [
-    "",
-    "## 如何回复",
-    `- 引用本消息回复：${replyGuidance.quoted}，无需重复输入回复码。`,
-    `- 不引用消息：发送 \`${pending.code} ${replyGuidance.directExample}\`。`,
-    `回复码 \`${pending.code}\` 只对应当前 Claude Code 进程，不能用于其他会话。`,
-  ].join("\n");
+  const suffix =
+    pending.inputMode === "none"
+      ? "\n\n这条通知未提供完整权限选项，请回到开发工作台查看并确认，或回复后续带选项的权限通知。"
+      : [
+          "",
+          "## 如何回复",
+          `- 引用本消息回复：${replyGuidance.quoted}，无需重复输入回复码。`,
+          `- 不引用消息：发送 \`${pending.code} ${replyGuidance.directExample}\`。`,
+          `回复码 \`${pending.code}\` 只对应当前 Claude Code 进程，不能用于其他会话。`,
+        ].join("\n");
   const maxMarkdownBytes = 18_000;
   const bodyBudget = Math.max(
     256,
@@ -337,6 +337,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
   private authenticatedClient: WeComClient | null = null;
   private supersededClient: WeComClient | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
+  private outboundSendChain: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly sessionManager: SessionManager,
@@ -381,6 +382,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.unsentCodes.clear();
     this.sendingCodes.clear();
     this.processedMessageIds.clear();
+    this.outboundSendChain = Promise.resolve();
 
     const configured = Boolean(
       configuration.botId &&
@@ -475,6 +477,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     );
     this.pruneDeliveryState();
     if (!result.shouldSend) {
+      this.recordClaudeHook("已收到 Claude Code 事件，该会话已有对应通知，本次未重复推送。");
       return;
     }
     this.unsentCodes.add(result.pending.code);
@@ -492,6 +495,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.router.clearAll();
     this.unsentCodes.clear();
     this.sendingCodes.clear();
+    this.outboundSendChain = Promise.resolve();
   }
 
   private readonly handleSessionInput = (event: SessionInputEvent) => {
@@ -797,7 +801,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
           this.configuration.targetUserId;
         await client.sendMessage(fallbackTarget, {
           msgtype: "markdown",
-          markdown: { content },
+          markdown: { content: truncateUtf8(content, 18_000) },
         });
         return true;
       } catch (fallbackError) {
@@ -858,16 +862,39 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       (candidate) => candidate.id === session.projectId,
     );
     try {
-      await client.sendMessage(this.configuration.targetUserId, {
-        msgtype: "markdown",
-        markdown: { content: notificationMarkdown(pending, session, project) },
+      const sent = await this.enqueueOutboundSend(async () => {
+        // A reconnect/configuration change may happen while an earlier push
+        // is being acknowledged. Do not send a queued message through an old
+        // client; the normal retry path will use the current authenticated
+        // client instead.
+        if (
+          this.client !== client ||
+          this.authenticatedClient !== client ||
+          !this.unsentCodes.has(pending.code) ||
+          !this.sessionManager.isCurrentLaunch(
+            pending.workspaceSessionId,
+            pending.launchId,
+          )
+        ) {
+          return false;
+        }
+        await client.sendMessage(this.configuration.targetUserId, {
+          msgtype: "markdown",
+          markdown: {
+            content: notificationMarkdown(pending, session, project),
+          },
+        });
+        return true;
       });
-      if (this.client === client) {
+      if (sent && this.client === client) {
         this.unsentCodes.delete(pending.code);
         this.recordClaudeHook(
-          `Claude Code 消息已推送到 ${this.configuration.targetUserId}（回复码 ${pending.code}）。`,
+          `企业微信已确认接收 Claude Code 推送（接收人 ${this.configuration.targetUserId}，回复码 ${pending.code}）。`,
         );
-        if (this.state.status === "error") {
+        if (
+          this.authenticatedClient === client &&
+          this.state.status === "error"
+        ) {
           this.updateState({
             ...this.state,
             status: "connected",
@@ -884,7 +911,19 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       }
     } finally {
       this.sendingCodes.delete(pending.code);
+      if (this.client === client) {
+        this.scheduleRetry();
+      }
     }
+  }
+
+  private enqueueOutboundSend(task: () => Promise<boolean>): Promise<boolean> {
+    const next = this.outboundSendChain.then(task, task);
+    this.outboundSendChain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
   private async flushUnsent(): Promise<void> {

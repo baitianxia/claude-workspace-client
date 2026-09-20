@@ -659,10 +659,11 @@ export function installDevelopmentPreview(): void {
         );
       publishAssistant();
     },
-    cancelAssistantTurn: async (conversationId) => {
+    cancelAssistantTurn: async (conversationId, turnId) => {
       const turn = snapshot.assistant.turns.find(
         (candidate) =>
           candidate.conversationId === conversationId &&
+          (turnId === undefined || candidate.id === turnId) &&
           (candidate.status === "queued" || candidate.status === "running"),
       );
       if (turn) {

@@ -251,6 +251,19 @@ export function AssistantPanel({
     () => assistant.turns.filter((turn) => turn.assistantId === selectedId),
     [assistant.turns, selectedId],
   );
+  const visibleTurns = useMemo(
+    () =>
+      turns.filter(
+        (turn) =>
+          turn.status !== "queued" &&
+          !(turn.status === "cancelled" && turn.startedAt === undefined),
+      ),
+    [turns],
+  );
+  const queuedTurns = useMemo(
+    () => turns.filter((turn) => turn.status === "queued"),
+    [turns],
+  );
   const tasks = useMemo(
     () => assistant.tasks.filter((task) => task.assistantId === selectedId),
     [assistant.tasks, selectedId],
@@ -264,7 +277,10 @@ export function AssistantPanel({
     for (const run of taskRuns) latest.set(run.taskId, run);
     return latest;
   }, [taskRuns]);
-  const running = turns.some((turn) => turn.status === "queued" || turn.status === "running");
+  const running = turns.some((turn) => turn.status === "running");
+  const hasActiveTurns = turns.some(
+    (turn) => turn.status === "queued" || turn.status === "running",
+  );
   const sessionOpen = selected ? assistant.openConversationIds.includes(selected.id) : false;
   const sessionResumable = selected
     ? (assistant.resumableConversationIds ?? []).includes(selected.id)
@@ -396,7 +412,7 @@ export function AssistantPanel({
 
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ block: "end" });
-  }, [turns.length, turns.at(-1)?.status]);
+  }, [visibleTurns.length, visibleTurns.at(-1)?.status]);
 
   // Session actions move focus to their button. Restore it to the chat
   // composer after the action (and its busy state) has settled so the next
@@ -735,8 +751,8 @@ export function AssistantPanel({
                 <>
                   <div className="assistant-session-actions">
                     <span>{sessionOpen ? "● Claude 会话常驻中" : sessionResumable ? "○ 会话已关闭，下条消息自动恢复" : "○ 尚未启动，下条消息创建会话"}</span>
-                    <button type="button" disabled={busy || running || !sessionOpen} onClick={() => { requestComposerFocus(); void runSimpleAction(() => window.claudeWorkspace.closeAssistantConversation(selected.id)); }}>关闭会话</button>
-                    <button type="button" disabled={busy || running} onClick={() => {
+                    <button type="button" disabled={busy || hasActiveTurns || !sessionOpen} onClick={() => { requestComposerFocus(); void runSimpleAction(() => window.claudeWorkspace.closeAssistantConversation(selected.id)); }}>关闭会话</button>
+                    <button type="button" disabled={busy || hasActiveTurns} onClick={() => {
                       if (window.confirm("开始新对话会清除客户端展示记录和已保存的 Claude 会话关联；定时任务不受影响。继续吗？")) {
                         setMessage("");
                         requestComposerFocus();
@@ -745,7 +761,7 @@ export function AssistantPanel({
                     }}>新对话</button>
                   </div>
                   <div className="assistant-messages">
-                    {turns.length === 0 ? <div className="assistant-welcome"><span className="assistant-avatar assistant-avatar--large">{selected.name.slice(0, 1)}</span><h3>和 {selected.name} 开始对话</h3><p>你也可以直接说：“每个工作日 9 点帮我整理行业动态，有异常一定通知我。”</p></div> : turns.map((turn) => (
+                    {visibleTurns.length === 0 ? <div className="assistant-welcome"><span className="assistant-avatar assistant-avatar--large">{selected.name.slice(0, 1)}</span><h3>和 {selected.name} 开始对话</h3><p>你也可以直接说：“每个工作日 9 点帮我整理行业动态，有异常一定通知我。”</p></div> : visibleTurns.map((turn) => (
                       <div className="assistant-turn" key={turn.id}>
                         <article className="assistant-message assistant-message--user"><header><span>你</span><time>{shortTime(turn.createdAt)}</time></header><p>{turn.request}</p>{turn.source === "wecom" ? <small>来自企业微信</small> : null}</article>
                         <article className="assistant-message assistant-message--agent"><header><span>{selected.name}</span><small className={`assistant-turn-state assistant-turn-state--${turn.status}`}>{turnState(turn)}</small></header>{turn.response ? <MarkdownPreview content={turn.response} /> : turn.error ? <p className="assistant-message-error">{turn.error}</p> : <div className="assistant-thinking"><i /><i /><i /></div>}{turn.deliveryError ? <p className="assistant-delivery-error">{turn.deliveryError}</p> : null}</article>
@@ -753,6 +769,35 @@ export function AssistantPanel({
                     ))}
                     <div ref={messageEndRef} />
                   </div>
+                  {queuedTurns.length > 0 ? (
+                    <section className="assistant-queued" aria-label="排队中的消息">
+                      <header>
+                        <strong>排队中的消息</strong>
+                        <span>{queuedTurns.length} 条等待处理</span>
+                      </header>
+                      <ul>
+                        {queuedTurns.map((turn) => (
+                          <li key={turn.id}>
+                            <p>{turn.request}</p>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() =>
+                                void runSimpleAction(() =>
+                                  window.claudeWorkspace.cancelAssistantTurn(
+                                    selected.id,
+                                    turn.id,
+                                  ),
+                                )
+                              }
+                            >
+                              撤销
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ) : null}
                   <footer className="assistant-composer-wrap"><div className="assistant-composer"><textarea ref={messageInputRef} aria-label="私人助理消息" title="可拖动右下角调整输入框高度" aria-keyshortcuts="Control+X Meta+X" value={message} rows={2} maxLength={4_000} placeholder={selected.enabled ? `给 ${selected.name} 发消息，或让它创建定时任务…` : "这个助理已停用"} disabled={!selected.enabled || (busy && running)} onChange={(event) => setMessage(event.currentTarget.value)} onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
                     if (isCutShortcut(event)) {
                       // Chromium/Electron normally performs the native cut. A

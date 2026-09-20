@@ -54,6 +54,7 @@ describe("ClaudeHookServer", () => {
         }>;
         PreToolUse: Array<{ matcher: string }>;
         Stop: Array<{ matcher: string }>;
+        StopFailure: Array<{ matcher: string }>;
         Notification: Array<{ matcher: string }>;
       };
     };
@@ -61,10 +62,8 @@ describe("ClaudeHookServer", () => {
     expect(launch.args[1]).toMatch(/settings-[a-f0-9]{32}\.json$/u);
     expect(settings.hooks.PreToolUse[0].matcher).toContain("AskUserQuestion");
     expect(settings.hooks.Stop).toHaveLength(1);
-    expect(settings.hooks.Notification[0].matcher).toContain("idle_prompt");
-    expect(settings.hooks.Notification[0].matcher).toContain(
-      "agent_needs_input",
-    );
+    expect(settings.hooks.Notification[0].matcher).toBe("");
+    expect(settings.hooks.StopFailure[0].matcher).toBe("");
     expect(settings.hooks.PermissionRequest).toHaveLength(1);
 
     const url = settings.hooks.PermissionRequest[0].hooks[0].url;

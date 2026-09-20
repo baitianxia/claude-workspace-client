@@ -16,11 +16,11 @@
 
 ## 整改内容
 
-1. 统一 package/product/app 标识和公开文档中的 -client 后缀；应用内部模块可保留技术名称，但用户入口、ZIP 名称和安装目录使用 claude-workspace。
-2. 公开发布只保留 claude-workspace-<version>-windows-x64.zip。ZIP 顶层直接提供现有发布的 Claude Workspace.exe 或 EXE 安装器作为唯一主入口，并提供中文 README.md、START-HERE.html、OPEN-CONFIG.cmd、STATUS.cmd（或等价入口）、config/settings.example.json、release-manifest.json 和 SHA256SUMS.txt。Claude 工作台不要求 INSTALL.cmd；NSIS/7z 等可以作为构建中间产物，但不能成为额外用户下载项。
+1. 统一 package/product/app 标识和公开文档中的 -client 后缀；应用内部模块可保留技术名称，但用户入口、7z 名称和安装目录使用 claude-workspace。
+2. 公开发布只保留 claude-workspace-<version>-windows-x64.7z。7z 顶层直接提供现有发布的 Claude Workspace.exe 或 EXE 安装器作为唯一主入口，并提供中文 README.md、START-HERE.html、OPEN-CONFIG.cmd、STATUS.cmd（或等价入口）、config/settings.example.json、release-manifest.json 和 SHA256SUMS.txt；用户使用 Windows 版 7-Zip 或其他兼容工具解压。Claude 工作台不要求 INSTALL.cmd；NSIS/ZIP 等可以作为构建中间产物，但不能成为额外用户下载项。
 3. 发布 EXE 或 EXE 安装器同时承担首次启动/安装和升级入口：版本目录、活动版本、锁和回滚记录只在 %USERPROFILE%\claude-workspace\ 下维护；配置和用户数据位于版本目录外；验证失败恢复上一版本。便携 EXE 的卸载是删除程序文件，安装器 EXE 使用自身卸载能力，两者都默认保留配置和用户数据。
 4. 提供本工程的 OPEN-CONFIG.cmd 和机器可读 STATUS.cmd（或等价命令），使 Claude Code 能直接定位设置文件、用户数据和日志位置并读取应用版本/运行状态；如果应用配置由 UI 管理，必须同时提供可脚本化的导出/重载方式，不能要求用户在 AppData 深层目录盲找。
-5. Windows CI 产出 ZIP、清单、逐文件 SHA256、运行时来源、许可证和 SBOM，并在干净 Windows x64 做安装、启动、升级、回滚、卸载冒烟。目标机不需要 npm、pnpm、npx、Docker 或在线下载。
+5. Windows CI 产出 7z、清单、逐文件 SHA256、运行时来源、许可证和 SBOM，并在干净 Windows x64 做安装、启动、升级、回滚、卸载冒烟。目标机不需要 npm、pnpm、npx、Docker 或在线下载。
 6. 中文 README/HTML 写清解压、安装、首次启动、配置路径、工作区数据位置、升级、回滚、卸载和常见故障；更新构建和运行手册，移除把多个工程打包为一个产品的暗示。
 
 ## 验收证据
@@ -29,7 +29,7 @@
 - [ ] Claude Code/用户可通过 OPEN-CONFIG.cmd 和状态说明找到配置、日志和用户数据位置。
 - [ ] 新版覆盖安装保留设置和用户数据；模拟启动失败时可恢复旧版本。
 - [ ] 安装、升级、卸载不读取、修改或清理 mail、database、browser 工程目录或 MCP 注册。
-- [ ] 公开下载项只有一个 ZIP，归档中没有真实凭据，并随包提交清单、哈希、许可证和 SBOM。
+- [ ] 公开下载项只有一个 7z，归档中没有真实凭据，并随包提交清单、哈希、许可证和 SBOM。
 
 ## 与 MCP 服务任务的边界
 

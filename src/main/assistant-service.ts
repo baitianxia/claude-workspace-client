@@ -570,23 +570,32 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     this.emitStateChanged();
   }
 
-  async cancelTurn(conversationId: string): Promise<void> {
+  async cancelTurn(conversationId: string, turnId?: string): Promise<void> {
     this.requireProfile(conversationId);
     const turns = this.store.listTurnsForConversation(conversationId);
-    const running = turns.find((turn) => turn.status === "running");
-    if (running) {
-      if (!this.runner.cancel(running.id)) {
+    const active = turnId
+      ? turns.find((turn) => turn.id === turnId)
+      : turns.find((turn) => turn.status === "running") ??
+        turns.find((turn) => turn.status === "queued");
+    if (!active || !isActiveTurn(active)) {
+      throw new Error(
+        turnId
+          ? "这条消息已经结束或不存在。"
+          : "当前没有可停止的助理消息。",
+      );
+    }
+    if (turnId && active.status !== "queued") {
+      throw new Error("这条消息已经开始处理，请使用“停止”。");
+    }
+    if (active.status === "running") {
+      if (!this.runner.cancel(active.id)) {
         throw new Error("当前对话轮次已经结束或无法中断。");
       }
       return;
     }
-    const queued = turns.find((turn) => turn.status === "queued");
-    if (!queued) {
-      throw new Error("当前没有可停止的助理消息。");
-    }
     await this.store.completeTurn(
       {
-        ...queued,
+        ...active,
         status: "cancelled",
         finishedAt: this.now(),
         error: "主人在执行前取消了这条消息。",

@@ -4054,6 +4054,83 @@ button:disabled {
   font-size: 9px;
 }
 
+.assistant-queued {
+  flex: 0 0 auto;
+  max-height: 148px;
+  margin: 0 max(24px, 7vw) 10px;
+  padding: 9px 11px;
+  overflow: auto;
+  border: 1px solid rgba(139, 90, 69, 0.46);
+  border-radius: 10px;
+  background: rgba(73, 45, 34, 0.22);
+}
+
+.assistant-queued > header,
+.assistant-queued li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.assistant-queued > header {
+  justify-content: space-between;
+  color: #d6a078;
+  font-size: 9px;
+}
+
+.assistant-queued > header span {
+  color: #9d8170;
+  font-size: 8px;
+}
+
+.assistant-queued ul {
+  display: grid;
+  margin: 7px 0 0;
+  padding: 0;
+  gap: 5px;
+  list-style: none;
+}
+
+.assistant-queued li {
+  min-width: 0;
+  justify-content: space-between;
+  padding: 5px 0 0;
+  border-top: 1px solid rgba(139, 90, 69, 0.2);
+}
+
+.assistant-queued li p {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #c7b8aa;
+  font-size: 10px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assistant-queued li button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid #76513f;
+  border-radius: 6px;
+  color: #dca38d;
+  background: transparent;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.assistant-queued li button:hover:not(:disabled) {
+  border-color: #a76d54;
+  color: #f0c7b4;
+  background: rgba(117, 70, 52, 0.25);
+}
+
+.assistant-queued li button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .assistant-inline-error {
   display: flex;
   align-items: center;
@@ -5245,6 +5322,38 @@ button:disabled {
 
 .app-shell[data-theme="light"] .assistant-message--user > small {
   color: #8d6657;
+}
+
+.app-shell[data-theme="light"] .assistant-queued {
+  border-color: #d2a18f;
+  background: #fbf1ed;
+}
+
+.app-shell[data-theme="light"] .assistant-queued > header {
+  color: #8c5b43;
+}
+
+.app-shell[data-theme="light"] .assistant-queued > header span {
+  color: #9d7b6b;
+}
+
+.app-shell[data-theme="light"] .assistant-queued li {
+  border-top-color: #ecd9d1;
+}
+
+.app-shell[data-theme="light"] .assistant-queued li p {
+  color: #5e5048;
+}
+
+.app-shell[data-theme="light"] .assistant-queued li button {
+  border-color: #c58d80;
+  color: #9f493b;
+}
+
+.app-shell[data-theme="light"] .assistant-queued li button:hover:not(:disabled) {
+  border-color: #a96a55;
+  color: #7e392e;
+  background: #f3e2dc;
 }
 
 .app-shell[data-theme="light"] .assistant-message--agent,

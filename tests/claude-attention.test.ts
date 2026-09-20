@@ -361,6 +361,40 @@ describe("attentionFromClaudeHook", () => {
     });
   });
 
+  it("forwards permission_prompt notifications without guessing menu options", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        notification_type: "permission_prompt",
+        title: "需要批准运行命令",
+        message: "Claude Code 想执行 npm test",
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      kind: "permission",
+      title: "需要批准运行命令",
+      inputMode: "none",
+    });
+    expect(attention?.permissionOptionLabels).toBeUndefined();
+    expect(attention?.body).toContain("Claude Code 想执行 npm test");
+  });
+
+  it("reports StopFailure events when Claude Code returns an error", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "StopFailure",
+        error: "Claude Code 进程退出",
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      kind: "completion",
+      title: "Claude Code 本轮未完成",
+      inputMode: "text",
+      body: expect.stringContaining("Claude Code 进程退出"),
+    });
+  });
+
   it("does not mistake input dialogs or normal prompts for numbered menus", () => {
     const idle = attentionFromClaudeHook(
       hook({

@@ -19,6 +19,8 @@ import {
 } from "./assistant-store";
 import type { SecretProtector } from "./wecom-settings";
 import type { WeComClient, WeComClientFactory } from "./wecom-bridge";
+import { describeWeComError as readableError } from "./wecom-error";
+import { withTimeout } from "./promise-timeout";
 
 export interface AssistantWeComMessage {
   botProfileId: string;
@@ -55,6 +57,7 @@ interface BotRuntime {
   pendingInboundMessages: Map<string, PendingInboundMessage>;
   processingMessageIds: Set<string>;
   processedMessageIds: Set<string>;
+  outboundSendChain: Promise<void>;
 }
 
 interface PendingInboundMessage {
@@ -86,13 +89,12 @@ interface AssistantInboundEventClient {
 }
 
 const MAX_MARKDOWN_BYTES = 18_000;
+const OUTBOUND_RETRY_DELAYS_MS = [250, 750, 1_500] as const;
+const OUTBOUND_DEADLINE_MS = 12_000;
+const OUTBOUND_TIMEOUT_MESSAGE = "企业微信消息投递超过 12 秒，已停止继续重试。";
 const INBOUND_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 const INBOUND_RETRY_MAX_AGE_MS = 30_000;
 const MAX_PENDING_INBOUND_MESSAGES = 100;
-
-function readableError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function defaultClientFactory(options: {
   botId: string;
@@ -433,26 +435,17 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
     if (!target || [...target].length > 200 || /\p{Cc}|\s/u.test(target)) {
       throw new Error("企业微信投递目标格式无效。");
     }
-    const client = runtime.client;
-    if (!client || runtime.authenticatedClient !== client) {
-      throw new Error(`企业微信智能机器人“${runtime.state.name}”尚未连接。`);
-    }
-    try {
-      await client.sendMessage(target, {
-        msgtype: "markdown",
-        markdown: { content: truncateUtf8(content, MAX_MARKDOWN_BYTES) },
-      });
-      if (runtime.state.status === "error") {
-        runtime.state = { ...runtime.state, status: "connected", error: undefined };
-        this.emit("stateChanged");
-      }
-    } catch (error) {
-      this.failRuntime(
-        runtime,
-        `企业微信消息推送失败：${readableError(error)}`,
-      );
-      throw error;
-    }
+    const expiresAt = Date.now() + OUTBOUND_DEADLINE_MS;
+    const send = runtime.outboundSendChain.then(() =>
+      this.sendMarkdownWithRetry(runtime, target, content, expiresAt),
+    );
+    // Keep later deliveries independent when one delivery fails, while still
+    // serializing messages for a bot to avoid concurrent SDK send frames.
+    runtime.outboundSendChain = send.then(
+      () => undefined,
+      () => undefined,
+    );
+    await withTimeout(send, OUTBOUND_DEADLINE_MS, OUTBOUND_TIMEOUT_MESSAGE);
   }
 
   refreshReservedManagementBotId(): void {
@@ -497,6 +490,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       pendingInboundMessages: new Map<string, PendingInboundMessage>(),
       processingMessageIds: new Set<string>(),
       processedMessageIds: new Set<string>(),
+      outboundSendChain: Promise.resolve(),
     };
     this.runtimes.set(record.id, runtime);
     if (!record.enabled) {
@@ -988,6 +982,82 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
         return false;
       }
     }
+  }
+
+  private async sendMarkdownWithRetry(
+    runtime: BotRuntime,
+    target: string,
+    content: string,
+    expiresAt: number,
+  ): Promise<void> {
+    let lastError: unknown = new Error(
+      `企业微信智能机器人“${runtime.state.name}”尚未连接。`,
+    );
+    const attempts = OUTBOUND_RETRY_DELAYS_MS.length + 1;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (this.runtimes.get(runtime.record.id) !== runtime) {
+        throw new Error("企业微信连接配置已变更或客户端已关闭，已停止原连接的投递。");
+      }
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) {
+        lastError = new Error(OUTBOUND_TIMEOUT_MESSAGE);
+        break;
+      }
+      const client = runtime.client;
+      if (!client || runtime.authenticatedClient !== client) {
+        lastError = new Error(
+          runtime.state.error ??
+            `企业微信智能机器人“${runtime.state.name}”尚未连接。`,
+        );
+      } else {
+        try {
+          await withTimeout(
+            client.sendMessage(target, {
+              msgtype: "markdown",
+              markdown: { content: truncateUtf8(content, MAX_MARKDOWN_BYTES) },
+            }),
+            remaining,
+            OUTBOUND_TIMEOUT_MESSAGE,
+          );
+          if (
+            this.runtimes.get(runtime.record.id) === runtime &&
+            runtime.authenticatedClient === client &&
+            runtime.state.status === "error"
+          ) {
+            runtime.state = {
+              ...runtime.state,
+              status: "connected",
+              error: undefined,
+            };
+            this.emit("stateChanged");
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          // A missing acknowledgement does not prove the message was not
+          // accepted. Do not duplicate an uncertain delivery automatically.
+          if (/ack timeout/iu.test(readableError(error))) {
+            break;
+          }
+        }
+      }
+      const delay = OUTBOUND_RETRY_DELAYS_MS[attempt];
+      if (delay !== undefined && Date.now() + delay < expiresAt) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delay);
+          timer.unref?.();
+        });
+      } else {
+        break;
+      }
+    }
+    if (this.runtimes.get(runtime.record.id) === runtime) {
+      this.failRuntime(
+        runtime,
+        `企业微信消息推送失败：${readableError(lastError)}`,
+      );
+    }
+    throw new Error(readableError(lastError));
   }
 
   private recordInbound(

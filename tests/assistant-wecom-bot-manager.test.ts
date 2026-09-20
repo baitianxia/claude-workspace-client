@@ -8,7 +8,7 @@ import type {
   WsFrame,
   WsFrameHeaders,
 } from "@wecom/aibot-node-sdk";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantStore } from "../src/main/assistant-store";
 import { AssistantWeComBotManager } from "../src/main/assistant-wecom-bot-manager";
 import type { SecretProtector } from "../src/main/wecom-settings";
@@ -21,6 +21,7 @@ class FakeClient extends EventEmitter implements WeComClient {
   disconnected = false;
   failReplies = false;
   failSends = false;
+  sendFailuresRemaining = 0;
   readonly sent: Array<{ targetId: string; body: SendMsgBody }> = [];
   readonly replies: string[] = [];
 
@@ -34,7 +35,8 @@ class FakeClient extends EventEmitter implements WeComClient {
   }
 
   async sendMessage(targetId: string, body: SendMsgBody): Promise<unknown> {
-    if (this.failSends) {
+    if (this.failSends || this.sendFailuresRemaining > 0) {
+      this.sendFailuresRemaining = Math.max(0, this.sendFailuresRemaining - 1);
       throw new Error("send failed");
     }
     this.sent.push({ targetId, body });
@@ -100,7 +102,24 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for assistant bot state.");
 }
 
+async function outboundFixture() {
+  const root = await mkdtemp(join(tmpdir(), "assistant-wecom-outbound-"));
+  temporaryDirectories.push(root);
+  const store = new AssistantStore(join(root, "assistant.json"));
+  const client = new FakeClient();
+  const manager = new AssistantWeComBotManager(
+    store, protector, () => "management-bot", () => client,
+  );
+  await manager.initialize();
+  const bot = await manager.upsertBot({
+    name: "助理", enabled: true, botId: "assistant-bot", secret: "secret",
+  });
+  client.emit("authenticated");
+  return { manager, client, bot };
+}
+
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -202,6 +221,85 @@ describe("AssistantWeComBotManager", () => {
         botId: "replacement-bot",
       }),
     ).rejects.toThrow("Bot ID 不能修改");
+    manager.dispose();
+  });
+
+  it("retries a transient outbound delivery without requiring the caller to resend", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-wecom-bots-outbound-retry-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantStore(join(root, "assistant.json"));
+    await store.initialize();
+    const client = new FakeClient();
+    const manager = new AssistantWeComBotManager(
+      store,
+      protector,
+      () => "claude-management-bot",
+      () => client,
+    );
+    await manager.initialize();
+    const bot = await manager.upsertBot({
+      name: "助理",
+      enabled: true,
+      botId: "assistant-outbound-retry-bot",
+      secret: "secret",
+    });
+    client.emit("authenticated");
+    client.sendFailuresRemaining = 1;
+
+    await manager.sendMarkdown(bot.id, "zhangsan", "# 已恢复");
+
+    expect(client.sent).toHaveLength(1);
+    expect(client.sent[0]).toMatchObject({
+      targetId: "zhangsan",
+      body: { msgtype: "markdown" },
+    });
+    expect(manager.listBots().find((entry) => entry.id === bot.id)).toMatchObject({
+      status: "connected",
+    });
+    manager.dispose();
+  });
+
+  it("stops queued retries after the bot configuration is replaced", async () => {
+    const { manager, client, bot } = await outboundFixture();
+    const send = vi.spyOn(client, "sendMessage").mockRejectedValue(new Error("send failed"));
+    vi.useFakeTimers();
+    const outcome = expect(manager.sendMarkdown(bot.id, "zhangsan", "结果")).rejects.toThrow("连接配置已变更");
+    await vi.advanceTimersByTimeAsync(0);
+    await manager.upsertBot({ id: bot.id, name: bot.name, enabled: false, botId: bot.botId });
+    await vi.advanceTimersByTimeAsync(1_000);
+    await outcome;
+    expect(send).toHaveBeenCalledTimes(1);
+    manager.dispose();
+  });
+
+  it("does not replay an outbound message whose acknowledgement is uncertain", async () => {
+    const { manager, client, bot } = await outboundFixture();
+    const send = vi.spyOn(client, "sendMessage").mockRejectedValue(new Error("Reply ack timeout (5000ms)"));
+    await expect(manager.sendMarkdown(bot.id, "zhangsan", "结果")).rejects.toThrow("ack timeout");
+    expect(send).toHaveBeenCalledTimes(1);
+    manager.dispose();
+  });
+
+  it("reports SDK error frames in both the delivery result and bot diagnostics", async () => {
+    const { manager, client, bot } = await outboundFixture();
+    vi.spyOn(client, "sendMessage").mockRejectedValue({ errcode: 40003, errmsg: "invalid userid" });
+    vi.useFakeTimers();
+    const outcome = expect(manager.sendMarkdown(bot.id, "zhangsan", "结果")).rejects.toThrow("40003：invalid userid");
+    await vi.advanceTimersByTimeAsync(3_000);
+    await outcome;
+    expect(manager.listBots()[0].error).toContain("40003：invalid userid");
+    manager.dispose();
+  });
+
+  it("expires queued deliveries before they can send after the caller's deadline", async () => {
+    const { manager, client, bot } = await outboundFixture();
+    const send = vi.spyOn(client, "sendMessage").mockImplementation(() => new Promise(() => undefined));
+    vi.useFakeTimers();
+    const first = expect(manager.sendMarkdown(bot.id, "zhangsan", "第一条")).rejects.toThrow("12 秒");
+    const second = expect(manager.sendMarkdown(bot.id, "zhangsan", "第二条")).rejects.toThrow("12 秒");
+    await vi.advanceTimersByTimeAsync(15_000);
+    await Promise.all([first, second]);
+    expect(send).toHaveBeenCalledTimes(1);
     manager.dispose();
   });
 

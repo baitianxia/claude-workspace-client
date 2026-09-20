@@ -398,7 +398,8 @@ export interface DesktopApi {
     assistantId: string,
   ): Promise<AssistantConversationRecord>;
   closeAssistantConversation(assistantId: string): Promise<void>;
-  cancelAssistantTurn(conversationId: string): Promise<void>;
+  /** Cancel the running turn, or a specific queued turn when turnId is given. */
+  cancelAssistantTurn(conversationId: string, turnId?: string): Promise<void>;
   createSession(request: CreateSessionRequest): Promise<SessionRecord>;
   restartSession(sessionId: string): Promise<SessionRecord>;
   renameSession(request: RenameSessionRequest): Promise<SessionRecord>;

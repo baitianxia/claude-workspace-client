@@ -264,6 +264,76 @@ function routeCode(markdown: string): string {
 }
 
 describe("WeComBridge", () => {
+  it("pushes generic permission notices without enabling guessed terminal actions", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe", (() => pty.process) as PtySpawner, "win32", [],
+      (_id, currentLaunchId) => { launchId = currentLaunchId; return { args: [] }; },
+    );
+    const session = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const client = new FakeWeComClient();
+    const bridge = new WeComBridge(manager, () => [], undefined, () => client);
+    bridge.configure({ enabled: true, botId: "bot-id", targetUserId: "zhangsan", secret: "secret", hasSecret: true });
+    client.emit("authenticated");
+    const event = hook(session.id, launchId, "unused");
+    bridge.handleClaudeHook({
+      ...event,
+      payload: {
+        ...event.payload,
+        hook_event_name: "Notification",
+        notification_type: "permission_prompt",
+        message: "Claude Code 需要权限确认",
+      },
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const content = markdownContent(client.sent[0].body);
+    expect(content).toContain("回到开发工作台");
+    expect(content).not.toContain("回复码");
+    client.emit("message", incomingMessage("unknown-menu", "拒绝", "zhangsan", content));
+    await vi.waitFor(() => expect(client.replies).toContainEqual(expect.stringContaining("未提供完整权限选项")));
+    expect(pty.writes).toEqual([]);
+    bridge.dispose();
+  });
+
+  it("keeps unsent queued notifications until reauthentication and drops invalidated routes", async () => {
+    const launches = new Map<string, string>();
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => fakePty(1).process) as PtySpawner,
+      "win32", [],
+      (id, launchId) => {
+        launches.set(id, launchId);
+        return { args: [] };
+      },
+    );
+    const first = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const second = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const stale = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const client = new FakeWeComClient();
+    let acknowledge: (value: unknown) => void = () => undefined;
+    const send = vi.spyOn(client, "sendMessage").mockImplementationOnce(
+      () => new Promise((resolve) => { acknowledge = resolve; }),
+    );
+    const bridge = new WeComBridge(manager, () => [], undefined, () => client);
+    bridge.configure({ enabled: true, botId: "bot-id", targetUserId: "zhangsan", secret: "secret", hasSecret: true });
+    client.emit("authenticated");
+    for (const session of [first, second, stale]) {
+      bridge.handleClaudeHook(hook(session.id, launches.get(session.id)!, session.id));
+    }
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    client.emit("reconnecting", 1);
+    manager.write(stale.id, "local input");
+    acknowledge({});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(send).toHaveBeenCalledTimes(1);
+
+    client.emit("authenticated");
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(markdownContent(send.mock.calls[1][1])).toContain(second.id);
+    bridge.dispose();
+  });
+
   it("routes simultaneous replies to the exact Claude Code PTY", async () => {
     const firstPty = fakePty(1);
     const secondPty = fakePty(2);
@@ -363,7 +433,7 @@ describe("WeComBridge", () => {
     ]);
     expect(bridge.getState()).toMatchObject({
       lastClaudeHookAt: expect.any(Number),
-      lastClaudeHookDetail: expect.stringContaining("已推送到 zhangsan"),
+      lastClaudeHookDetail: expect.stringContaining("接收人 zhangsan"),
     });
     const callbackUserId = "wohR_KCgAAVrFf3pjqdWOLHCn12fH5nw";
 
@@ -618,9 +688,8 @@ describe("WeComBridge", () => {
     await vi.waitFor(() =>
       expect(pty.writes).toEqual([
         "\x1b[12;34R",
-        "\r",
-        DOWN,
-        "\r",
+        "1",
+        "2",
         "\r",
       ]),
     );

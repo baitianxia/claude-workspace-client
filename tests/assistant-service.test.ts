@@ -679,6 +679,53 @@ describe("AssistantService", () => {
     expect(runner.inputs[2].sessionId).toBe(FIRST_SESSION);
   });
 
+  it("cancels only the selected queued turn", async () => {
+    const runner = new ControllableRunner();
+    const { service } = await fixture(runner);
+    const profile = await service.upsertProfile(request());
+
+    const running = await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "正在处理的问题",
+    });
+    await waitFor(() => runner.inputs.length === 1);
+    await expect(service.cancelTurn(profile.id, running.id)).rejects.toThrow(
+      "这条消息已经开始处理，请使用“停止”。",
+    );
+    const queued = await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "等待撤销的问题",
+    });
+    await waitFor(
+      () => service.getSnapshot().turns.find((turn) => turn.id === queued.id)?.status === "queued",
+    );
+
+    await service.cancelTurn(profile.id, queued.id);
+
+    expect(service.getSnapshot().turns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: queued.id,
+          status: "cancelled",
+          error: "主人在执行前取消了这条消息。",
+        }),
+      ]),
+    );
+    expect(runner.inputs).toHaveLength(1);
+
+    runner.complete(runner.inputs[0].turnId, {
+      status: "succeeded",
+      response: "正在处理的问题完成",
+      sessionId: FIRST_SESSION,
+    });
+    await waitFor(() =>
+      service
+        .getSnapshot()
+        .turns.filter((turn) => turn.id === runner.inputs[0].turnId)
+        .every((turn) => turn.status === "succeeded"),
+    );
+  });
+
   it("closes the live process without clearing context and resumes on the next message", async () => {
     const { service, runner } = await fixture();
     const profile = await service.upsertProfile(request());

@@ -17,6 +17,8 @@ export interface ClaudeHookPayload {
   message?: string;
   title?: string;
   notification_type?: string;
+  error?: string;
+  error_details?: string;
   tool_name?: string;
   tool_input?: unknown;
   permission_suggestions?: unknown;
@@ -62,6 +64,9 @@ function normalizeHookPayload(value: unknown): ClaudeHookPayload | null {
     (candidate.title !== undefined && typeof candidate.title !== "string") ||
     (candidate.notification_type !== undefined &&
       typeof candidate.notification_type !== "string") ||
+    (candidate.error !== undefined && typeof candidate.error !== "string") ||
+    (candidate.error_details !== undefined &&
+      typeof candidate.error_details !== "string") ||
     (candidate.tool_name !== undefined &&
       typeof candidate.tool_name !== "string") ||
     (candidate.stop_hook_active !== undefined &&
@@ -201,8 +206,17 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
         ],
         Notification: [
           {
-            matcher:
-              "idle_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input",
+            // An empty matcher is intentional: Claude Code adds notification
+            // types over time (including permission_prompt), and missing one
+            // here makes the remote channel appear connected while silently
+            // dropping the corresponding event.
+            matcher: "",
+            hooks: [handler],
+          },
+        ],
+        StopFailure: [
+          {
+            matcher: "",
             hooks: [handler],
           },
         ],

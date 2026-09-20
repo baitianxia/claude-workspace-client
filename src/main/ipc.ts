@@ -244,9 +244,12 @@ export function registerIpcHandlers(options: {
 
   ipcMain.handle(
     IPC_CHANNELS.cancelAssistantTurn,
-    (_event, conversationId: unknown) =>
+    (_event, conversationId: unknown, turnId: unknown) =>
       assistantService.cancelTurn(
         requireIdentifier(conversationId, "Assistant conversation ID"),
+        turnId === undefined
+          ? undefined
+          : requireIdentifier(turnId, "Assistant turn ID"),
       ),
   );
 

@@ -568,6 +568,18 @@ function completionBody(payload: ClaudeHookPayload): string | null {
   ].join("\n\n");
 }
 
+function failureBody(payload: ClaudeHookPayload): string | null {
+  const message =
+    textValue(payload.last_assistant_message) ??
+    textValue(payload.error_details) ??
+    textValue(payload.error) ??
+    textValue(payload.message);
+  if (!message) {
+    return null;
+  }
+  return `## Claude Code 本轮未完成\n${truncate(message, 7_000)}`;
+}
+
 function baseAttention(
   event: ClaudeHookEvent,
   kind: RemoteAttentionKind,
@@ -603,6 +615,18 @@ export function attentionFromClaudeHook(
           event,
           "completion",
           "Claude Code 已完成本轮，等待你的下一步",
+          body,
+          "text",
+        )
+      : null;
+  }
+  if (payload.hook_event_name === "StopFailure") {
+    const body = failureBody(payload);
+    return body
+      ? baseAttention(
+          event,
+          "completion",
+          "Claude Code 本轮未完成",
           body,
           "text",
         )
@@ -695,6 +719,17 @@ export function attentionFromClaudeHook(
       payload.title?.trim() || "Claude Code 后台任务需要回复",
       payload.message?.trim() || "Claude Code 的后台任务正在等待用户输入。",
       "text",
+    );
+  }
+  if (payload.notification_type === "permission_prompt") {
+    // Notification has no tool input or menu layout. In particular, guessing
+    // the deny index could select a persistent allow option instead.
+    return baseAttention(
+      event,
+      "permission",
+      textValue(payload.title) ?? "Claude Code 需要权限确认",
+      textValue(payload.message) ?? "Claude Code 正在等待权限确认。",
+      "none",
     );
   }
   return null;

@@ -189,6 +189,42 @@ describe("RemoteReplyRouter", () => {
     });
   });
 
+  it("deduplicates generic permission notifications in favor of detailed requests", () => {
+    const router = new RemoteReplyRouter(codeGenerator("GENAA", "DETAIL"));
+    const generic = router.register(
+      "zhangsan",
+      attention("session-a", "launch-a", {
+        kind: "permission",
+        title: "Claude Code 需要权限确认",
+        body: "Claude Code 正在等待权限选择。",
+        inputMode: "none",
+      }),
+    );
+    const detailed = router.register(
+      "zhangsan",
+      attention("session-a", "launch-a", {
+        kind: "permission",
+        title: "Claude Code 需要权限确认",
+        body: "工具：Bash\n命令：npm test",
+        inputMode: "menu",
+        permissionSuggestionCount: 0,
+        permissionOptionLabels: ["允许", "拒绝"],
+      }),
+    );
+
+    expect(generic).toMatchObject({ shouldSend: true, pending: { code: "GENAA" } });
+    expect(() => terminalActionForRemoteReply(generic.pending, "拒绝")).toThrow(
+      "未提供完整权限选项",
+    );
+    expect(detailed).toMatchObject({ shouldSend: true, pending: { code: "DETAIL" } });
+    expect(router.register("zhangsan", generic.pending)).toMatchObject({
+      shouldSend: false,
+      pending: { code: "DETAIL", inputMode: "menu" },
+    });
+    expect(router.resolve("zhangsan", "GENAA 1").status).toBe("rejected");
+    expect(router.resolve("zhangsan", "DETAIL 1").status).toBe("matched");
+  });
+
   it("keeps one reply code for duplicate hooks describing the same question", () => {
     const router = new RemoteReplyRouter(codeGenerator("ASKKK", "OTHER"));
     const question = attention("session-a", "launch-a", {
@@ -574,23 +610,17 @@ describe("RemoteReplyRouter", () => {
     ).pending;
 
     expect(terminalInputForRemoteReply(pending, "2;1,3;4")).toBe(
-      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r\r`,
+      "213\t4\r",
     );
     expect(terminalInputForRemoteReply(pending, "B;C,E;I")).toBe(
-      `${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r\r`,
+      "213\t4\r",
     );
     expect(terminalActionForRemoteReply(pending, "2;1,3;4").inputChunks).toEqual([
-      DOWN,
-      "\r",
-      " ",
-      DOWN,
-      DOWN,
-      " ",
-      "\r",
-      DOWN,
-      DOWN,
-      DOWN,
-      "\r",
+      "2",
+      "1",
+      "3",
+      "\t",
+      "4",
       "\r",
     ]);
 
@@ -607,6 +637,6 @@ describe("RemoteReplyRouter", () => {
         lineSeparated.pending,
         lineSeparated.reply,
       ),
-    ).toBe(`${DOWN}\r ${DOWN}${DOWN} \r${DOWN}${DOWN}${DOWN}\r\r`);
+    ).toBe("213\t4\r");
   });
 });
