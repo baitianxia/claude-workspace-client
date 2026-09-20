@@ -179,6 +179,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   createSession(
     workspace: SessionWorkspace,
     requestedTitle?: string,
+    skipPermissions = false,
   ): SessionRecord {
     const executablePath = this.getClaudeExecutable();
     const workspaceSessions = this.listSessions().filter(
@@ -193,6 +194,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       cwd: workspace.cwd,
       status: "starting",
       createdAt: Date.now(),
+      ...(skipPermissions === true ? { skipPermissions: true } : {}),
     };
 
     const launchId = randomUUID();
@@ -200,7 +202,12 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
       const launch = createClaudeLaunchSpec(
         executablePath,
-        launchOptions?.args ?? [],
+        [
+          ...(launchOptions?.args ?? []),
+          ...(record.skipPermissions === true
+            ? ["--dangerously-skip-permissions"]
+            : []),
+        ],
         {
           platform: this.platform,
           env: { ...process.env, ...launchOptions?.env },
@@ -264,7 +271,12 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
       const launch = createClaudeLaunchSpec(
         executablePath,
-        launchOptions?.args ?? [],
+        [
+          ...(launchOptions?.args ?? []),
+          ...(session.record.skipPermissions === true
+            ? ["--dangerously-skip-permissions"]
+            : []),
+        ],
         {
           platform: this.platform,
           env: { ...process.env, ...launchOptions?.env },

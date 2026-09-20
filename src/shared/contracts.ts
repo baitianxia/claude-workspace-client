@@ -25,6 +25,8 @@ export interface SessionRecord {
   cwd: string;
   status: SessionStatus;
   createdAt: number;
+  /** Explicit opt-in for this session; omitted for normal Claude launches. */
+  skipPermissions?: boolean;
   exitCode?: number;
   error?: string;
 }
@@ -286,10 +288,12 @@ export type CreateSessionRequest =
       scope: "project";
       projectId: string;
       title?: string;
+      skipPermissions?: boolean;
     }
   | {
       scope: "temporary";
       title?: string;
+      skipPermissions?: boolean;
     };
 
 export interface RenameSessionRequest {

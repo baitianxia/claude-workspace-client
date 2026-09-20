@@ -213,6 +213,7 @@ export function App() {
   );
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
+  const [skipPermissions, setSkipPermissions] = useState(false);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectAliasDraft, setProjectAliasDraft] = useState("");
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(
@@ -669,7 +670,9 @@ export function App() {
       const session = await window.claudeWorkspace.createSession({
         scope: "project",
         projectId: project.id,
+        skipPermissions,
       });
+      setSkipPermissions(false);
       setSnapshot((current) =>
         current
           ? { ...current, sessions: upsertSession(current.sessions, session) }
@@ -688,7 +691,9 @@ export function App() {
     runAction(async () => {
       const session = await window.claudeWorkspace.createSession({
         scope: "temporary",
+        skipPermissions,
       });
+      setSkipPermissions(false);
       setSnapshot((current) =>
         current
           ? { ...current, sessions: upsertSession(current.sessions, session) }
@@ -1313,6 +1318,28 @@ export function App() {
 
           <section className="sidebar-workspace-section">
           <h3 className="sidebar-subsection-label">工作区</h3>
+          <div className="session-launch-control">
+            <label htmlFor="session-launch-command">新会话启动命令</label>
+            <select
+              id="session-launch-command"
+              value={skipPermissions ? "skip-permissions" : "default"}
+              onChange={(event) =>
+                setSkipPermissions(event.currentTarget.value === "skip-permissions")
+              }
+              disabled={busy}
+              aria-describedby="session-launch-description"
+            >
+              <option value="default">claude（默认）</option>
+              <option value="skip-permissions">
+                claude --dangerously-skip-permissions
+              </option>
+            </select>
+            <span id="session-launch-description">
+              {skipPermissions
+                ? "下一个新会话跳过权限确认，创建后恢复默认。"
+                : "默认使用 claude，可选择跳过权限确认。"}
+            </span>
+          </div>
           <div className="section-heading">
             <span>工程与会话</span>
             <div className="section-heading-actions">
@@ -1615,6 +1642,14 @@ export function App() {
                 </p>
               </div>
               <div className="toolbar-actions">
+                {activeSession.skipPermissions ? (
+                  <span
+                    className="session-status-chip"
+                    title="claude --dangerously-skip-permissions"
+                  >
+                    跳过权限确认
+                  </span>
+                ) : null}
                 {activeProject ? (
                   <button
                     className={`toolbar-changes-button ${changesPanelOpen ? "toolbar-changes-button--active" : ""}`}
