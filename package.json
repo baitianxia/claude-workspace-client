@@ -1,6 +1,6 @@
 {
   "name": "claude-workspace-client",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "author": "Internal Engineering",
   "description": "A Windows desktop workspace for local personal agents and Claude Code sessions.",
