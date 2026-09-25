@@ -41,6 +41,12 @@ interface ProfileDraft {
   maxTurns: number;
 }
 
+// Renderer and main-process code are upgraded together in a release, but a
+// partially updated portable install can briefly deliver a snapshot from an
+// older preload. Keep the configuration page usable while that snapshot is
+// replaced instead of throwing while looking up a bound bot.
+const EMPTY_ASSISTANT_BOTS: AssistantSnapshot["wecomBots"] = [];
+
 function readableError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   return raw.replace(/^Error invoking remote method '[^']+': Error: /u, "");
@@ -196,6 +202,9 @@ export function AssistantPanel({
   onSelectionChange,
   embedded = false,
 }: AssistantPanelProps) {
+  const assistantBots = Array.isArray(assistant.wecomBots)
+    ? assistant.wecomBots
+    : EMPTY_ASSISTANT_BOTS;
   const selectedId = selection.mode === "profile" ? selection.id : null;
   const [editing, setEditing] = useState(
     selection.mode === "new" || Boolean(selection.editing),
@@ -206,7 +215,7 @@ export function AssistantPanel({
         ? assistant.profiles.find((profile) => profile.id === selection.id)
         : undefined,
       projects,
-      assistant.wecomBots,
+      assistantBots,
     ),
   );
   const [tab, setTab] = useState<"chat" | "tasks">("chat");
@@ -245,7 +254,7 @@ export function AssistantPanel({
 
   const selected = assistant.profiles.find((profile) => profile.id === selectedId);
   const selectedBot = selected?.wecomBotProfileId
-    ? assistant.wecomBots.find((bot) => bot.id === selected.wecomBotProfileId)
+    ? assistantBots.find((bot) => bot.id === selected.wecomBotProfileId)
     : undefined;
   const turns = useMemo(
     () => assistant.turns.filter((turn) => turn.assistantId === selectedId),
@@ -354,7 +363,7 @@ export function AssistantPanel({
         activePendingSaved &&
         !matchesSavedProfile(
           next,
-          assistant.wecomBots,
+          assistantBots,
           activePendingSaved.profile,
         )
       ) {
@@ -366,7 +375,7 @@ export function AssistantPanel({
         if (activePendingSaved) {
           pendingSavedProfileRef.current = null;
         }
-        replaceDraft(profileDraft(next, projects, assistant.wecomBots));
+        replaceDraft(profileDraft(next, projects, assistantBots));
       }
       setMessage("");
       setError(null);
@@ -378,12 +387,12 @@ export function AssistantPanel({
     // immediately after saving cannot show stale/empty Bot ID fields. A form
     // the user has edited remains untouched.
     if (!draftDirtyRef.current) {
-      const nextDraft = profileDraft(next, projects, assistant.wecomBots);
+      const nextDraft = profileDraft(next, projects, assistantBots);
       if (
         activePendingSaved &&
         !matchesSavedProfile(
           next,
-          assistant.wecomBots,
+          assistantBots,
           activePendingSaved.profile,
         )
       ) {
@@ -403,7 +412,7 @@ export function AssistantPanel({
     }
   }, [
     assistant.profiles,
-    assistant.wecomBots,
+    assistantBots,
     projects,
     selectionKey,
     selection.mode,
@@ -448,7 +457,7 @@ export function AssistantPanel({
     pendingSavedProfileRef.current = null;
     onSelectionChange({ mode: "profile", id: profile.id });
     setEditing(false);
-    replaceDraft(profileDraft(profile, projects, assistant.wecomBots));
+    replaceDraft(profileDraft(profile, projects, assistantBots));
     setMessage("");
     setError(null);
     requestComposerFocus();
@@ -458,7 +467,7 @@ export function AssistantPanel({
     pendingSavedProfileRef.current = null;
     onSelectionChange({ mode: "new" });
     setEditing(true);
-    replaceDraft(profileDraft(undefined, projects, assistant.wecomBots));
+    replaceDraft(profileDraft(undefined, projects, assistantBots));
     setMessage("");
     setError(null);
   };
@@ -496,7 +505,7 @@ export function AssistantPanel({
       const savedDraft = profileDraft(
         saved,
         projects,
-        assistant.wecomBots,
+        assistantBots,
         inlineBot
           ? { id: saved.wecomBotProfileId ?? "", botId: inlineBot.botId }
           : undefined,
@@ -739,7 +748,7 @@ export function AssistantPanel({
                     onSelectionChange({ mode: "new" });
                     setEditing(true);
                   }
-                  replaceDraft(profileDraft(fallback, projects, assistant.wecomBots));
+                  replaceDraft(profileDraft(fallback, projects, assistantBots));
                 }}>取消</button>
                 <button type="submit" className="primary-button" disabled={busy || !draft.projectPath.trim()}>{selected ? "保存" : "创建助理"}</button>
               </div>

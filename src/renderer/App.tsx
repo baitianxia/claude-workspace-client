@@ -18,6 +18,7 @@ import type {
 import { BrandMark } from "./BrandMark";
 import { QuickSwitcher } from "./QuickSwitcher";
 import { TerminalView } from "./TerminalView";
+import { RendererErrorBoundary } from "./RendererErrorBoundary";
 import {
   projectDisplayName,
   type WorkspaceSearchItem,
@@ -1603,21 +1604,23 @@ export function App() {
 
       <section className="workspace-panel">
         {sidebarMode === "assistant" ? (
-          <Suspense
-            fallback={
-              <div className="assistant-page assistant-page--loading">
-                正在加载私人助理…
-              </div>
-            }
-          >
-            <AssistantPanel
-              embedded
-              assistant={snapshot.assistant}
-              projects={projects}
-              selection={effectiveAssistantSelection}
-              onSelectionChange={(selection) => setAssistantSelection(selection)}
-            />
-          </Suspense>
+          <RendererErrorBoundary title="私人助理界面加载失败">
+            <Suspense
+              fallback={
+                <div className="assistant-page assistant-page--loading">
+                  正在加载私人助理…
+                </div>
+              }
+            >
+              <AssistantPanel
+                embedded
+                assistant={snapshot.assistant}
+                projects={projects}
+                selection={effectiveAssistantSelection}
+                onSelectionChange={(selection) => setAssistantSelection(selection)}
+              />
+            </Suspense>
+          </RendererErrorBoundary>
         ) : (
           <>
             {activeSession ? (
