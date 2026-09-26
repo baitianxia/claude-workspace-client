@@ -28,6 +28,7 @@ import type {
   ClaudeCodeAssistantInput,
   ClaudeCodeAssistantResult,
 } from "./claude-code-assistant-runner";
+import { createAssistantWeComMcpServer } from "./assistant-wecom-tools";
 import { withTimeout } from "./promise-timeout";
 
 const MAX_QUEUED_TURNS_PER_ASSISTANT = 10;
@@ -912,6 +913,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       let profile: AssistantProfileRecord;
       let projectRoot: string;
       let taskMcpServer: AssistantTaskMcpServer;
+      let wecomMcpServer: AssistantTaskMcpServer | undefined;
       try {
         profile = this.requireEnabledProfile(turn.assistantId);
         const configuredPath = legacyRuntimePath(profile, this.getProject);
@@ -920,6 +922,13 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         }
         projectRoot = await validateAssistantRuntimePath(configuredPath);
         taskMcpServer = await this.tasks.createMcpServer(profile.id);
+        if (profile.wecomBotProfileId) {
+          wecomMcpServer = await createAssistantWeComMcpServer(
+            profile.id,
+            (assistantId) => this.store.getProfile(assistantId),
+            this.wecomBots,
+          );
+        }
       } catch (error) {
         await this.finishTurn(turn, {
           status: "failed",
@@ -943,6 +952,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
           projectRoot,
           prompt: running.request,
           taskMcpServer,
+          ...(wecomMcpServer ? { wecomMcpServer } : {}),
           onSessionId: async (sessionId) => {
             await this.store.setConversationSessionId(
               running.conversationId,

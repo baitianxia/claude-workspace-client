@@ -66,6 +66,10 @@ function validIdentifier(value: unknown): value is string {
   );
 }
 
+function optionalDeliveryTarget(value: unknown): value is string | undefined {
+  return value === undefined || validIdentifier(value);
+}
+
 function validText(value: unknown, maximum: number, allowEmpty = false): value is string {
   return (
     typeof value === "string" &&
@@ -92,6 +96,7 @@ function normalizeTask(value: unknown): AssistantTaskRecord | null {
     !validText(candidate.name, 80) ||
     typeof candidate.enabled !== "boolean" ||
     !validText(candidate.prompt, 20_000) ||
+    !optionalDeliveryTarget(candidate.deliveryTarget) ||
     !Number.isInteger(candidate.timeoutMinutes) ||
     (candidate.timeoutMinutes ?? 0) < 1 ||
     (candidate.timeoutMinutes ?? 0) > 120 ||
@@ -112,6 +117,9 @@ function normalizeTask(value: unknown): AssistantTaskRecord | null {
     enabled: candidate.enabled,
     schedule,
     prompt: candidate.prompt.trim(),
+    ...(candidate.deliveryTarget
+      ? { deliveryTarget: candidate.deliveryTarget.trim() }
+      : {}),
     timeoutMinutes: candidate.timeoutMinutes as number,
     maxTurns: candidate.maxTurns as number,
     createdAt: candidate.createdAt,

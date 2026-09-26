@@ -103,9 +103,23 @@ describe("ClaudeCodeAssistantTaskRunner", () => {
     const prompt = buildAssistantTaskPrompt(taskInput());
 
     expect(prompt).toContain("任务名称：工作日简报");
+    expect(prompt).toContain("结果投递目标：助理主人企业微信单聊");
     expect(prompt).toContain("触发方式：主人手动立即执行");
     expect(prompt).not.toContain("主人上一轮对话");
     expect(prompt).not.toContain("聊天记录");
+  });
+
+  it("includes a configured group chatid in the independent task prompt", () => {
+    const prompt = buildAssistantTaskPrompt(
+      taskInput({
+        task: {
+          ...taskInput().task,
+          deliveryTarget: "wrhR_group-chatid",
+        },
+      }),
+    );
+
+    expect(prompt).toContain("结果投递目标：wrhR_group-chatid");
   });
 
   it("does not persist or resume sessions in the SDK options", () => {

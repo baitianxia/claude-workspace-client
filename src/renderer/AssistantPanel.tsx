@@ -143,6 +143,10 @@ function taskRunState(run: AssistantTaskRunRecord | undefined): string {
   }
 }
 
+function taskDeliveryTargetLabel(task: AssistantSnapshot["tasks"][number]): string {
+  return task.deliveryTarget ? `企微目标：${task.deliveryTarget}` : "企微目标：主人单聊";
+}
+
 function assistantOverviewLabel(assistant: AssistantSnapshot): string {
   if (!assistant.profiles.length) {
     return "尚未创建助理";
@@ -837,11 +841,11 @@ export function AssistantPanel({
                     <strong>{assistant.schedulerActive ? "调度器运行中" : "调度器已停止"}</strong>
                     <small>{assistant.lastSchedulerCheckAt ? `最近检查 ${shortTime(assistant.lastSchedulerCheckAt)}` : "尚未完成首次检查"}</small>
                   </div>
-                  <header className="assistant-task-heading"><div><h3>独立执行的定时任务</h3><p>在主人聊天里创建和修改；每次运行不读取主聊天历史，也不复用上一次任务会话。</p></div><button type="button" className="primary-button" onClick={() => { setTab("chat"); setMessage("请帮我创建一个定时任务："); requestComposerFocus(); }}>在聊天里创建</button></header>
+                  <header className="assistant-task-heading"><div><h3>独立执行的定时任务</h3><p>在主人聊天里创建和修改；可指定企业微信 userid 或群 chatid 作为结果目标；每次运行不读取主聊天历史，也不复用上一次任务会话。</p></div><button type="button" className="primary-button" onClick={() => { setTab("chat"); setMessage("请帮我创建一个定时任务："); requestComposerFocus(); }}>在聊天里创建</button></header>
                   {tasks.length === 0 ? <div className="assistant-task-empty"><strong>还没有定时任务</strong><span>告诉助理什么时候做什么，它会确认并保存 Cron 计划。</span></div> : <div className="assistant-task-list">{tasks.map((task) => {
                     const latest = latestRunByTask.get(task.id);
                     const failed = latest && (latest.status === "failed" || latest.status === "timed-out" || latest.status === "cancelled" || latest.deliveryError);
-                    return <article key={task.id} className={failed ? "assistant-task-card assistant-task-card--failed" : "assistant-task-card"}><header><div><span className={`status-dot ${task.enabled ? "status-dot--online" : "status-dot--offline"}`} /><strong>{task.name}</strong></div><code>{task.schedule}</code></header><p>{task.prompt}</p><footer><span className={`assistant-task-run-state assistant-task-run-state--${latest?.status ?? "idle"}`}>{taskRunState(latest)}</span>{latest ? <time>{shortTime(latest.finishedAt ?? latest.startedAt ?? latest.createdAt)}</time> : null}</footer>{latest?.error ? <div className="assistant-task-run-error"><strong>执行异常</strong><span>{latest.error}</span></div> : null}{latest?.deliveryError ? <div className="assistant-task-run-error"><strong>通知主人失败</strong><span>{latest.deliveryError}</span></div> : null}{latest?.response ? <details><summary>查看最近结果</summary><MarkdownPreview content={latest.response} /></details> : null}</article>;
+                    return <article key={task.id} className={failed ? "assistant-task-card assistant-task-card--failed" : "assistant-task-card"}><header><div><span className={`status-dot ${task.enabled ? "status-dot--online" : "status-dot--offline"}`} /><strong>{task.name}</strong></div><code>{task.schedule}</code></header><p>{task.prompt}</p><small className="assistant-task-delivery-target">{taskDeliveryTargetLabel(task)}</small><footer><span className={`assistant-task-run-state assistant-task-run-state--${latest?.status ?? "idle"}`}>{taskRunState(latest)}</span>{latest ? <time>{shortTime(latest.finishedAt ?? latest.startedAt ?? latest.createdAt)}</time> : null}</footer>{latest?.error ? <div className="assistant-task-run-error"><strong>执行异常</strong><span>{latest.error}</span></div> : null}{latest?.deliveryError ? <div className="assistant-task-run-error"><strong>通知目标失败</strong><span>{latest.deliveryError}</span></div> : null}{latest?.response ? <details><summary>查看最近结果</summary><MarkdownPreview content={latest.response} /></details> : null}</article>;
                   })}</div>}
                 </div>
               )}

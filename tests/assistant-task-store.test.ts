@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -18,6 +18,7 @@ function task(): AssistantTaskRecord {
     enabled: true,
     schedule: "0 9 * * *",
     prompt: "整理今日简报",
+    deliveryTarget: "wrhR_group-chatid",
     timeoutMinutes: 20,
     maxTurns: 20,
     createdAt: 1,
@@ -50,6 +51,37 @@ afterEach(async () => {
 });
 
 describe("AssistantTaskStore", () => {
+  it("persists task result delivery targets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-task-target-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant-tasks.json");
+    const store = new AssistantTaskStore(storePath);
+    await store.initialize();
+    await store.putTask(task());
+
+    const restored = new AssistantTaskStore(storePath);
+    await restored.initialize();
+    expect(restored.getTask("task-one")?.deliveryTarget).toBe("wrhR_group-chatid");
+  });
+
+  it("keeps legacy tasks without a delivery target readable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-task-legacy-target-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant-tasks.json");
+    const legacyTask = { ...task() };
+    delete legacyTask.deliveryTarget;
+    await writeFile(
+      storePath,
+      JSON.stringify({ version: 1, tasks: [legacyTask], runs: [] }),
+      "utf8",
+    );
+
+    const store = new AssistantTaskStore(storePath);
+    await store.initialize();
+    expect(store.getTask("task-one")).toMatchObject({ id: "task-one" });
+    expect(store.getTask("task-one")?.deliveryTarget).toBeUndefined();
+  });
+
   it("marks interrupted queued and running records failed without retrying them", async () => {
     const root = await mkdtemp(join(tmpdir(), "assistant-task-store-"));
     temporaryDirectories.push(root);

@@ -335,6 +335,7 @@ describe("AssistantService", () => {
     expect(result?.status).toBe("accepted");
     await waitFor(() => runner.inputs.length === 1);
     expect(runner.inputs[0]?.prompt).toBe("通过绑定机器人发送");
+    expect(runner.inputs[0]?.wecomMcpServer).toBeDefined();
     await waitFor(() => gateway.sent.length === 1);
     expect(gateway.sent).toEqual([
       expect.objectContaining({

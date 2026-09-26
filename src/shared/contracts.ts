@@ -99,7 +99,7 @@ export interface AssistantProfileRecord {
   instructions: string;
   /** The owner whose WeCom single-chat shares the local desktop conversation. */
   ownerWeComUserId: string;
-  /** Optional WeCom business bot used only as a remote entry channel. */
+  /** Optional WeCom bot for the owner entry channel and assistant deliveries. */
   wecomBotProfileId?: string;
   timeoutMinutes: number;
   maxTurns: number;
@@ -156,6 +156,8 @@ export interface AssistantTaskRecord {
   /** Five-field cron expression evaluated in the computer's local timezone. */
   schedule: string;
   prompt: string;
+  /** Optional userid or raw group chatid for result delivery; defaults to the owner. */
+  deliveryTarget?: string;
   timeoutMinutes: number;
   maxTurns: number;
   createdAt: number;

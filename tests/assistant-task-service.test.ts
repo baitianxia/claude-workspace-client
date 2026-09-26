@@ -210,6 +210,52 @@ describe("AssistantTaskService", () => {
     ]);
   });
 
+  it("persists and uses a task-specific WeCom group chatid", async () => {
+    const { service, gateway, runner } = await fixture();
+    const task = await service.createTask("assistant-one", {
+      name: "质量分通报",
+      schedule: "0 9 * * *",
+      prompt: "整理质量分通报",
+      deliveryTarget: "wrhR_KCgAAdSrsY9o0gYPz3-QPe32LTg",
+    });
+
+    expect(task.deliveryTarget).toBe("wrhR_KCgAAdSrsY9o0gYPz3-QPe32LTg");
+    const updated = await service.updateTask("assistant-one", task.id, {
+      deliveryTarget: "wrhR_new-group-chatid",
+    });
+    expect(updated.deliveryTarget).toBe("wrhR_new-group-chatid");
+
+    await service.runTaskNow("assistant-one", task.id);
+    await waitFor(() => gateway.sent.length === 1);
+
+    expect(runner.inputs[0]?.task.deliveryTarget).toBe("wrhR_new-group-chatid");
+    expect(runner.inputs[0]?.wecomMcpServer).toBeDefined();
+    expect(gateway.sent).toEqual([
+      expect.objectContaining({
+        botProfileId: "bot-one",
+        targetId: "wrhR_new-group-chatid",
+      }),
+    ]);
+  });
+
+  it("restores owner delivery when a task target is cleared", async () => {
+    const { service, gateway } = await fixture();
+    const task = await service.createTask("assistant-one", {
+      name: "临时群通报",
+      schedule: "0 9 * * *",
+      prompt: "整理通报",
+      deliveryTarget: "wrhR_group-chatid",
+    });
+
+    const updated = await service.updateTask("assistant-one", task.id, {
+      deliveryTarget: null,
+    });
+    expect(updated.deliveryTarget).toBeUndefined();
+    await service.runTaskNow("assistant-one", task.id);
+    await waitFor(() => gateway.sent.length === 1);
+    expect(gateway.sent[0]?.targetId).toBe("zhangsan");
+  });
+
   it("records a WeCom delivery failure separately from successful execution", async () => {
     const { service, gateway } = await fixture();
     const task = await createTask(service);

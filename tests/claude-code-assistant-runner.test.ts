@@ -146,8 +146,13 @@ function automaticFactory(state: {
 describe("ClaudeCodeAssistantRunner", () => {
   it("keeps the owner's local capabilities but routes scheduling through the app", () => {
     const taskServer = {} as never;
+    const wecomServer = {} as never;
     const options = buildAssistantSdkOptions(
-      input({ taskMcpServer: taskServer }),
+      input({
+        profile: profile({ wecomBotProfileId: "bot-one" }),
+        taskMcpServer: taskServer,
+        wecomMcpServer: wecomServer,
+      }),
       "/usr/bin/claude",
     );
 
@@ -160,7 +165,10 @@ describe("ClaudeCodeAssistantRunner", () => {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       persistSession: true,
-      mcpServers: { assistant_tasks: taskServer },
+      mcpServers: {
+        assistant_tasks: taskServer,
+        assistant_wecom: wecomServer,
+      },
       disallowedTools: [
         "CronCreate",
         "CronDelete",
@@ -175,6 +183,22 @@ describe("ClaudeCodeAssistantRunner", () => {
     expect(String(options.systemPrompt && JSON.stringify(options.systemPrompt))).toContain(
       "mcp__assistant_tasks__*",
     );
+    expect(String(options.systemPrompt && JSON.stringify(options.systemPrompt))).toContain(
+      "mcp__assistant_wecom__send_message",
+    );
+    expect(String(options.systemPrompt && JSON.stringify(options.systemPrompt))).toContain(
+      "delivery_target",
+    );
+  });
+
+  it("tells an unbound assistant to configure its WeCom bot instead of using another sender", () => {
+    const prompt = JSON.stringify(
+      buildAssistantSdkOptions(input({ profile: profile({ wecomBotProfileId: undefined }) }), "/usr/bin/claude")
+        .systemPrompt,
+    );
+
+    expect(prompt).toContain("没有绑定企业微信智能机器人");
+    expect(prompt).not.toContain("mcp__assistant_wecom__send_message");
   });
 
   it("keeps one live streaming query for consecutive owner messages", async () => {

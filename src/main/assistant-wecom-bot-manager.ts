@@ -88,7 +88,7 @@ interface AssistantInboundEventClient {
   ): unknown;
 }
 
-const MAX_MARKDOWN_BYTES = 18_000;
+export const MAX_ASSISTANT_WECOM_MARKDOWN_BYTES = 18_000;
 const OUTBOUND_RETRY_DELAYS_MS = [250, 750, 1_500] as const;
 const OUTBOUND_DEADLINE_MS = 12_000;
 const OUTBOUND_TIMEOUT_MESSAGE = "企业微信消息投递超过 12 秒，已停止继续重试。";
@@ -974,7 +974,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
         }
         await client.sendMessage(fallbackTarget, {
           msgtype: "markdown",
-          markdown: { content: truncateUtf8(content, MAX_MARKDOWN_BYTES) },
+          markdown: { content: truncateUtf8(content, MAX_ASSISTANT_WECOM_MARKDOWN_BYTES) },
         });
         return true;
       } catch (fallbackError) {
@@ -1014,7 +1014,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
           await withTimeout(
             client.sendMessage(target, {
               msgtype: "markdown",
-              markdown: { content: truncateUtf8(content, MAX_MARKDOWN_BYTES) },
+              markdown: { content: truncateUtf8(content, MAX_ASSISTANT_WECOM_MARKDOWN_BYTES) },
             }),
             remaining,
             OUTBOUND_TIMEOUT_MESSAGE,
