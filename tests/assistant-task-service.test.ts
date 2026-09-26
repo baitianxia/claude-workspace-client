@@ -182,7 +182,7 @@ describe("AssistantTaskService", () => {
       expect.objectContaining({
         runId: queued.id,
         task: expect.objectContaining({ id: task.id }),
-        projectRoot: expect.stringContaining("project"),
+        projectRoot: process.cwd(),
       }),
     ]);
     expect(gateway.sent).toEqual([
