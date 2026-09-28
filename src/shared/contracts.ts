@@ -25,7 +25,7 @@ export interface SessionRecord {
   cwd: string;
   status: SessionStatus;
   createdAt: number;
-  /** Claude Code's own conversation ID, captured from the SessionStart hook. */
+  /** Claude Code's durable conversation ID, allocated at launch and corrected by SessionStart. */
   claudeSessionId?: string;
   /** Explicit opt-in for this session; omitted for normal Claude launches. */
   skipPermissions?: boolean;

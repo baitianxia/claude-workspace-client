@@ -84,9 +84,10 @@ describe("SessionManager", () => {
 
     expect(session.status).toBe("running");
     expect(session.cwd).toBe("C:\\work\\mall");
+    expect(session.claudeSessionId).toEqual(expect.any(String));
     expect(spawner).toHaveBeenCalledWith(
       "C:\\Tools\\claude.exe",
-      [],
+      ["--session-id", session.claudeSessionId],
       expect.objectContaining({ cwd: "C:\\work\\mall" }),
     );
   });
@@ -111,7 +112,7 @@ describe("SessionManager", () => {
     });
     expect(spawner).toHaveBeenCalledWith(
       "C:\\Tools\\claude.exe",
-      [],
+      ["--session-id", session.claudeSessionId],
       expect.objectContaining({ cwd: session.cwd }),
     );
   });
@@ -134,15 +135,20 @@ describe("SessionManager", () => {
     expect(spawner).toHaveBeenNthCalledWith(
       1,
       "/usr/local/bin/claude",
-      ["--dangerously-skip-permissions"],
+      [
+        "--session-id",
+        optedIn.claudeSessionId,
+        "--dangerously-skip-permissions",
+      ],
       expect.objectContaining({ cwd: optedIn.cwd }),
     );
     for (const call of [2, 3]) {
+      const session = call === 2 ? defaultSession : normalSession;
       expect(spawner).toHaveBeenNthCalledWith(
         call,
         "/usr/local/bin/claude",
-        [],
-        expect.objectContaining({ cwd: defaultSession.cwd }),
+        ["--session-id", session.claudeSessionId],
+        expect.objectContaining({ cwd: session.cwd }),
       );
     }
   });
@@ -287,7 +293,13 @@ describe("SessionManager", () => {
       expect(spawner).toHaveBeenNthCalledWith(
         1,
         "C:\\Tools\\claude.exe",
-        ["--settings", launchIds[0], ...permissionArgs],
+        [
+          "--settings",
+          launchIds[0],
+          "--session-id",
+          created.claudeSessionId,
+          ...permissionArgs,
+        ],
         expect.objectContaining({
           env: expect.objectContaining({
             CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[0]}`,
@@ -297,7 +309,13 @@ describe("SessionManager", () => {
       expect(spawner).toHaveBeenNthCalledWith(
         2,
         "C:\\Tools\\claude.exe",
-        ["--settings", launchIds[1], ...permissionArgs],
+        [
+          "--settings",
+          launchIds[1],
+          "--resume",
+          created.claudeSessionId,
+          ...permissionArgs,
+        ],
         expect.objectContaining({
           env: expect.objectContaining({
             CLAUDE_WORKSPACE_HOOK_TOKEN: `token-${launchIds[1]}`,
@@ -357,7 +375,9 @@ describe("SessionManager", () => {
     expect(
       manager.bindClaudeSessionId(session.id, "stale-launch", "wrong-id"),
     ).toBe(false);
-    expect(manager.listSessions()[0]).not.toHaveProperty("claudeSessionId");
+    expect(manager.listSessions()[0].claudeSessionId).toBe(
+      session.claudeSessionId,
+    );
   });
 
   it("loads a persisted binding after the client restarts", () => {
@@ -466,7 +486,7 @@ describe("SessionManager", () => {
     expect(spawner).toHaveBeenNthCalledWith(
       2,
       "/usr/local/bin/claude",
-      [],
+      ["--resume", created.claudeSessionId],
       expect.objectContaining({ cwd: created.cwd }),
     );
     expect(manager.getTerminalSnapshot(created.id).data).toContain(
@@ -668,9 +688,15 @@ describe("SessionManager", () => {
       const restarted = manager.restartSession("persisted-session");
 
       expect(restarted.skipPermissions).toBe(skipPermissions);
+      expect(restarted.claudeSessionId).toBeUndefined();
       expect(spawner).toHaveBeenCalledWith(
         "C:\\Tools\\claude.exe",
-        skipPermissions === true ? ["--dangerously-skip-permissions"] : [],
+        [
+          "--continue",
+          ...(skipPermissions === true
+            ? ["--dangerously-skip-permissions"]
+            : []),
+        ],
         expect.objectContaining({ cwd: "C:\\work\\mall" }),
       );
     },

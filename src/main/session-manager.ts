@@ -57,6 +57,8 @@ export type ClaudeSessionLaunchOptionsProvider = (
   launchId: string,
 ) => ClaudeSessionLaunchOptions;
 
+type ClaudeSessionLaunchMode = "new" | "resume" | "continue";
+
 export type SessionProcessTreeTerminator = (pid: number) => Promise<void>;
 
 export interface SessionManagerEvents {
@@ -91,7 +93,7 @@ function restoredTerminalMessage(record: SessionRecord): string {
       : "这是上次保留的会话标签，终端内容不会写入本地配置。";
   const resumeMessage = record.claudeSessionId
     ? "已绑定 Claude Code 会话；点击“重启会话”会自动恢复这段对话。"
-    : "尚未绑定 Claude Code 会话；重启后可在终端中使用 /resume 恢复。";
+    : "尚未绑定 Claude Code 会话；重启会尝试继续当前目录最近的对话，也可使用 /resume 手动选择。";
   return (
     `\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n` +
     `  ${stateMessage}\r\n` +
@@ -103,11 +105,13 @@ function restartingTerminalMessage(record: SessionRecord): string {
   return (
     "\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n" +
     `  正在原工作目录重新启动 Claude Code${
-      record.claudeSessionId ? "，并恢复已绑定的对话" : ""
+      record.claudeSessionId
+        ? "，并恢复已绑定的对话"
+        : "，并尝试继续最近的对话"
     }…\r\n` +
     (record.claudeSessionId
       ? "  Claude Code 会使用已保存的会话 ID。\r\n\r\n"
-      : "  如需恢复之前的 Claude Code 对话，请使用 /resume。\r\n\r\n")
+      : "  旧记录没有绑定 ID，Claude Code 会继续当前目录最近的对话。\r\n\r\n")
   );
 }
 
@@ -201,6 +205,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       cwd: workspace.cwd,
       status: "starting",
       createdAt: Date.now(),
+      // Allocate Claude's ID before starting the process. This makes the
+      // workbench-to-Claude mapping durable even when the SessionStart Hook is
+      // unavailable or the client is closed immediately after launch.
+      claudeSessionId: randomUUID(),
       ...(skipPermissions === true ? { skipPermissions: true } : {}),
     };
 
@@ -209,7 +217,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
       const launch = createClaudeLaunchSpec(
         executablePath,
-        this.claudeArguments(record, launchOptions?.args ?? []),
+        this.claudeArguments(record, launchOptions?.args ?? [], "new"),
         {
           platform: this.platform,
           env: { ...process.env, ...launchOptions?.env },
@@ -231,6 +239,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       this.emitChanged(managed.record);
       return { ...managed.record };
     } catch (error) {
+      delete record.claudeSessionId;
       record.status = "failed";
       record.error = describeClaudeSpawnError(error);
       const managed: ManagedSession = {
@@ -264,6 +273,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.record.status = "starting";
     delete session.record.exitCode;
     delete session.record.error;
+    const previousClaudeSessionId = session.record.claudeSessionId;
     this.appendTerminalData(session, restartingTerminalMessage(session.record));
     this.emitChanged(session.record);
 
@@ -273,7 +283,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
       const launch = createClaudeLaunchSpec(
         executablePath,
-        this.claudeArguments(session.record, launchOptions?.args ?? []),
+        this.claudeArguments(
+          session.record,
+          launchOptions?.args ?? [],
+          previousClaudeSessionId ? "resume" : "continue",
+        ),
         {
           platform: this.platform,
           env: { ...process.env, ...launchOptions?.env },
@@ -713,12 +727,23 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     });
   }
 
-  private claudeArguments(record: SessionRecord, launchArgs: string[]): string[] {
+  private claudeArguments(
+    record: SessionRecord,
+    launchArgs: string[],
+    mode: ClaudeSessionLaunchMode,
+  ): string[] {
+    if (mode !== "continue" && !record.claudeSessionId) {
+      throw new Error("Claude Code 会话 ID 尚未生成。");
+    }
+    const sessionArguments =
+      mode === "resume"
+        ? ["--resume", record.claudeSessionId as string]
+        : mode === "continue"
+          ? ["--continue"]
+          : ["--session-id", record.claudeSessionId as string];
     return [
       ...launchArgs,
-      ...(record.claudeSessionId
-        ? ["--resume", record.claudeSessionId]
-        : []),
+      ...sessionArguments,
       ...(record.skipPermissions === true
         ? ["--dangerously-skip-permissions"]
         : []),
