@@ -172,6 +172,28 @@ describe("ProjectStore", () => {
     expect(reloaded.listSessions()).toEqual([session]);
   });
 
+  it("persists the Claude Code session binding with a workbench session", async () => {
+    const root = await temporaryDirectory();
+    const storePath = join(root, "workspace.json");
+    const session: SessionRecord = {
+      id: "bound-session",
+      projectId: null,
+      title: "可恢复会话",
+      cwd: root,
+      status: "interrupted",
+      createdAt: 456,
+      claudeSessionId: "claude-session-1",
+    };
+    const store = new ProjectStore(storePath);
+    await store.initialize();
+
+    await store.replaceSessions([session]);
+
+    const reloaded = new ProjectStore(storePath);
+    await reloaded.initialize();
+    expect(reloaded.listSessions()).toEqual([session]);
+  });
+
   it.each([undefined, false, true])(
     "preserves session permission mode across reload with skipPermissions=%s",
     async (skipPermissions) => {

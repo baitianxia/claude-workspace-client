@@ -186,6 +186,12 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
     };
     const settings = {
       hooks: {
+        SessionStart: [
+          {
+            matcher: "",
+            hooks: [handler],
+          },
+        ],
         PermissionRequest: [
           {
             matcher: "",

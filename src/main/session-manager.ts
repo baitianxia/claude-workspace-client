@@ -89,18 +89,25 @@ function restoredTerminalMessage(record: SessionRecord): string {
     record.status === "interrupted"
       ? "客户端上次关闭时，这个会话仍在运行。原进程已经结束。"
       : "这是上次保留的会话标签，终端内容不会写入本地配置。";
+  const resumeMessage = record.claudeSessionId
+    ? "已绑定 Claude Code 会话；点击“重启会话”会自动恢复这段对话。"
+    : "尚未绑定 Claude Code 会话；重启后可在终端中使用 /resume 恢复。";
   return (
     `\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n` +
     `  ${stateMessage}\r\n` +
-    "  新建 Claude Code 会话后，可使用 /resume 恢复 Claude Code 自身保存的对话。\r\n"
+    `  ${resumeMessage}\r\n`
   );
 }
 
-function restartingTerminalMessage(): string {
+function restartingTerminalMessage(record: SessionRecord): string {
   return (
     "\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n" +
-    "  正在原工作目录重新启动 Claude Code…\r\n" +
-    "  如需恢复之前的 Claude Code 对话，请使用 /resume。\r\n\r\n"
+    `  正在原工作目录重新启动 Claude Code${
+      record.claudeSessionId ? "，并恢复已绑定的对话" : ""
+    }…\r\n` +
+    (record.claudeSessionId
+      ? "  Claude Code 会使用已保存的会话 ID。\r\n\r\n"
+      : "  如需恢复之前的 Claude Code 对话，请使用 /resume。\r\n\r\n")
   );
 }
 
@@ -202,12 +209,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
       const launch = createClaudeLaunchSpec(
         executablePath,
-        [
-          ...(launchOptions?.args ?? []),
-          ...(record.skipPermissions === true
-            ? ["--dangerously-skip-permissions"]
-            : []),
-        ],
+        this.claudeArguments(record, launchOptions?.args ?? []),
         {
           platform: this.platform,
           env: { ...process.env, ...launchOptions?.env },
@@ -262,7 +264,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.record.status = "starting";
     delete session.record.exitCode;
     delete session.record.error;
-    this.appendTerminalData(session, restartingTerminalMessage());
+    this.appendTerminalData(session, restartingTerminalMessage(session.record));
     this.emitChanged(session.record);
 
     try {
@@ -271,12 +273,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const launchOptions = this.getLaunchOptions?.(sessionId, launchId);
       const launch = createClaudeLaunchSpec(
         executablePath,
-        [
-          ...(launchOptions?.args ?? []),
-          ...(session.record.skipPermissions === true
-            ? ["--dangerously-skip-permissions"]
-            : []),
-        ],
+        this.claudeArguments(session.record, launchOptions?.args ?? []),
         {
           platform: this.platform,
           env: { ...process.env, ...launchOptions?.env },
@@ -404,6 +401,40 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return (
       session?.record.status === "running" && session.launchId === launchId
     );
+  }
+
+  /**
+   * Bind Claude Code's durable conversation ID to the current workbench
+   * launch. SessionStart is delivered by the per-process Hook configuration;
+   * the launch guard prevents a stale process from overwriting a restarted
+   * session's ID.
+   */
+  bindClaudeSessionId(
+    sessionId: string,
+    launchId: string,
+    claudeSessionId: string,
+  ): boolean {
+    if (
+      typeof claudeSessionId !== "string" ||
+      claudeSessionId.length === 0 ||
+      claudeSessionId.length > 200
+    ) {
+      return false;
+    }
+    const session = this.sessions.get(sessionId);
+    if (
+      !session ||
+      session.record.status !== "running" ||
+      session.launchId !== launchId
+    ) {
+      return false;
+    }
+    if (session.record.claudeSessionId === claudeSessionId) {
+      return true;
+    }
+    session.record.claudeSessionId = claudeSessionId;
+    this.emitChanged(session.record);
+    return true;
   }
 
   private writeInput(
@@ -680,6 +711,18 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       cwd,
       env: stringEnvironment(launch.env),
     });
+  }
+
+  private claudeArguments(record: SessionRecord, launchArgs: string[]): string[] {
+    return [
+      ...launchArgs,
+      ...(record.claudeSessionId
+        ? ["--resume", record.claudeSessionId]
+        : []),
+      ...(record.skipPermissions === true
+        ? ["--dangerously-skip-permissions"]
+        : []),
+    ];
   }
 
   private attachProcess(

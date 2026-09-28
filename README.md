@@ -60,7 +60,7 @@ claude
 
 程序会自动查找原生安装的 `claude.exe` 和 npm 安装产生的 `claude.cmd`。自动检测失败时，可以手动选择 `.exe`、`.cmd`、`.bat` 或 `.ps1` 启动文件。
 
-“开发工作台”左侧的“新会话启动命令”默认首选 `claude`，也可以选择 `claude --dangerously-skip-permissions` 跳过权限确认。该选择适用于下一次新建的工程会话或临时会话，成功创建后会恢复为普通 `claude`。每个会话会保存自己的启动模式，重启会话或重新打开客户端后仍保留；跳过权限确认的会话会在顶部显示对应标记。
+“开发工作台”左侧的“新会话启动命令”默认首选 `claude`，也可以选择 `claude --dangerously-skip-permissions` 跳过权限确认。该选择适用于下一次新建的工程会话或临时会话，成功创建后会恢复为普通 `claude`。每个会话会保存自己的启动模式，重启会话或重新打开客户端后仍保留；跳过权限确认的会话会在顶部显示对应标记。Claude Code 启动后，工作台会通过本机 Hook 保存它返回的会话 ID；客户端关闭后点击“重启会话”会自动使用该 ID 恢复原 Claude Code 对话。
 
 侧栏顶部的“背景”可以在“暗色”和“白色”之间切换。主题选择会写入 `workspace.json`，下次启动继续使用；终端 ANSI 调色板、侧栏、弹窗和私人助理页面会同步切换。白色背景下终端会自动提高低对比度 ANSI 文本的明度差，避免高亮白字与背景融为一体。
 
@@ -165,12 +165,12 @@ Claude Code 终端控制机器人在开发工作台中只服务交互式终端�
 
 ## 数据与安全
 
-- `workspace.json` 保存工程、终端会话标签、Claude Code 路径、主题选择（`dark`/`light`）和应用配置。
+- `workspace.json` 保存工程、终端会话标签及其绑定的 Claude Code 会话 ID、Claude Code 路径、主题选择（`dark`/`light`）和应用配置。
 - `assistant.json` 保存最多 20 个助理（包括各自独立运行目录）、20 个加密企业微信智能机器人连接、主人会话和最近 500 个聊天轮次。
 - `assistant-tasks.json` 保存助理任务和最近 500 条独立运行记录，包括执行错误与投递错误。
 - 企业微信 Secret 通过 Electron `safeStorage` 使用操作系统凭据保护能力加密，不会以明文进入界面层。
 - 主人 session ID 会保存在 `assistant.json`，用于常驻进程结束后的恢复；任务运行不保存或复用 Claude session。
-- 终端输出只在当前进程内存缓冲区中，不写入 `workspace.json`；Claude Code 自身历史仍可通过 `/resume` 恢复。
+- 终端输出只在当前进程内存缓冲区中，不写入 `workspace.json`；已绑定的工作台会话重启时自动通过 `--resume` 恢复，未绑定的会话仍可在 Claude Code 中使用 `/resume`。
 - Claude Code Hook 服务只监听 `127.0.0.1` 随机端口，并要求每次启动生成的 Bearer Token。
 - Renderer 启用沙箱和上下文隔离，只能通过结构化 IPC 调用主进程。
 - 文件变更侧栏只允许读取已保存工程中当前 Git 变更列表里的相对路径，并拒绝路径穿越和符号链接逃逸。

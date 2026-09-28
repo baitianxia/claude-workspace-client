@@ -307,6 +307,87 @@ describe("SessionManager", () => {
     },
   );
 
+  it("binds Claude's SessionStart ID and resumes it on the next launch", () => {
+    const first = fakePty();
+    const second = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process) as unknown as PtySpawner;
+    const launchIds: string[] = [];
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      spawner,
+      "win32",
+      [],
+      (_sessionId, launchId) => {
+        launchIds.push(launchId);
+        return { args: [] };
+      },
+    );
+
+    const created = manager.createSession(project());
+    expect(
+      manager.bindClaudeSessionId(created.id, launchIds[0], "claude-session-1"),
+    ).toBe(true);
+    expect(manager.listSessions()[0].claudeSessionId).toBe("claude-session-1");
+
+    first.emitExit(0);
+    manager.restartSession(created.id);
+
+    expect(spawner).toHaveBeenNthCalledWith(
+      2,
+      "C:\\Tools\\claude.exe",
+      ["--resume", "claude-session-1"],
+      expect.objectContaining({ cwd: created.cwd }),
+    );
+  });
+
+  it("ignores a SessionStart ID from a stale launch", () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      (() => fake.process) as PtySpawner,
+      "darwin",
+      [],
+      () => ({ args: [] }),
+    );
+    const session = manager.createSession(project());
+
+    expect(
+      manager.bindClaudeSessionId(session.id, "stale-launch", "wrong-id"),
+    ).toBe(false);
+    expect(manager.listSessions()[0]).not.toHaveProperty("claudeSessionId");
+  });
+
+  it("loads a persisted binding after the client restarts", () => {
+    const fake = fakePty();
+    const spawner = vi.fn(() => fake.process) as PtySpawner;
+    const persisted = {
+      id: "persisted-session",
+      projectId: "project-one",
+      title: "已保存会话",
+      cwd: "C:\\work\\mall",
+      status: "interrupted" as const,
+      createdAt: 1,
+      claudeSessionId: "claude-session-after-restart",
+    };
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      spawner,
+      "win32",
+      [persisted],
+    );
+
+    manager.restartSession(persisted.id);
+
+    expect(spawner).toHaveBeenCalledWith(
+      "C:\\Tools\\claude.exe",
+      ["--resume", "claude-session-after-restart"],
+      expect.objectContaining({ cwd: persisted.cwd }),
+    );
+  });
+
   it("forwards terminal input, output, resize and exit state", () => {
     const fake = fakePty();
     const manager = new SessionManager(

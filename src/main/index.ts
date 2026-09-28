@@ -21,6 +21,7 @@ import { WeComSettingsService } from "./wecom-settings";
 
 let mainWindow: BrowserWindow | null = null;
 let sessionManager: SessionManager | null = null;
+let workspaceStore: ProjectStore | null = null;
 let removeIpcHandlers: (() => void) | null = null;
 let claudeHookServer: ClaudeHookServer | null = null;
 let wecomBridge: WeComBridge | null = null;
@@ -134,6 +135,7 @@ async function startApplication(): Promise<void> {
   const projectStore = new ProjectStore(
     join(app.getPath("userData"), "workspace.json"),
   );
+  workspaceStore = projectStore;
   await projectStore.initialize();
   const assistantStore = new AssistantStore(
     join(app.getPath("userData"), "assistant.json"),
@@ -211,9 +213,14 @@ async function startApplication(): Promise<void> {
     () => wecomAssistantEntries.refreshReservedManagementBotId(),
   );
   wecomSettingsService.initialize();
-  claudeHookServer?.on("hook", (event) =>
-    wecomBridge?.handleClaudeHook(event),
-  );
+  claudeHookServer?.on("hook", (event) => {
+    sessionManager?.bindClaudeSessionId(
+      event.workspaceSessionId,
+      event.launchId,
+      event.payload.session_id,
+    );
+    wecomBridge?.handleClaudeHook(event);
+  });
 
   await wecomAssistantEntries.initialize();
 
@@ -344,6 +351,17 @@ app.on("before-quit", (event) => {
       }
     } catch (error) {
       console.error("Failed to stop sessions during shutdown", error);
+    }
+    try {
+      if (workspaceStore) {
+        await withTimeout(
+          workspaceStore.flush(),
+          SHUTDOWN_STEP_TIMEOUT_MILLISECONDS,
+          "保存工作台会话超过 8 秒。",
+        );
+      }
+    } catch (error) {
+      console.error("Failed to flush workspace data during shutdown", error);
     }
     try {
       const stopHooks = claudeHookServer?.stop();

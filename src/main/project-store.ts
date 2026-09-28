@@ -108,6 +108,10 @@ function normalizeSessionRecord(value: unknown): SessionRecord | null {
     typeof candidate.status !== "string" ||
     !SESSION_STATUSES.has(candidate.status as SessionStatus) ||
     typeof candidate.createdAt !== "number" ||
+    (candidate.claudeSessionId !== undefined &&
+      (typeof candidate.claudeSessionId !== "string" ||
+        candidate.claudeSessionId.length === 0 ||
+        candidate.claudeSessionId.length > 200)) ||
     (candidate.skipPermissions !== undefined &&
       typeof candidate.skipPermissions !== "boolean") ||
     (candidate.exitCode !== undefined && typeof candidate.exitCode !== "number") ||
@@ -123,6 +127,9 @@ function normalizeSessionRecord(value: unknown): SessionRecord | null {
     cwd: candidate.cwd,
     status: candidate.status as SessionStatus,
     createdAt: candidate.createdAt,
+    ...(candidate.claudeSessionId === undefined
+      ? {}
+      : { claudeSessionId: candidate.claudeSessionId }),
     ...(candidate.skipPermissions === undefined
       ? {}
       : { skipPermissions: candidate.skipPermissions }),
@@ -354,6 +361,11 @@ export class ProjectStore {
       )
       .map((session) => ({ ...session }));
     await this.persist();
+  }
+
+  /** Wait for all queued workspace writes before the application exits. */
+  async flush(): Promise<void> {
+    await this.persistQueue;
   }
 
   getClaudeExecutable(): string | undefined {

@@ -1653,6 +1653,14 @@ export function App() {
                     跳过权限确认
                   </span>
                 ) : null}
+                {activeSession.claudeSessionId ? (
+                  <span
+                    className="session-status-chip"
+                    title="重启会话时会自动使用已保存的 Claude Code 会话 ID"
+                  >
+                    已绑定 Claude 会话
+                  </span>
+                ) : null}
                 {activeProject ? (
                   <button
                     className={`toolbar-changes-button ${changesPanelOpen ? "toolbar-changes-button--active" : ""}`}

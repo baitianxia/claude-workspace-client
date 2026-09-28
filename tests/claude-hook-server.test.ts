@@ -56,6 +56,7 @@ describe("ClaudeHookServer", () => {
         Stop: Array<{ matcher: string }>;
         StopFailure: Array<{ matcher: string }>;
         Notification: Array<{ matcher: string }>;
+        SessionStart: Array<{ matcher: string }>;
       };
     };
     expect(launch.args[0]).toBe("--settings");
@@ -65,6 +66,7 @@ describe("ClaudeHookServer", () => {
     expect(settings.hooks.Notification[0].matcher).toBe("");
     expect(settings.hooks.StopFailure[0].matcher).toBe("");
     expect(settings.hooks.PermissionRequest).toHaveLength(1);
+    expect(settings.hooks.SessionStart[0].matcher).toBe("");
 
     const url = settings.hooks.PermissionRequest[0].hooks[0].url;
     const token = launch.env.CLAUDE_WORKSPACE_HOOK_TOKEN;
