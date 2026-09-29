@@ -56,7 +56,10 @@ describe("ClaudeHookServer", () => {
         Stop: Array<{ matcher: string }>;
         StopFailure: Array<{ matcher: string }>;
         Notification: Array<{ matcher: string }>;
-        SessionStart: Array<{ matcher: string }>;
+        SessionStart: Array<{
+          matcher: string;
+          hooks: Array<{ type: string; command: string; shell: string }>;
+        }>;
       };
     };
     expect(launch.args[0]).toBe("--settings");
@@ -67,6 +70,13 @@ describe("ClaudeHookServer", () => {
     expect(settings.hooks.StopFailure[0].matcher).toBe("");
     expect(settings.hooks.PermissionRequest).toHaveLength(1);
     expect(settings.hooks.SessionStart[0].matcher).toBe("");
+    expect(settings.hooks.SessionStart[0].hooks[0]).toMatchObject({
+      type: "command",
+      shell: process.platform === "win32" ? "powershell" : "bash",
+    });
+    expect(settings.hooks.SessionStart[0].hooks[0].command).toContain(
+      "127.0.0.1",
+    );
 
     const url = settings.hooks.PermissionRequest[0].hooks[0].url;
     const token = launch.env.CLAUDE_WORKSPACE_HOOK_TOKEN;
@@ -135,6 +145,32 @@ describe("ClaudeHookServer", () => {
         hook_event_name: "Notification",
       }),
     ).toBe(404);
+  });
+
+  it("uses a PowerShell stdin forwarder for SessionStart on Windows", async () => {
+    const server = new ClaudeHookServer("win32");
+    servers.push(server);
+    await server.start();
+
+    const launch = server.hookLaunchOptions("workspace-session", "launch-id");
+    const settings = JSON.parse(await readFile(launch.args[1], "utf8")) as {
+      hooks: {
+        SessionStart: Array<{
+          hooks: Array<{
+            type: string;
+            command: string;
+            shell: string;
+          }>;
+        }>;
+      };
+    };
+    const hook = settings.hooks.SessionStart[0].hooks[0];
+
+    expect(hook.type).toBe("command");
+    expect(hook.shell).toBe("powershell");
+    expect(hook.command).toContain("[Console]::In.ReadToEnd()");
+    expect(hook.command).toContain("$env:CLAUDE_WORKSPACE_HOOK_TOKEN");
+    expect(hook.command).toContain("Invoke-RestMethod");
   });
 
   it("removes generated settings files when the hook server stops", async () => {

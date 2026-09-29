@@ -93,11 +93,23 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
+function shellLiteral(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function powershellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
 export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
   private readonly token = randomBytes(32).toString("base64url");
   private server: Server | null = null;
   private port: number | null = null;
   private settingsDirectory: string | null = null;
+
+  constructor(private readonly platform: NodeJS.Platform = process.platform) {
+    super();
+  }
 
   async start(): Promise<void> {
     if (this.server) {
@@ -184,12 +196,24 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
       },
       allowedEnvVars: ["CLAUDE_WORKSPACE_HOOK_TOKEN"],
     };
+    // Claude Code does not support HTTP hooks for SessionStart. Keep the
+    // event on the same authenticated loopback channel by forwarding the
+    // hook's stdin through the platform shell instead.
+    const sessionStartHook = {
+      type: "command",
+      command:
+        this.platform === "win32"
+          ? `$body = [Console]::In.ReadToEnd(); try { Invoke-RestMethod -Method Post -Uri ${powershellLiteral(url)} -Headers @{ Authorization = "Bearer $env:CLAUDE_WORKSPACE_HOOK_TOKEN" } -ContentType "application/json" -Body $body -TimeoutSec 5 -ErrorAction Stop | Out-Null } catch { }`
+          : `curl --silent --show-error --max-time 5 --request POST --header "Authorization: Bearer $CLAUDE_WORKSPACE_HOOK_TOKEN" --header "Content-Type: application/json" --data-binary @- ${shellLiteral(url)} >/dev/null 2>&1 || true`,
+      shell: this.platform === "win32" ? "powershell" : "bash",
+      timeout: 5,
+    };
     const settings = {
       hooks: {
         SessionStart: [
           {
             matcher: "",
-            hooks: [handler],
+            hooks: [sessionStartHook],
           },
         ],
         PermissionRequest: [

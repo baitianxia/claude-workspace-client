@@ -76,9 +76,9 @@ Claude Workspace 只提供一套 Agent 产品：私人助理。对外可见的�
 - Electron IPC 只暴露结构化助理状态、聊天操作和助理配置中的企业微信连接操作；渲染进程不能直接启动 Claude Code 或读取磁盘配置。开发工作台会话记录可以显示是否已经绑定 Claude Code 会话，但 Claude Code 进程仍只能由主进程启动。
 - Windows x64 发布包只保留目标平台的 Claude SDK 原生组件和 `en-US`/`zh-CN` Electron 语言包；SDK 始终使用客户端检测到的本机 Claude Code CLI 路径，不依赖其他平台的附带二进制。
 
-开发工作台的每次交互式 Claude Code 启动（新建或重启）都在本机 Hook 服务可用时注入带会话与启动代次的 HTTP Hook 配置，和企业微信是否已启用相互独立；配置同时接收权限请求、问题/计划、完成、失败和全部通知事件，以覆盖 Claude Code 新增的通知类型（例如 `permission_prompt`）。Hook 事件到达后，`WeComBridge` 再依据当前连接配置决定是否投递。正在运行的 Claude Code 进程不能在启动后接收新的 CLI 设置，因此在本版本修复前启动的会话需要重启一次。终端控制机器人卡片在尚无 Hook 时明确提示“尚未收到 Claude Code 事件”，收到后显示最近一次 Hook 和主动推送诊断；“企业微信已确认接收”表示 WebSocket 回执成功，不等同于客户端已经展示消息；连接状态本身只表示企业微信长连接已认证。
+开发工作台的每次交互式 Claude Code 启动（新建或重启）都在本机 Hook 服务可用时注入带会话与启动代次的 Hook 配置，和企业微信是否已启用相互独立；配置同时接收权限请求、问题/计划、完成、失败和全部通知事件，以覆盖 Claude Code 新增的通知类型（例如 `permission_prompt`）。Hook 事件到达后，`WeComBridge` 再依据当前连接配置决定是否投递。正在运行的 Claude Code 进程不能在启动后接收新的 CLI 设置，因此在本版本修复前启动的会话需要重启一次。终端控制机器人卡片在尚无 Hook 时明确提示“尚未收到 Claude Code 事件”，收到后显示最近一次 Hook 和主动推送诊断；“企业微信已确认接收”表示 WebSocket 回执成功，不等同于客户端已经展示消息；连接状态本身只表示企业微信长连接已认证。
 
-开发工作台会在首次启动前生成合法的 Claude Code `session_id`，通过 `--session-id` 传入并立即保存到 `workspace.json`；Hook 同时监听 `SessionStart`，如果 Claude Code 返回了不同的 ID，再按当前会话和启动代次校正绑定。客户端退出前会等待排队的工作台写入完成。客户端关闭后再次点击“重启会话”会为同一工作目录传入 `--resume <session-id>`；旧进程的迟到 Hook 不能覆盖新启动的绑定。升级前没有绑定 ID 的旧记录首次重启时使用 `--continue` 尝试恢复当前目录最近的对话，并在 Hook 到达后建立绑定；如果目录中有多个未绑定旧会话，仍需在 Claude Code 中使用 `/resume` 手动选择。
+开发工作台会在首次启动前生成合法的 Claude Code `session_id`，通过 `--session-id` 传入并立即保存到 `workspace.json`；Hook 同时监听 `SessionStart`，但该事件使用跨平台命令 Hook 从 stdin 转发到本机服务，因为 Claude Code 不支持把 `SessionStart` 配置为 HTTP Hook。如果 Claude Code 返回了不同的 ID，再按当前会话和启动代次校正绑定。客户端退出前会等待排队的工作台写入完成。客户端关闭后再次点击“重启会话”会为同一工作目录传入 `--resume <session-id>`；旧进程的迟到 Hook 不能覆盖新启动的绑定。升级前没有绑定 ID 的旧记录首次重启时使用 `--continue` 尝试恢复当前目录最近的对话，并在 Hook 到达后建立绑定；如果目录中有多个未绑定旧会话，仍需在 Claude Code 中使用 `/resume` 手动选择，选择后会通过新的 `SessionStart` Hook 更新绑定。
 
 `Notification.permission_prompt` 只提供通知摘要，不提供可信的菜单选项；这类事件必须推送提示，但不得猜测选项位置或生成远程权限按键。已有同一启动代次的详细权限、提问或计划通知时保留原通知和回复码；仅收到通用通知时引导用户回到工作台确认，后续收到详细请求再提供远程回复。排队的工作台推送在实际发送前必须重新校验连接认证、启动代次和回复码有效性；重连期间未发送的消息不能按成功清除。
 
