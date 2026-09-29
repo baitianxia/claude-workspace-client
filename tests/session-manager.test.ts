@@ -688,11 +688,12 @@ describe("SessionManager", () => {
       const restarted = manager.restartSession("persisted-session");
 
       expect(restarted.skipPermissions).toBe(skipPermissions);
-      expect(restarted.claudeSessionId).toBeUndefined();
+      expect(restarted.claudeSessionId).toEqual(expect.any(String));
       expect(spawner).toHaveBeenCalledWith(
         "C:\\Tools\\claude.exe",
         [
-          "--continue",
+          "--session-id",
+          restarted.claudeSessionId,
           ...(skipPermissions === true
             ? ["--dangerously-skip-permissions"]
             : []),

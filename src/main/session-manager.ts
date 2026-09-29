@@ -57,7 +57,7 @@ export type ClaudeSessionLaunchOptionsProvider = (
   launchId: string,
 ) => ClaudeSessionLaunchOptions;
 
-type ClaudeSessionLaunchMode = "new" | "resume" | "continue";
+type ClaudeSessionLaunchMode = "new" | "resume";
 
 export type SessionProcessTreeTerminator = (pid: number) => Promise<void>;
 
@@ -93,7 +93,7 @@ function restoredTerminalMessage(record: SessionRecord): string {
       : "这是上次保留的会话标签，终端内容不会写入本地配置。";
   const resumeMessage = record.claudeSessionId
     ? "已绑定 Claude Code 会话；点击“重启会话”会自动恢复这段对话。"
-    : "尚未绑定 Claude Code 会话；重启会尝试继续当前目录最近的对话，也可使用 /resume 手动选择。";
+    : "尚未绑定 Claude Code 会话；重启会启动新的 Claude Code 会话，不会自动选择历史对话。需要恢复旧对话时，请使用 /resume 手动选择。";
   return (
     `\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n` +
     `  ${stateMessage}\r\n` +
@@ -107,11 +107,11 @@ function restartingTerminalMessage(record: SessionRecord): string {
     `  正在原工作目录重新启动 Claude Code${
       record.claudeSessionId
         ? "，并恢复已绑定的对话"
-        : "，并尝试继续最近的对话"
+        : "，并启动新的会话"
     }…\r\n` +
     (record.claudeSessionId
       ? "  Claude Code 会使用已保存的会话 ID。\r\n\r\n"
-      : "  旧记录没有绑定 ID，Claude Code 会继续当前目录最近的对话。\r\n\r\n")
+      : "  旧记录没有绑定 ID，Claude Code 不会自动选择当前目录中的历史对话；需要恢复时请在终端执行 /resume。\r\n\r\n")
   );
 }
 
@@ -275,6 +275,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     delete session.record.error;
     const previousClaudeSessionId = session.record.claudeSessionId;
     this.appendTerminalData(session, restartingTerminalMessage(session.record));
+    if (!previousClaudeSessionId) {
+      // Never let an unbound legacy record fall back to --continue: that
+      // selects the newest conversation in the directory and can make
+      // multiple workbench records point at the same Claude session. Start a
+      // fresh Claude session instead; /resume can bind the intended history.
+      session.record.claudeSessionId = randomUUID();
+    }
     this.emitChanged(session.record);
 
     try {
@@ -286,7 +293,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         this.claudeArguments(
           session.record,
           launchOptions?.args ?? [],
-          previousClaudeSessionId ? "resume" : "continue",
+          previousClaudeSessionId ? "resume" : "new",
         ),
         {
           platform: this.platform,
@@ -302,6 +309,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     } catch (error) {
       session.process = null;
       session.launchId = null;
+      if (!previousClaudeSessionId) {
+        delete session.record.claudeSessionId;
+      }
       session.record.status = "failed";
       session.record.error = describeClaudeSpawnError(error);
       this.emitChanged(session.record);
@@ -732,15 +742,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     launchArgs: string[],
     mode: ClaudeSessionLaunchMode,
   ): string[] {
-    if (mode !== "continue" && !record.claudeSessionId) {
+    if (!record.claudeSessionId) {
       throw new Error("Claude Code 会话 ID 尚未生成。");
     }
     const sessionArguments =
       mode === "resume"
         ? ["--resume", record.claudeSessionId as string]
-        : mode === "continue"
-          ? ["--continue"]
-          : ["--session-id", record.claudeSessionId as string];
+        : ["--session-id", record.claudeSessionId as string];
     return [
       ...launchArgs,
       ...sessionArguments,

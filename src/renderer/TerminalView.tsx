@@ -332,7 +332,7 @@ export function TerminalView({
           {session.status === "failed"
             ? `启动失败：${session.error ?? "未知错误"}。可在右上角重启此会话。`
             : session.status === "interrupted"
-              ? "客户端上次关闭后，该会话已中断。可在右上角重启并尝试继续最近的对话，也可通过 /resume 手动选择。"
+              ? "客户端上次关闭后，该会话已中断。可在右上角重启并启动新的 Claude Code 会话；如需恢复历史对话，请通过 /resume 手动选择。"
               : `会话已退出${session.exitCode === undefined ? "" : `（代码 ${session.exitCode}）`}。可在右上角重启此会话。`}
         </div>
       ) : null}
