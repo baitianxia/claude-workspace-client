@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, safeStorage, shell } from "electron";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ClaudeLocator } from "./claude-locator";
 import { AssistantService } from "./assistant-service";
@@ -18,6 +18,11 @@ import { SessionManager } from "./session-manager";
 import { TemporaryWorkspace } from "./temporary-workspace";
 import { WeComBridge } from "./wecom-bridge";
 import { WeComSettingsService } from "./wecom-settings";
+import {
+  getWorkspacePaths,
+  migrateLegacyWorkspaceData,
+  type WorkspacePaths,
+} from "./workspace-paths";
 
 let mainWindow: BrowserWindow | null = null;
 let sessionManager: SessionManager | null = null;
@@ -31,6 +36,24 @@ let allowClose = false;
 let shutdownComplete = false;
 let shutdownPromise: Promise<void> | null = null;
 let forceExitTimer: NodeJS.Timeout | null = null;
+
+const legacyUserDataPath = app.getPath("userData");
+const workspacePaths: WorkspacePaths = getWorkspacePaths(
+  process.platform,
+  app.getPath("home"),
+  legacyUserDataPath,
+);
+
+// Keep Electron's own caches and session files inside the product-owned
+// Windows directory. The old userData path is retained above solely for the
+// one-time migration of application data files.
+if (process.platform === "win32") {
+  const electronUserDataPath = join(workspacePaths.dataDir, "electron");
+  const sessionDataPath = join(electronUserDataPath, "session");
+  app.setPath("userData", electronUserDataPath);
+  app.setPath("sessionData", sessionDataPath);
+  app.setPath("logs", workspacePaths.logsDir);
+}
 
 const SHUTDOWN_STEP_TIMEOUT_MILLISECONDS = 8_000;
 const FORCE_EXIT_TIMEOUT_MILLISECONDS = 20_000;
@@ -132,14 +155,26 @@ function createWindow(backgroundColor = "#12110f"): BrowserWindow {
 }
 
 async function startApplication(): Promise<void> {
+  await mkdir(workspacePaths.configDir, { recursive: true });
+  await mkdir(workspacePaths.dataDir, { recursive: true });
+  await mkdir(workspacePaths.logsDir, { recursive: true });
+  const migratedEntries = await migrateLegacyWorkspaceData(
+    workspacePaths,
+    legacyUserDataPath,
+    process.platform,
+  );
+  if (migratedEntries > 0) {
+    console.info(`迁移了 ${migratedEntries} 项旧版工作台数据。`);
+  }
+
   const projectStore = new ProjectStore(
-    join(app.getPath("userData"), "workspace.json"),
+    workspacePaths.settingsPath,
   );
   workspaceStore = projectStore;
   await projectStore.initialize();
   const assistantStore = new AssistantStore(
-    join(app.getPath("userData"), "assistant.json"),
-    join(app.getPath("userData"), "automation.json"),
+    workspacePaths.assistantStorePath,
+    workspacePaths.automationStorePath,
   );
   await assistantStore.initialize();
 
@@ -225,7 +260,7 @@ async function startApplication(): Promise<void> {
   await wecomAssistantEntries.initialize();
 
   const assistantTaskStore = new AssistantTaskStore(
-    join(app.getPath("userData"), "assistant-tasks.json"),
+    workspacePaths.assistantTaskStorePath,
   );
   const assistantTaskRunner = new ClaudeCodeAssistantTaskRunner(
     () => claudeLocator.requireExecutable(),
@@ -255,7 +290,7 @@ async function startApplication(): Promise<void> {
     projectStore.getTheme() === "light" ? "#f6f6f4" : "#12110f",
   );
   const temporaryWorkspace = new TemporaryWorkspace(
-    join(app.getPath("userData"), "temporary-workspaces"),
+    workspacePaths.temporaryWorkspacePath,
   );
   removeIpcHandlers = registerIpcHandlers({
     window: mainWindow,
@@ -266,6 +301,7 @@ async function startApplication(): Promise<void> {
     wecomBridge,
     wecomSettingsService,
     assistantService,
+    workspacePaths,
   });
 }
 

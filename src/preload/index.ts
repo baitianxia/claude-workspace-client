@@ -13,6 +13,8 @@ type IpcChannelMap = typeof import("../shared/ipc-channels").IPC_CHANNELS;
 // this map stays aligned with the main process without generating a local require().
 const IPC_CHANNELS: IpcChannelMap = {
   getSnapshot: "workspace:get-snapshot",
+  getWorkspaceInfo: "workspace:get-workspace-info",
+  openWorkspaceLocation: "workspace:open-workspace-location",
   setTheme: "workspace:set-theme",
   selectProjectDirectory: "workspace:select-project-directory",
   selectAssistantProjectDirectory: "workspace:select-assistant-project-directory",
@@ -48,6 +50,9 @@ const IPC_CHANNELS: IpcChannelMap = {
 
 const api: DesktopApi = {
   getSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.getSnapshot),
+  getWorkspaceInfo: () => ipcRenderer.invoke(IPC_CHANNELS.getWorkspaceInfo),
+  openWorkspaceLocation: (location) =>
+    ipcRenderer.invoke(IPC_CHANNELS.openWorkspaceLocation, location),
   setTheme: (theme) => ipcRenderer.invoke(IPC_CHANNELS.setTheme, theme),
   selectProjectDirectory: () =>
     ipcRenderer.invoke(IPC_CHANNELS.selectProjectDirectory),

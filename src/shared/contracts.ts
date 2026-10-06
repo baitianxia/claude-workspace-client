@@ -219,6 +219,18 @@ export interface AppSnapshot {
   theme: AppTheme;
 }
 
+export type WorkspaceLocation = "root" | "config" | "data" | "logs";
+
+export interface WorkspaceInfo {
+  productId: "claude-workspace";
+  displayName: "Claude 工作台";
+  rootPath: string;
+  configPath: string;
+  settingsPath: string;
+  dataPath: string;
+  logsPath: string;
+}
+
 export interface TerminalDataEvent {
   sessionId: string;
   data: string;
@@ -387,6 +399,8 @@ export interface WriteTerminalRequest {
 
 export interface DesktopApi {
   getSnapshot(): Promise<AppSnapshot>;
+  getWorkspaceInfo(): Promise<WorkspaceInfo>;
+  openWorkspaceLocation(location: WorkspaceLocation): Promise<void>;
   setTheme(theme: AppTheme): Promise<AppTheme>;
   selectProjectDirectory(): Promise<ProjectRecord | null>;
   selectAssistantProjectDirectory(): Promise<string | null>;

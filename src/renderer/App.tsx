@@ -14,6 +14,8 @@ import type {
   ClaudeExecutableState,
   ProjectRecord,
   SessionRecord,
+  WorkspaceInfo,
+  WorkspaceLocation,
 } from "../shared/contracts";
 import { BrandMark } from "./BrandMark";
 import { QuickSwitcher } from "./QuickSwitcher";
@@ -204,6 +206,7 @@ function loadCollapsedProjectIds(): Set<string> {
 
 export function App() {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
+  const [workspaceInfo, setWorkspaceInfo] = useState<WorkspaceInfo | null>(null);
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>("claude");
   const [assistantSelection, setAssistantSelection] =
     useState<AssistantSelection | null>(null);
@@ -458,6 +461,19 @@ export function App() {
       .catch((initializationError: unknown) => {
         if (!disposed) {
           setError(readableError(initializationError));
+        }
+      });
+
+    void window.claudeWorkspace
+      .getWorkspaceInfo()
+      .then((info) => {
+        if (!disposed) {
+          setWorkspaceInfo(info);
+        }
+      })
+      .catch((workspaceError: unknown) => {
+        if (!disposed) {
+          setError(readableError(workspaceError));
         }
       });
 
@@ -937,6 +953,9 @@ export function App() {
     });
   };
 
+  const openWorkspaceLocation = (location: WorkspaceLocation) =>
+    runAction(() => window.claudeWorkspace.openWorkspaceLocation(location));
+
   if (!snapshot) {
     return (
       <main className="loading-screen">
@@ -1130,6 +1149,37 @@ export function App() {
               选择文件
             </button>
           </div>
+        </section>
+
+        <section className="claude-runtime-card workspace-files-card">
+          <div className="runtime-heading">
+            <span className="status-dot status-dot--online" />
+            <div>
+              <strong>工作台文件</strong>
+              <span title={workspaceInfo?.settingsPath}>
+                {workspaceInfo?.settingsPath ?? "正在读取配置路径…"}
+              </span>
+            </div>
+          </div>
+          <div className="runtime-actions">
+            <button
+              type="button"
+              onClick={() => openWorkspaceLocation("config")}
+              disabled={busy || !workspaceInfo}
+            >
+              打开配置
+            </button>
+            <button
+              type="button"
+              onClick={() => openWorkspaceLocation("logs")}
+              disabled={busy || !workspaceInfo}
+            >
+              打开日志
+            </button>
+          </div>
+          <small className="workspace-files-hint">
+            用户数据：{workspaceInfo?.dataPath ?? "正在读取…"}
+          </small>
         </section>
 
         <nav className="sidebar-mode-tabs" role="tablist" aria-label="产品区域">

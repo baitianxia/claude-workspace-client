@@ -370,6 +370,17 @@ export function installDevelopmentPreview(): void {
 
   const api: DesktopApi = {
     getSnapshot: async () => structuredClone(snapshot),
+    getWorkspaceInfo: async () => ({
+      productId: "claude-workspace",
+      displayName: "Claude 工作台",
+      rootPath: "C:\\Users\\developer\\claude-workspace",
+      configPath: "C:\\Users\\developer\\claude-workspace\\config",
+      settingsPath:
+        "C:\\Users\\developer\\claude-workspace\\config\\settings.json",
+      dataPath: "C:\\Users\\developer\\claude-workspace\\data",
+      logsPath: "C:\\Users\\developer\\claude-workspace\\logs",
+    }),
+    openWorkspaceLocation: async () => undefined,
     setTheme: async (theme) => {
       snapshot.theme = theme;
       return snapshot.theme;
