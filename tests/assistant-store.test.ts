@@ -126,6 +126,7 @@ describe("AssistantStore", () => {
         ...turn(),
         status: "succeeded",
         response: "完成",
+        deliveryError: "企业微信客户端提问投递失败：连接暂时断开",
         finishedAt: 10,
       },
       nextSession,
@@ -136,7 +137,10 @@ describe("AssistantStore", () => {
       conversations: AssistantConversationRecord[];
       turns: AssistantTurnRecord[];
     };
-    expect(persisted.turns[0]).toMatchObject({ status: "succeeded" });
+    expect(persisted.turns[0]).toMatchObject({
+      status: "succeeded",
+      deliveryError: "企业微信客户端提问投递失败：连接暂时断开",
+    });
     expect(persisted.conversations[0]).toMatchObject({
       claudeSessionId: nextSession,
     });

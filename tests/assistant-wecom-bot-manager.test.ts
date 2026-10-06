@@ -22,6 +22,8 @@ class FakeClient extends EventEmitter implements WeComClient {
   failReplies = false;
   failSends = false;
   sendFailuresRemaining = 0;
+  readonly sendErrorsByCall = new Map<number, Error>();
+  sendCallCount = 0;
   readonly sent: Array<{ targetId: string; body: SendMsgBody }> = [];
   readonly replies: string[] = [];
 
@@ -35,9 +37,14 @@ class FakeClient extends EventEmitter implements WeComClient {
   }
 
   async sendMessage(targetId: string, body: SendMsgBody): Promise<unknown> {
+    this.sendCallCount += 1;
+    const callError = this.sendErrorsByCall.get(this.sendCallCount);
     if (this.failSends || this.sendFailuresRemaining > 0) {
       this.sendFailuresRemaining = Math.max(0, this.sendFailuresRemaining - 1);
       throw new Error("send failed");
+    }
+    if (callError) {
+      throw callError;
     }
     this.sent.push({ targetId, body });
     return {};
@@ -54,6 +61,12 @@ class FakeClient extends EventEmitter implements WeComClient {
     this.replies.push(content);
     return {};
   }
+}
+
+function markdownContent(body: SendMsgBody): string {
+  return "markdown" in body && body.markdown
+    ? body.markdown.content
+    : "";
 }
 
 const protector: SecretProtector = {
@@ -256,6 +269,42 @@ describe("AssistantWeComBotManager", () => {
     expect(manager.listBots().find((entry) => entry.id === bot.id)).toMatchObject({
       status: "connected",
     });
+    manager.dispose();
+  });
+
+  it("sends oversized UTF-8 content in ordered lossless chunks", async () => {
+    const { manager, client, bot } = await outboundFixture();
+    const content = "🙂中文".repeat(6_100);
+
+    await manager.sendMarkdown(bot.id, "zhangsan", content);
+
+    const chunks = client.sent.map((entry) => markdownContent(entry.body));
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(
+      chunks.every(
+        (chunk) => Buffer.byteLength(chunk, "utf8") <= 18_000,
+      ),
+    ).toBe(true);
+    expect(chunks.join("")).toBe(content);
+    expect(chunks.every((chunk) => !/^[\uDC00-\uDFFF]/u.test(chunk))).toBe(true);
+    expect(chunks.every((chunk) => !/[\uD800-\uDBFF]$/u.test(chunk))).toBe(true);
+    manager.dispose();
+  });
+
+  it("does not resend successful chunks when a later chunk has an uncertain acknowledgement", async () => {
+    const { manager, client, bot } = await outboundFixture();
+    const content = "🙂中文".repeat(6_100);
+    client.sendErrorsByCall.set(2, new Error("Reply ack timeout (5000ms)"));
+
+    await expect(manager.sendMarkdown(bot.id, "zhangsan", content)).rejects.toThrow(
+      "ack timeout",
+    );
+
+    const firstChunk = client.sent[0] ? markdownContent(client.sent[0].body) : "";
+    expect(client.sendCallCount).toBe(2);
+    expect(client.sent).toHaveLength(1);
+    expect(content.startsWith(firstChunk)).toBe(true);
+    expect(firstChunk).toContain("🙂");
     manager.dispose();
   });
 

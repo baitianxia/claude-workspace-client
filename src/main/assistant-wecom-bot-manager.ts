@@ -20,6 +20,7 @@ import {
 import type { SecretProtector } from "./wecom-settings";
 import type { WeComClient, WeComClientFactory } from "./wecom-bridge";
 import { describeWeComError as readableError } from "./wecom-error";
+import { splitUtf8ByBytes } from "./wecom-message-chunks";
 import { withTimeout } from "./promise-timeout";
 
 export interface AssistantWeComMessage {
@@ -436,9 +437,17 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       throw new Error("企业微信投递目标格式无效。");
     }
     const expiresAt = Date.now() + OUTBOUND_DEADLINE_MS;
-    const send = runtime.outboundSendChain.then(() =>
-      this.sendMarkdownWithRetry(runtime, target, content, expiresAt),
+    const chunks = splitUtf8ByBytes(
+      content,
+      MAX_ASSISTANT_WECOM_MARKDOWN_BYTES,
     );
+    const send = runtime.outboundSendChain.then(async () => {
+      // Keep all chunks in this one per-bot queue item and reuse the original
+      // deadline. A later chunk may fail without replaying earlier successes.
+      for (const chunk of chunks) {
+        await this.sendMarkdownWithRetry(runtime, target, chunk, expiresAt);
+      }
+    });
     // Keep later deliveries independent when one delivery fails, while still
     // serializing messages for a bot to avoid concurrent SDK send frames.
     runtime.outboundSendChain = send.then(

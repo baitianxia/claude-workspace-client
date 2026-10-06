@@ -42,6 +42,11 @@ interface AssistantServiceEvents {
   stateChanged: [state: AssistantSnapshot];
 }
 
+interface AssistantWeComDelivery {
+  content: string;
+  failureLabel: string;
+}
+
 export interface AssistantRunner {
   initialize?(): Promise<void>;
   run(input: ClaudeCodeAssistantInput): Promise<ClaudeCodeAssistantResult>;
@@ -534,15 +539,35 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     const profile = this.requireEnabledProfile(
       requireText(request.assistantId, "助理 ID", 200),
     );
-    return this.enqueueTurn(profile, {
-      source: "desktop",
-      request: requireText(
-        request.text,
-        "消息",
-        MAX_ASSISTANT_MESSAGE_CHARACTERS,
-        { multiline: true },
-      ),
-    });
+    const mirrorToWeCom = Boolean(
+      profile.wecomBotProfileId && profile.ownerWeComUserId,
+    );
+    const turn = await this.enqueueTurn(
+      profile,
+      {
+        source: "desktop",
+        request: requireText(
+          request.text,
+          "消息",
+          MAX_ASSISTANT_MESSAGE_CHARACTERS,
+          { multiline: true },
+        ),
+      },
+      !mirrorToWeCom,
+    );
+    if (mirrorToWeCom && profile.wecomBotProfileId) {
+      // Queue the mirrored user message before starting Claude so the remote
+      // conversation cannot show the assistant reply first.
+      void this.mirrorDesktopRequest(
+        turn,
+        profile.wecomBotProfileId,
+        profile.ownerWeComUserId,
+      ).catch((error: unknown) =>
+        console.error("Failed to mirror desktop assistant request", error),
+      );
+      this.startWorker(profile.id);
+    }
+    return turn;
   }
 
   async resetOwnerConversation(
@@ -605,6 +630,19 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       this.now(),
     );
     this.emitStateChanged();
+    if (active.source === "desktop") {
+      const profile = this.store.getProfile(active.assistantId);
+      if (profile?.wecomBotProfileId && profile.ownerWeComUserId) {
+        void this.mirrorDesktopResponse(
+          active,
+          profile.wecomBotProfileId,
+          profile.ownerWeComUserId,
+          "本轮处理未完成：主人在执行前取消了这条消息。",
+        ).catch((error: unknown) =>
+          console.error("Failed to mirror cancelled desktop turn", error),
+        );
+      }
+    }
   }
 
   async disableProfilesForProject(projectId: string): Promise<void> {
@@ -848,6 +886,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       AssistantTurnRecord,
       "source" | "request" | "messageId" | "botProfileId" | "userId"
     >,
+    startWorker = true,
   ): Promise<AssistantTurnRecord> {
     if (this.shuttingDown) {
       throw new Error("客户端正在关闭，不能接收新的助理消息。");
@@ -874,7 +913,9 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     };
     await this.store.appendTurn(turn);
     this.emitStateChanged();
-    this.startWorker(profile.id);
+    if (startWorker) {
+      this.startWorker(profile.id);
+    }
     return turn;
   }
 
@@ -986,10 +1027,16 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
             error: "私人助理没有返回完整的回复或会话 ID。",
           }
         : result;
+    const previousDeliveryError = this.store
+      .listTurns()
+      .find((candidate) => candidate.id === turn.id)?.deliveryError;
     const completed: AssistantTurnRecord = {
       ...turn,
       status: normalizedResult.status,
       finishedAt: timestamp,
+      ...(previousDeliveryError
+        ? { deliveryError: previousDeliveryError }
+        : {}),
       ...(normalizedResult.response
         ? { response: normalizedResult.response }
         : {}),
@@ -1001,26 +1048,134 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       timestamp,
     );
     this.emitStateChanged();
-    if (turn.source !== "wecom" || !turn.botProfileId || !turn.userId) {
+    if (turn.source === "wecom" && turn.botProfileId && turn.userId) {
+      const content =
+        normalizedResult.status === "succeeded" && normalizedResult.response
+          ? normalizedResult.response
+          : `本轮处理未完成：${normalizedResult.error ?? "未知错误"}`;
+      const deliveryErrors = await this.deliverWeComMessages(
+        turn.botProfileId,
+        turn.userId,
+        [{ content, failureLabel: "企业微信回复失败" }],
+      );
+      if (deliveryErrors.length > 0) {
+        await this.store.replaceTurn({
+          ...completed,
+          deliveryError: deliveryErrors.join("；"),
+        });
+        this.emitStateChanged();
+      }
       return;
     }
-    const content =
+
+    // Desktop turns mirror the assistant response after the request was
+    // queued. The request itself is sent by sendDesktopMessage before the
+    // worker starts, so the remote conversation keeps both sides in order.
+    const profile = this.store.getProfile(turn.assistantId);
+    if (
+      turn.source !== "desktop" ||
+      !profile?.wecomBotProfileId ||
+      !profile.ownerWeComUserId
+    ) {
+      return;
+    }
+    const response =
       normalizedResult.status === "succeeded" && normalizedResult.response
         ? normalizedResult.response
         : `本轮处理未完成：${normalizedResult.error ?? "未知错误"}`;
-    try {
-      await withTimeout(
-        this.wecomBots.sendMarkdown(turn.botProfileId, turn.userId, content),
-        WECOM_DELIVERY_TIMEOUT_MILLISECONDS,
-        "企业微信回复超过 15 秒仍未完成。",
-      );
-    } catch (error) {
-      await this.store.replaceTurn({
-        ...completed,
-        deliveryError: `企业微信回复失败：${readableError(error)}`,
-      });
-      this.emitStateChanged();
+    await this.mirrorDesktopResponse(
+      completed,
+      profile.wecomBotProfileId,
+      profile.ownerWeComUserId,
+      response,
+    );
+  }
+
+  private async mirrorDesktopRequest(
+    turn: AssistantTurnRecord,
+    botProfileId: string,
+    targetId: string,
+  ): Promise<void> {
+    const deliveryErrors = await this.deliverWeComMessages(
+      botProfileId,
+      targetId,
+      [
+        {
+          content: `你（来自客户端）：${turn.request}`,
+          failureLabel: "企业微信客户端提问投递失败",
+        },
+      ],
+    );
+    if (deliveryErrors.length === 0) {
+      return;
     }
+    const current = this.store
+      .listTurns()
+      .find((candidate) => candidate.id === turn.id);
+    if (!current) {
+      return;
+    }
+    await this.store.replaceTurn({
+      ...current,
+      deliveryError: [current.deliveryError, ...deliveryErrors]
+        .filter(Boolean)
+        .join("；"),
+    });
+    this.emitStateChanged();
+  }
+
+  private async mirrorDesktopResponse(
+    turn: AssistantTurnRecord,
+    botProfileId: string,
+    targetId: string,
+    response: string,
+  ): Promise<void> {
+    const deliveryErrors = await this.deliverWeComMessages(
+      botProfileId,
+      targetId,
+      [
+        {
+          content: `助理：${response}`,
+          failureLabel: "企业微信助理回复投递失败",
+        },
+      ],
+    );
+    if (deliveryErrors.length === 0) {
+      return;
+    }
+    const current = this.store
+      .listTurns()
+      .find((candidate) => candidate.id === turn.id);
+    if (!current) {
+      return;
+    }
+    await this.store.replaceTurn({
+      ...current,
+      deliveryError: [current.deliveryError, ...deliveryErrors]
+        .filter(Boolean)
+        .join("；"),
+    });
+    this.emitStateChanged();
+  }
+
+  private async deliverWeComMessages(
+    botProfileId: string,
+    targetId: string,
+    messages: AssistantWeComDelivery[],
+  ): Promise<string[]> {
+    const errors: string[] = [];
+    for (const message of messages) {
+      try {
+        await withTimeout(
+          this.wecomBots.sendMarkdown(botProfileId, targetId, message.content),
+          WECOM_DELIVERY_TIMEOUT_MILLISECONDS,
+          "企业微信回复超过 15 秒仍未完成。",
+        );
+      } catch (error) {
+        errors.push(`${message.failureLabel}：${readableError(error)}`);
+      }
+    }
+    return errors;
   }
 
   private emitStateChanged(): void {

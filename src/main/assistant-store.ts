@@ -243,8 +243,7 @@ function normalizeTurn(value: unknown): AssistantTurnRecord | null {
     (candidate.source === "desktop" &&
       (candidate.messageId !== undefined ||
         candidate.botProfileId !== undefined ||
-        candidate.userId !== undefined ||
-        candidate.deliveryError !== undefined)) ||
+        candidate.userId !== undefined)) ||
     (candidate.source === "wecom" &&
       (!candidate.messageId ||
         !candidate.botProfileId ||

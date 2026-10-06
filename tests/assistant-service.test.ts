@@ -117,6 +117,7 @@ class ControllableRunner extends FakeRunner {
 
 class FakeGateway extends EventEmitter implements AssistantWeComGateway {
   readonly sent: Array<{ botProfileId: string; targetId: string; content: string }> = [];
+  readonly sendErrors: Array<Error | undefined> = [];
   readonly bots: AssistantWeComBotProfile[] = [
     {
       id: "bot-one",
@@ -174,6 +175,10 @@ class FakeGateway extends EventEmitter implements AssistantWeComGateway {
     targetId: string,
     content: string,
   ): Promise<void> {
+    const error = this.sendErrors.shift();
+    if (error) {
+      throw error;
+    }
     this.sent.push({ botProfileId, targetId, content });
   }
 }
@@ -399,6 +404,136 @@ describe("AssistantService", () => {
     expect(service.getSnapshot().profiles[0]?.enabled).toBe(true);
   });
 
+  it("mirrors a completed desktop turn to the owner's WeCom chat", async () => {
+    const { service, runner, gateway } = await fixture();
+    const profile = await service.upsertProfile(request());
+
+    await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "请整理这份报告",
+    });
+    await waitFor(() => runner.inputs.length === 1);
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    await waitFor(() => gateway.sent.length === 2);
+
+    expect(gateway.sent).toEqual([
+      {
+        botProfileId: "bot-one",
+        targetId: "zhangsan",
+        content: "你（来自客户端）：请整理这份报告",
+      },
+      {
+        botProfileId: "bot-one",
+        targetId: "zhangsan",
+        content: "助理：回复 1",
+      },
+    ]);
+  });
+
+  it("mirrors the desktop request before the assistant turn finishes", async () => {
+    const runner = new ControllableRunner();
+    const { service, gateway } = await fixture(runner);
+    const profile = await service.upsertProfile(request());
+
+    const turn = await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "先把这条提问同步过去",
+    });
+    await waitFor(() => runner.inputs.length === 1);
+    await waitFor(() => gateway.sent.length === 1);
+
+    expect(gateway.sent[0]).toMatchObject({
+      targetId: "zhangsan",
+      content: "你（来自客户端）：先把这条提问同步过去",
+    });
+
+    runner.complete(runner.inputs[0].turnId, {
+      status: "succeeded",
+      response: "已同步",
+      sessionId: FIRST_SESSION,
+    });
+    await waitFor(() => gateway.sent.length === 2);
+    expect(gateway.sent[1]).toMatchObject({
+      targetId: "zhangsan",
+      content: "助理：已同步",
+    });
+    expect(turn.status).toBe("queued");
+  });
+
+  it("records desktop mirror delivery failures on the completed turn", async () => {
+    const { service, runner, gateway } = await fixture();
+    const profile = await service.upsertProfile(request());
+    gateway.sendErrors.push(undefined, new Error("连接暂时断开"));
+
+    await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "这条消息需要镜像",
+    });
+    await waitFor(() => runner.inputs.length === 1);
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.deliveryError !== undefined,
+    );
+
+    expect(gateway.sent).toHaveLength(1);
+    expect(service.getSnapshot().turns.at(-1)).toEqual(
+      expect.objectContaining({
+        status: "succeeded",
+        request: "这条消息需要镜像",
+        response: "回复 1",
+        deliveryError: expect.stringContaining("连接暂时断开"),
+      }),
+    );
+  });
+
+  it("mirrors a queued desktop cancellation after its request", async () => {
+    const runner = new ControllableRunner();
+    const { service, gateway } = await fixture(runner);
+    const profile = await service.upsertProfile(request());
+
+    await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "先处理这一条",
+    });
+    await waitFor(() => runner.inputs.length === 1);
+    const queued = await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "这一条稍后取消",
+    });
+    await waitFor(() => gateway.sent.length === 2);
+
+    await service.cancelTurn(profile.id, queued.id);
+    await waitFor(() => gateway.sent.length === 3);
+
+    expect(gateway.sent[2]).toMatchObject({
+      targetId: "zhangsan",
+      content: "助理：本轮处理未完成：主人在执行前取消了这条消息。",
+    });
+    expect(service.getSnapshot().turns.find((turn) => turn.id === queued.id)).toEqual(
+      expect.objectContaining({
+        status: "cancelled",
+        error: "主人在执行前取消了这条消息。",
+      }),
+    );
+
+    runner.complete(runner.inputs[0].turnId, {
+      status: "succeeded",
+      response: "第一条已完成",
+      sessionId: FIRST_SESSION,
+    });
+    await waitFor(
+      () =>
+        service
+          .getSnapshot()
+          .turns.find((turn) => turn.request === "先处理这一条")?.status ===
+        "succeeded",
+    );
+  });
+
   it("shares one owner session between desktop and the owner's WeCom single chat", async () => {
     const { service, store, runner, gateway } = await fixture();
     const profile = await service.upsertProfile(request());
@@ -420,7 +555,7 @@ describe("AssistantService", () => {
     });
     expect(accepted?.status).toBe("accepted");
     await waitFor(() => runner.inputs.length === 2);
-    await waitFor(() => gateway.sent.length === 1);
+    await waitFor(() => gateway.sent.length === 3);
 
     expect(runner.inputs[1].sessionId).toBe(FIRST_SESSION);
     expect(runner.inputs.map((entry) => entry.prompt)).toEqual([
@@ -436,7 +571,7 @@ describe("AssistantService", () => {
     ]);
     expect(service.getSnapshot().conversations[0]?.claudeSessionId).toBeUndefined();
     expect(service.getSnapshot().resumableConversationIds).toContain(profile.id);
-    expect(gateway.sent[0]).toMatchObject({
+    expect(gateway.sent[2]).toMatchObject({
       botProfileId: "bot-one",
       targetId: "zhangsan",
       content: "回复 2",
