@@ -59,8 +59,6 @@ claude
 5. 在“开发工作台”Tab 使用左侧列表或 `Ctrl+K` 切换工程与会话。
 6. 需要私人助理时，点击“私人助理”Tab，在左侧选择助理；列表底部可配置当前助理或新建助理，右侧会直接打开主人会话；创建或配置助理时可在同一张表单直接填写并绑定企业微信智能机器人。运行目录独立选择，不需要先加入开发工作台。
 
-侧栏的“工作台文件”卡片会显示当前配置文件路径，并可直接打开配置目录和日志目录。Windows 版本默认把工作台数据放在 `%USERPROFILE%\claude-workspace` 下，不需要在 AppData 深层目录中查找。
-
 程序会自动查找原生安装的 `claude.exe` 和 npm 安装产生的 `claude.cmd`。自动检测失败时，可以手动选择 `.exe`、`.cmd`、`.bat` 或 `.ps1` 启动文件。
 
 “开发工作台”左侧的“新会话启动命令”默认首选 `claude`，也可以选择 `claude --dangerously-skip-permissions` 跳过权限确认。该选择适用于下一次新建的工程会话或临时会话，成功创建后会恢复为普通 `claude`。每个会话会保存自己的启动模式，重启会话或重新打开客户端后仍保留；跳过权限确认的会话会在顶部显示对应标记。工作台会在 Claude Code 首次启动前生成并保存会话 ID，再通过 `--session-id` 传入；客户端关闭后点击“重启会话”会自动使用该 ID 恢复原 Claude Code 对话。`SessionStart` 使用本机命令 Hook 转发到工作台，避免 Claude Code 不支持的 HTTP Hook 配置导致绑定丢失。升级前没有绑定 ID 的旧会话首次重启会启动新的 Claude Code 会话，不会自动选择当前目录最近的对话；需要恢复旧对话时，请在终端使用 `/resume` 手动选择。
@@ -168,10 +166,9 @@ Claude Code 终端控制机器人在开发工作台中只服务交互式终端�
 
 ## 数据与安全
 
-- Windows 使用 `%USERPROFILE%\claude-workspace\config\settings.json` 保存工程、终端会话标签及其绑定的 Claude Code 会话 ID、Claude Code 路径、主题选择（`dark`/`light`）和应用配置；macOS/Linux 继续使用 Electron 用户数据目录中的 `workspace.json`。
-- Windows 的 `%USERPROFILE%\claude-workspace\data\assistant.json` 保存最多 20 个助理（包括各自独立运行目录）、20 个加密企业微信智能机器人连接、主人会话和最近 500 个聊天轮次；`assistant-tasks.json` 位于同一 `data` 目录。
-- Windows 的 `%USERPROFILE%\claude-workspace\logs` 用于应用日志和故障排查。临时工作目录位于 `data\temporary-workspaces`。
-- 首次升级到该目录布局时，客户端会把旧 Electron 用户数据中的上述文件复制到新位置并保留旧文件；如果新位置已有文件，则以新文件为准，不会覆盖或删除用户数据。
+- `workspace.json` 保存工程、终端会话标签及其绑定的 Claude Code 会话 ID、Claude Code 路径、主题选择（`dark`/`light`）和应用配置。
+- `assistant.json` 保存最多 20 个助理（包括各自独立运行目录）、20 个加密企业微信智能机器人连接、主人会话和最近 500 个聊天轮次。
+- `assistant-tasks.json` 保存助理任务和最近 500 条独立运行记录，包括执行错误与投递错误。
 - 企业微信 Secret 通过 Electron `safeStorage` 使用操作系统凭据保护能力加密，不会以明文进入界面层。
 - 主人 session ID 会保存在 `assistant.json`，用于常驻进程结束后的恢复；任务运行不保存或复用 Claude session。
 - 终端输出只在当前进程内存缓冲区中，不写入 `workspace.json`；已绑定的工作台会话重启时自动通过 `--resume` 恢复，未绑定的会话仍可在 Claude Code 中使用 `/resume`。

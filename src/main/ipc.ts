@@ -3,7 +3,6 @@ import {
   dialog,
   ipcMain,
   Notification,
-  shell,
   type BrowserWindow,
 } from "electron";
 import { realpath, stat } from "node:fs/promises";
@@ -23,8 +22,6 @@ import type {
   UpdateWeComConfigRequest,
   UpdateProjectRequest,
   WriteTerminalRequest,
-  WorkspaceInfo,
-  WorkspaceLocation,
 } from "../shared/contracts";
 import { AssistantService } from "./assistant-service";
 import { IPC_CHANNELS } from "../shared/ipc-channels";
@@ -35,7 +32,6 @@ import type { TemporaryWorkspace } from "./temporary-workspace";
 import type { WeComBridge } from "./wecom-bridge";
 import type { WeComSettingsService } from "./wecom-settings";
 import { WorkspaceFiles } from "./workspace-files";
-import type { WorkspacePaths } from "./workspace-paths";
 
 const MAX_CLIPBOARD_PASTE_LENGTH = 100_000;
 const MAX_CLIPBOARD_COPY_LENGTH = 2_000_000;
@@ -84,7 +80,6 @@ export function registerIpcHandlers(options: {
   wecomBridge: WeComBridge;
   wecomSettingsService: WeComSettingsService;
   assistantService: AssistantService;
-  workspacePaths: WorkspacePaths;
 }): () => void {
   const {
     window,
@@ -95,7 +90,6 @@ export function registerIpcHandlers(options: {
     wecomBridge,
     wecomSettingsService,
     assistantService,
-    workspacePaths,
   } = options;
   const workspaceFiles = new WorkspaceFiles();
 
@@ -109,45 +103,6 @@ export function registerIpcHandlers(options: {
   });
 
   ipcMain.handle(IPC_CHANNELS.getSnapshot, getSnapshot);
-
-  const getWorkspaceInfo = (): WorkspaceInfo => ({
-    productId: "claude-workspace",
-    displayName: "Claude 工作台",
-    rootPath: workspacePaths.workspaceRoot,
-    configPath: workspacePaths.configDir,
-    settingsPath: workspacePaths.settingsPath,
-    dataPath: workspacePaths.dataDir,
-    logsPath: workspacePaths.logsDir,
-  });
-
-  ipcMain.handle(IPC_CHANNELS.getWorkspaceInfo, getWorkspaceInfo);
-  ipcMain.handle(
-    IPC_CHANNELS.openWorkspaceLocation,
-    async (_event, location: unknown) => {
-      const allowed = new Set<WorkspaceLocation>([
-        "root",
-        "config",
-        "data",
-        "logs",
-      ]);
-      if (
-        typeof location !== "string" ||
-        !allowed.has(location as WorkspaceLocation)
-      ) {
-        throw new Error("工作台目录类型无效。");
-      }
-      const target = {
-        root: workspacePaths.workspaceRoot,
-        config: workspacePaths.configDir,
-        data: workspacePaths.dataDir,
-        logs: workspacePaths.logsDir,
-      }[location as WorkspaceLocation];
-      const result = await shell.openPath(target);
-      if (result) {
-        throw new Error(`无法打开工作台目录：${result}`);
-      }
-    },
-  );
 
   ipcMain.handle(
     IPC_CHANNELS.setTheme,

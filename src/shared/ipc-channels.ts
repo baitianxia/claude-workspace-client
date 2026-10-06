@@ -1,7 +1,5 @@
 export const IPC_CHANNELS = {
   getSnapshot: "workspace:get-snapshot",
-  getWorkspaceInfo: "workspace:get-workspace-info",
-  openWorkspaceLocation: "workspace:open-workspace-location",
   setTheme: "workspace:set-theme",
   selectProjectDirectory: "workspace:select-project-directory",
   selectAssistantProjectDirectory: "workspace:select-assistant-project-directory",
