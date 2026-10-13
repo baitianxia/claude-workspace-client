@@ -448,18 +448,20 @@ describe("WeComBridge", () => {
     );
     await vi.waitFor(() => expect(secondPty.writes).toEqual(["\r"]));
     expect(firstPty.writes).toEqual([]);
-    expect(bridge.getState()).toMatchObject({
-      lastInboundStatus: "routed",
-      lastInboundDetail: expect.stringMatching(
-        new RegExp(`${secondCode}.*菜单操作写入.*等待 Claude Code 处理`, "u"),
-      ),
-    });
+    await vi.waitFor(() =>
+      expect(bridge.getState()).toMatchObject({
+        lastInboundStatus: "routed",
+        lastInboundDetail: expect.stringMatching(
+          new RegExp(`${secondCode}.*菜单操作写入.*等待 Claude Code 处理`, "u"),
+        ),
+      }),
+    );
 
     client.emit(
       "message",
       incomingMessage("message-1", `${firstCode} 2`, callbackUserId),
     );
-    await vi.waitFor(() => expect(firstPty.writes).toEqual([`${DOWN}\r`]));
+    await vi.waitFor(() => expect(firstPty.writes).toEqual([DOWN, "\r"]));
     expect(secondPty.writes).toEqual(["\r"]);
     expect(client.replies).toEqual([
       expect.stringContaining(secondCode),
@@ -481,7 +483,7 @@ describe("WeComBridge", () => {
       ),
     );
     await vi.waitFor(() =>
-      expect(firstPty.writes).toEqual([`${DOWN}\r`, "请改用只读命令\r"]),
+      expect(firstPty.writes).toEqual([DOWN, "\r", "请改用只读命令\r"]),
     );
     expect(router.listForUser("zhangsan")).not.toContainEqual(
       expect.objectContaining({ code: firstCode }),
@@ -498,15 +500,18 @@ describe("WeComBridge", () => {
     );
     await vi.waitFor(() =>
       expect(firstPty.writes).toEqual([
-        `${DOWN}\r`,
+        DOWN,
+        "\r",
         "请改用只读命令\r",
         "\r",
       ]),
     );
-    expect(bridge.getState()).toMatchObject({
-      lastInboundStatus: "routed",
-      lastInboundDetail: expect.stringContaining(thirdCode),
-    });
+    await vi.waitFor(() =>
+      expect(bridge.getState()).toMatchObject({
+        lastInboundStatus: "routed",
+        lastInboundDetail: expect.stringContaining(thirdCode),
+      }),
+    );
 
     bridge.handleClaudeHook({
       workspaceSessionId: first.id,
@@ -528,7 +533,8 @@ describe("WeComBridge", () => {
     );
     await vi.waitFor(() =>
       expect(firstPty.writes).toEqual([
-        `${DOWN}\r`,
+        DOWN,
+        "\r",
         "请改用只读命令\r",
         "\r",
         "1\r",
@@ -627,10 +633,12 @@ describe("WeComBridge", () => {
     await vi.waitFor(() =>
       expect(pty.writes).toEqual([...controlInput, "\r", "\x1b[O", "\r"]),
     );
-    expect(bridge.getState()).toMatchObject({
-      lastInboundStatus: "routed",
-      lastInboundDetail: expect.stringContaining(secondCode),
-    });
+    await vi.waitFor(() =>
+      expect(bridge.getState()).toMatchObject({
+        lastInboundStatus: "routed",
+        lastInboundDetail: expect.stringContaining(secondCode),
+      }),
+    );
 
     bridge.dispose();
   });

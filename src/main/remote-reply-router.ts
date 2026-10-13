@@ -167,6 +167,66 @@ function multipleMenuSelectionInput(selections: number[]): string {
   return `${input}${TERMINAL_ENTER}`;
 }
 
+function singleMenuSelectionChunks(selection: number): string[] {
+  return [
+    ...Array.from({ length: Math.max(0, selection - 1) }, () => TERMINAL_DOWN),
+    TERMINAL_ENTER,
+  ];
+}
+
+function multipleMenuSelectionChunks(selections: number[]): string[] {
+  const ordered = [...new Set(selections)].sort((left, right) => left - right);
+  let currentSelection = 1;
+  const chunks: string[] = [];
+  for (const selection of ordered) {
+    chunks.push(
+      ...Array.from(
+        { length: Math.max(0, selection - currentSelection) },
+        () => TERMINAL_DOWN,
+      ),
+    );
+    chunks.push(TERMINAL_TOGGLE);
+    currentSelection = selection;
+  }
+  chunks.push(TERMINAL_ENTER);
+  return chunks;
+}
+
+type MenuActionExtras = Pick<
+  RemoteReplyAction,
+  "nextStage" | "followUpMessage"
+>;
+
+function menuAction(
+  input: string,
+  inputChunks: string[],
+  extras: MenuActionExtras = {},
+): RemoteReplyAction {
+  return {
+    input,
+    ...(inputChunks.length > 1 ? { inputChunks } : {}),
+    ...extras,
+  };
+}
+
+function singleMenuAction(
+  selection: number,
+  extras: MenuActionExtras = {},
+): RemoteReplyAction {
+  return menuAction(
+    singleMenuSelectionInput(selection),
+    singleMenuSelectionChunks(selection),
+    extras,
+  );
+}
+
+function multipleMenuAction(selections: number[]): RemoteReplyAction {
+  return menuAction(
+    multipleMenuSelectionInput(selections),
+    multipleMenuSelectionChunks(selections),
+  );
+}
+
 /**
  * Claude Code's multi-question AskUserQuestion wizard is a different menu
  * from the ordinary one-question picker. A digit selects the option and
@@ -581,14 +641,13 @@ export function terminalActionForRemoteReply(
       );
     }
     if (selection === denySelection) {
-      return {
-        input: singleMenuSelectionInput(numericSelection),
+      return singleMenuAction(numericSelection, {
         nextStage: "permission-denial-reason",
         followUpMessage:
           "已选择拒绝。请继续回复拒绝原因，或告诉 Claude Code 应该如何调整。",
-      };
+      });
     }
-    return { input: singleMenuSelectionInput(numericSelection) };
+    return singleMenuAction(numericSelection);
   }
 
   const questionModes = pending.questionSelectionModes ?? [];
@@ -622,20 +681,18 @@ export function terminalActionForRemoteReply(
       : Number.NaN;
     if (Number.isInteger(numericSelection)) {
       if (numericSelection === firstOptionCount + 1) {
-        return {
-          input: singleMenuSelectionInput(numericSelection),
+        return singleMenuAction(numericSelection, {
           nextStage: "question-custom-answer",
           followUpMessage:
             "已选择“输入其他回答（Type something.）”。请继续回复你的具体答案。",
-        };
+        });
       }
       if (numericSelection === firstOptionCount + 2) {
-        return {
-          input: singleMenuSelectionInput(numericSelection),
+        return singleMenuAction(numericSelection, {
           nextStage: "question-chat-message",
           followUpMessage:
             "已选择“与 Claude 讨论这个问题（Chat about this）”。请继续回复你想讨论或补充的内容。",
-        };
+        });
       }
     }
   }
@@ -698,16 +755,14 @@ export function terminalActionForRemoteReply(
     const answerSelections = questionSelections(selection, labels);
     if (questionModes[0] === "single") {
       if (answerSelections?.length === 1) {
-        return { input: singleMenuSelectionInput(answerSelections[0]) };
+        return singleMenuAction(answerSelections[0]);
       }
       throw new Error(
         `问题回复无效。请回复 1-${labels.length + 2} 的选项编号，或直接回复选项文字。`,
       );
     }
     if (answerSelections && answerSelections.length > 0) {
-      return {
-        input: multipleMenuSelectionInput(answerSelections),
-      };
+      return multipleMenuAction(answerSelections);
     }
     throw new Error(
       "多选问题回复无效，请使用逗号分隔通知中的选项编号或完整选项文字。",
@@ -719,20 +774,18 @@ export function terminalActionForRemoteReply(
   // text-input prompts must receive the original characters (including "1").
   const canonicalSelection = normalizedChoiceText(selection);
   if (pending.inputMode === "menu" && /^[1-9]$/u.test(canonicalSelection)) {
-    return { input: singleMenuSelectionInput(Number(canonicalSelection)) };
+    return singleMenuAction(Number(canonicalSelection));
   }
   if (
     pending.inputMode === "menu" &&
     pending.supportsMultipleSelection &&
     /^[1-9](?:\s*[,，]\s*[1-9])+$/u.test(canonicalSelection)
   ) {
-    return {
-      input: multipleMenuSelectionInput(
-        canonicalSelection
-          .split(/\s*[,，]\s*/u)
-          .map((value) => Number(value)),
-      ),
-    };
+    return multipleMenuAction(
+      canonicalSelection
+        .split(/\s*[,，]\s*/u)
+        .map((value) => Number(value)),
+    );
   }
   if (pending.inputMode === "menu") {
     throw new Error(

@@ -268,6 +268,7 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(customPending, "收到了")).toBe("\r");
     expect(terminalActionForRemoteReply(customPending, "3")).toEqual({
       input: `${DOWN}${DOWN}\r`,
+      inputChunks: [DOWN, DOWN, "\r"],
       nextStage: "question-custom-answer",
       followUpMessage: expect.stringContaining("Type something"),
     });
@@ -315,6 +316,7 @@ describe("RemoteReplyRouter", () => {
     ).pending;
     expect(terminalActionForRemoteReply(chatPending, "4")).toEqual({
       input: `${DOWN}${DOWN}${DOWN}\r`,
+      inputChunks: [DOWN, DOWN, DOWN, "\r"],
       nextStage: "question-chat-message",
       followUpMessage: expect.stringContaining("Chat about this"),
     });
@@ -548,6 +550,10 @@ describe("RemoteReplyRouter", () => {
       ` ${DOWN}${DOWN} \r`,
     );
     expect(terminalInputForRemoteReply(single, "2")).toBe(`${DOWN}\r`);
+    expect(terminalActionForRemoteReply(single, "2").inputChunks).toEqual([
+      DOWN,
+      "\r",
+    ]);
     expect(() => terminalInputForRemoteReply(single, "随便输入")).toThrow(
       "菜单回复无效",
     );
