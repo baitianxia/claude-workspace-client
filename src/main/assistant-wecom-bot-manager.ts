@@ -271,6 +271,14 @@ function profileState(
     ...(previous?.lastInboundDetail
       ? { lastInboundDetail: previous.lastInboundDetail }
       : {}),
+    ...(previous?.lastOutboundError
+      ? {
+          lastOutboundError: previous.lastOutboundError,
+          ...(previous.lastOutboundErrorAt === undefined
+            ? {}
+            : { lastOutboundErrorAt: previous.lastOutboundErrorAt }),
+        }
+      : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -1030,13 +1038,12 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
           );
           if (
             this.runtimes.get(runtime.record.id) === runtime &&
-            runtime.authenticatedClient === client &&
-            runtime.state.status === "error"
+            runtime.state.lastOutboundError !== undefined
           ) {
             runtime.state = {
               ...runtime.state,
-              status: "connected",
-              error: undefined,
+              lastOutboundError: undefined,
+              lastOutboundErrorAt: undefined,
             };
             this.emit("stateChanged");
           }
@@ -1061,10 +1068,15 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       }
     }
     if (this.runtimes.get(runtime.record.id) === runtime) {
-      this.failRuntime(
-        runtime,
-        `企业微信消息推送失败：${readableError(lastError)}`,
-      );
+      // A delivery failure (invalid target, uncertain ack, ...) says nothing
+      // about the long connection itself. Record it as a delivery diagnostic
+      // and leave the connection status to the client lifecycle events.
+      runtime.state = {
+        ...runtime.state,
+        lastOutboundError: `企业微信消息推送失败：${readableError(lastError)}`,
+        lastOutboundErrorAt: Date.now(),
+      };
+      this.emit("stateChanged");
     }
     throw new Error(readableError(lastError));
   }

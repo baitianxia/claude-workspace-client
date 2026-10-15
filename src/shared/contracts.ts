@@ -80,6 +80,13 @@ export interface AssistantWeComBotProfile {
   lastInboundAt?: number;
   lastInboundStatus?: WeComInboundStatus;
   lastInboundDetail?: string;
+  /**
+   * Most recent failed outbound delivery. Kept separate from `status`/`error`
+   * so one bad target or uncertain acknowledgement does not make a healthy
+   * connection look broken. Cleared by the next successful delivery.
+   */
+  lastOutboundError?: string;
+  lastOutboundErrorAt?: number;
   createdAt: number;
   updatedAt: number;
 }

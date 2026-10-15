@@ -331,12 +331,23 @@ describe("AssistantWeComBotManager", () => {
 
   it("reports SDK error frames in both the delivery result and bot diagnostics", async () => {
     const { manager, client, bot } = await outboundFixture();
-    vi.spyOn(client, "sendMessage").mockRejectedValue({ errcode: 40003, errmsg: "invalid userid" });
+    const send = vi
+      .spyOn(client, "sendMessage")
+      .mockRejectedValue({ errcode: 40003, errmsg: "invalid userid" });
     vi.useFakeTimers();
     const outcome = expect(manager.sendMarkdown(bot.id, "zhangsan", "结果")).rejects.toThrow("40003：invalid userid");
     await vi.advanceTimersByTimeAsync(3_000);
     await outcome;
-    expect(manager.listBots()[0].error).toContain("40003：invalid userid");
+    expect(manager.listBots()[0].lastOutboundError).toContain("40003：invalid userid");
+    expect(manager.listBots()[0].lastOutboundErrorAt).toEqual(expect.any(Number));
+    // A bad delivery target must not make the healthy connection look broken.
+    expect(manager.listBots()[0]).toMatchObject({ status: "connected" });
+    expect(manager.listBots()[0].error).toBeUndefined();
+
+    send.mockResolvedValue({});
+    await manager.sendMarkdown(bot.id, "zhangsan", "第二条");
+    expect(manager.listBots()[0].lastOutboundError).toBeUndefined();
+    expect(manager.listBots()[0].lastOutboundErrorAt).toBeUndefined();
     manager.dispose();
   });
 

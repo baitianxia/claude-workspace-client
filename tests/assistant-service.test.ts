@@ -578,6 +578,59 @@ describe("AssistantService", () => {
     });
   });
 
+  it("replies with a reason instead of throwing for oversized or overflowing WeCom messages", async () => {
+    const runner = new ControllableRunner();
+    const { service } = await fixture(runner);
+    const profile = await service.upsertProfile(request());
+    const owner = (messageId: string, text: string) => ({
+      botProfileId: "bot-one",
+      messageId,
+      chatType: "single" as const,
+      chatId: "zhangsan",
+      userId: "zhangsan",
+      text,
+      quoteText: "",
+    });
+
+    const oversized = await service.handleWeComMessage(
+      owner("oversized-message", "长".repeat(4_001)),
+    );
+    expect(oversized).toMatchObject({
+      status: "rejected",
+      message: expect.stringContaining("超过 4,000 个字符"),
+    });
+    expect(oversized?.silent).toBeUndefined();
+    expect(
+      service.getSnapshot().turns.filter((turn) => turn.assistantId === profile.id),
+    ).toHaveLength(0);
+
+    const exact = await service.handleWeComMessage(
+      owner("exact-limit-message", "满".repeat(4_000)),
+    );
+    expect(exact?.status).toBe("accepted");
+    await waitFor(() => runner.inputs.length === 1);
+
+    // The first turn stays running, so nine more messages fill the queue.
+    for (let index = 0; index < 9; index += 1) {
+      const queued = await service.handleWeComMessage(
+        owner(`queued-message-${index}`, `排队 ${index}`),
+      );
+      expect(queued?.status).toBe("accepted");
+    }
+    const overflow = await service.handleWeComMessage(
+      owner("overflow-message", "第十一条"),
+    );
+    expect(overflow).toMatchObject({
+      status: "rejected",
+      message: expect.stringContaining("已达 10 条"),
+    });
+    expect(
+      service
+        .getSnapshot()
+        .turns.some((turn) => turn.request === "第十一条"),
+    ).toBe(false);
+  });
+
   it("only exposes the group chat ID diagnostic and never starts the Agent", async () => {
     const { service, runner } = await fixture();
     await service.upsertProfile(request());

@@ -789,14 +789,52 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         return { status: "rejected", message: readableError(error) };
       }
     }
-    const turn = await this.enqueueTurn(profile, {
-      source: "wecom",
-      request: requireText(
-        message.text,
+    // Deterministic rejections must be returned as a reply. Throwing here
+    // makes the bot manager treat the message as a transient failure, retry
+    // it silently and never tell the owner why nothing happened.
+    const text = message.text.trim();
+    if (!text) {
+      return { status: "rejected", message: "消息内容为空，未交给私人助理。" };
+    }
+    if ([...text].length > MAX_ASSISTANT_MESSAGE_CHARACTERS) {
+      return {
+        status: "rejected",
+        message: `消息超过 ${MAX_ASSISTANT_MESSAGE_CHARACTERS.toLocaleString("en-US")} 个字符，未交给私人助理。请缩短内容或分成多条发送。`,
+      };
+    }
+    let request: string;
+    try {
+      request = requireText(
+        text,
         "企业微信消息",
         MAX_ASSISTANT_MESSAGE_CHARACTERS,
         { multiline: true },
-      ),
+      );
+    } catch {
+      return {
+        status: "rejected",
+        message: "消息包含无法处理的控制字符，未交给私人助理。",
+      };
+    }
+    if (this.shuttingDown) {
+      return {
+        status: "rejected",
+        message: "客户端正在关闭，这条消息未交给私人助理，请稍后重新发送。",
+      };
+    }
+    if (
+      this.store
+        .listTurnsForConversation(profile.id)
+        .filter(isActiveTurn).length >= MAX_QUEUED_TURNS_PER_ASSISTANT
+    ) {
+      return {
+        status: "rejected",
+        message: `${profile.name} 等待处理的消息已达 ${MAX_QUEUED_TURNS_PER_ASSISTANT} 条，这条消息未排队。请等前面的消息完成后再发送，或发送 /stop 停止当前轮次。`,
+      };
+    }
+    const turn = await this.enqueueTurn(profile, {
+      source: "wecom",
+      request,
       messageId: message.messageId,
       botProfileId: message.botProfileId,
       userId: message.userId,

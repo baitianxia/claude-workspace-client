@@ -725,6 +725,9 @@ export function AssistantPanel({
                     {selectedBot.lastInboundAt
                       ? ` · 最近入站 ${shortTime(selectedBot.lastInboundAt)}：${selectedBot.lastInboundDetail ?? "已收到"}`
                       : " · 尚未收到入站消息"}
+                    {selectedBot.lastOutboundError
+                      ? ` · 最近投递失败${selectedBot.lastOutboundErrorAt ? ` ${shortTime(selectedBot.lastOutboundErrorAt)}` : ""}：${selectedBot.lastOutboundError}`
+                      : null}
                   </small>
                 ) : null}
               </section>
