@@ -309,11 +309,44 @@ export function registerIpcHandlers(options: {
       } else {
         throw new Error("Session scope is invalid.");
       }
-      const session = sessionManager.createSession(
-        { projectId, cwd },
-        request.title,
-        request.skipPermissions,
-      );
+      let session: SessionRecord;
+      try {
+        session = sessionManager.createSession(
+          { projectId, cwd },
+          request.title,
+          request.skipPermissions,
+        );
+      } catch (error) {
+        if (projectId === null) {
+          await temporaryWorkspace.removeDirectory(cwd).catch((cleanupError: unknown) =>
+            console.error("Failed to clean temporary workspace after launch failure", cleanupError),
+          );
+          // SessionManager records a failed launch so a normal project
+          // session can be retried. A temporary session whose directory was
+          // just removed must not remain as a restartable record pointing at
+          // a path that no longer exists.
+          const failedTemporarySession = sessionManager
+            .listSessions()
+            .find(
+              (candidate) =>
+                candidate.projectId === null &&
+                candidate.cwd === cwd &&
+                candidate.status === "failed",
+            );
+          if (failedTemporarySession) {
+            sessionManager.removeSession(failedTemporarySession.id);
+            await projectStore
+              .replaceSessions(sessionManager.listSessions())
+              .catch((persistError: unknown) =>
+                console.error(
+                  "Failed to persist temporary session cleanup",
+                  persistError,
+                ),
+              );
+          }
+        }
+        throw error;
+      }
       await projectStore.replaceSessions(sessionManager.listSessions());
       return session;
     },

@@ -693,10 +693,15 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         turn,
         profile.wecomBotProfileId,
         profile.ownerWeComUserId,
-      ).catch((error: unknown) =>
-        console.error("Failed to mirror desktop assistant request", error),
-      );
-      this.startWorker(profile.id);
+      )
+        .catch((error: unknown) =>
+          console.error("Failed to mirror desktop assistant request", error),
+        )
+        // The request must reach the owner's WeCom chat before Claude can
+        // finish and mirror its response. The bot manager serializes sends
+        // per connection, but starting the worker here would still allow a
+        // fast response to overtake the in-flight request.
+        .finally(() => this.startWorker(profile.id));
     }
     return turn;
   }

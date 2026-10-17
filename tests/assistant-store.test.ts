@@ -311,6 +311,51 @@ describe("AssistantStore", () => {
     expect(store.getLoadWarnings()[0]).toContain(".corrupt-");
   });
 
+  it("does not let orphaned conversations consume valid conversation slots", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-store-conversation-limit-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant.json");
+    const validProfiles = Array.from({ length: 20 }, (_, index) => ({
+      ...profile(),
+      id: `assistant-one-${index}`,
+      wecomBotProfileId: undefined,
+    }));
+    const validConversations = validProfiles.map((entry, index) => ({
+      ...conversation(),
+      id: entry.id,
+      assistantId: entry.id,
+      updatedAt: index + 1,
+    }));
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        profiles: validProfiles,
+        conversations: [
+          {
+            ...conversation(),
+            id: "orphaned",
+            assistantId: "removed-assistant",
+            updatedAt: 999,
+          },
+          ...validConversations,
+        ],
+        turns: [],
+        wecomBots: [],
+        legacyWeComBotsImported: true,
+      }),
+      "utf8",
+    );
+
+    const store = new AssistantStore(storePath);
+    await store.initialize();
+
+    expect(store.listConversations()).toHaveLength(20);
+    expect(store.listConversations().some((entry) => entry.id === "orphaned")).toBe(
+      false,
+    );
+  });
+
   it("clamps long runtime diagnostics so the file still loads on the next start", async () => {
     const root = await mkdtemp(join(tmpdir(), "assistant-store-clamp-"));
     temporaryDirectories.push(root);

@@ -144,6 +144,41 @@ describe("AssistantTaskStore", () => {
       deliveryError: "企业微信投递失败",
     });
   });
+
+  it("rejects runs whose assistant does not own the task", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-task-owner-"));
+    temporaryDirectories.push(root);
+    const store = new AssistantTaskStore(join(root, "assistant-tasks.json"));
+    await store.initialize();
+    await store.putTask(task());
+
+    await expect(
+      store.appendRun(run({ assistantId: "assistant-two" })),
+    ).rejects.toThrow("助理归属与任务不一致");
+  });
+
+  it("drops persisted runs whose task owner no longer matches", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-task-owner-load-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant-tasks.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 1,
+        tasks: [task()],
+        runs: [run({ assistantId: "assistant-two" })],
+      }),
+      "utf8",
+    );
+
+    const store = new AssistantTaskStore(storePath);
+    await store.initialize();
+    expect(store.listRuns()).toEqual([]);
+    expect(store.getLoadWarnings()).toEqual([
+      expect.stringContaining("1 条记录无法读取"),
+    ]);
+  });
+
   it("skips invalid task records instead of resetting the whole file", async () => {
     const root = await mkdtemp(join(tmpdir(), "assistant-task-partial-"));
     temporaryDirectories.push(root);

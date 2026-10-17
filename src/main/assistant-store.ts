@@ -445,6 +445,8 @@ function parseStore(raw: string): ParsedAssistantStore {
   // Orphaned conversations (their assistant was removed) are dropped
   // silently, as before; only valid records count against the limit.
   const conversationRecords = keepWithinLimit(
+    // Drop orphaned conversations before applying the configured limit so a
+    // stale record cannot consume a slot that belongs to a valid assistant.
     keepUnique(keepValid(parsed.conversations, normalizeConversation)).filter(
       (conversation) => profileIds.has(conversation.assistantId),
     ),

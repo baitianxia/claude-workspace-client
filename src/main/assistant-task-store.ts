@@ -205,11 +205,22 @@ function parseStore(raw: string): {
     tasks = tasks.slice(0, MAX_TASKS);
   }
   const runs = keepValidUnique(parsed.runs, normalizeRun);
+  const taskAssistantIds = new Map(
+    tasks.map((task) => [task.id, task.assistantId]),
+  );
+  const consistentRuns = runs.filter((run) => {
+    const assistantId = taskAssistantIds.get(run.taskId);
+    if (assistantId === undefined || assistantId !== run.assistantId) {
+      droppedRecords += 1;
+      return false;
+    }
+    return true;
+  });
   return {
     data: {
       version: 1,
       tasks,
-      runs: runs.slice(-MAX_STORED_RUNS),
+      runs: consistentRuns.slice(-MAX_STORED_RUNS),
     },
     droppedRecords,
   };
@@ -339,8 +350,12 @@ export class AssistantTaskStore {
     if (!normalized) {
       throw new Error("定时任务运行记录格式无效。");
     }
-    if (!this.data.tasks.some((task) => task.id === normalized.taskId)) {
+    const task = this.data.tasks.find((candidate) => candidate.id === normalized.taskId);
+    if (!task) {
       throw new Error("定时任务运行关联的任务不存在。");
+    }
+    if (task.assistantId !== normalized.assistantId) {
+      throw new Error("定时任务运行的助理归属与任务不一致。");
     }
     if (this.data.runs.some((candidate) => candidate.id === normalized.id)) {
       throw new Error("同一定时任务运行已经存在。");

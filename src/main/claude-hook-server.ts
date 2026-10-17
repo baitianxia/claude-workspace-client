@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -263,6 +263,28 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
         mode: 0o600,
       });
     } catch (error) {
+      // A failed settings write must not leave a listening loopback server or
+      // temporary directory behind.
+      const serverToClose = this.server;
+      const directoryToRemove = this.settingsDirectory;
+      this.server = null;
+      this.port = null;
+      this.settingsDirectory = null;
+      try {
+        serverToClose?.close();
+      } catch (cleanupError) {
+        console.error("Failed to close Claude Code Hook server after settings failure", cleanupError);
+      }
+      if (directoryToRemove) {
+        try {
+          rmSync(directoryToRemove, { recursive: true, force: true });
+        } catch (cleanupError) {
+          console.error(
+            "Failed to remove Claude Code Hook settings after write failure",
+            cleanupError,
+          );
+        }
+      }
       throw new Error(
         `无法写入 Claude Code Hook 配置：${
           error instanceof Error ? error.message : String(error)

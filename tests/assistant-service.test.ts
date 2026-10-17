@@ -119,6 +119,7 @@ class ControllableRunner extends FakeRunner {
 class FakeGateway extends EventEmitter implements AssistantWeComGateway {
   readonly sent: Array<{ botProfileId: string; targetId: string; content: string }> = [];
   readonly sendErrors: Array<Error | undefined> = [];
+  sendGate: Promise<void> | null = null;
   readonly bots: AssistantWeComBotProfile[] = [
     {
       id: "bot-one",
@@ -176,6 +177,9 @@ class FakeGateway extends EventEmitter implements AssistantWeComGateway {
     targetId: string,
     content: string,
   ): Promise<void> {
+    if (this.sendGate) {
+      await this.sendGate;
+    }
     const error = this.sendErrors.shift();
     if (error) {
       throw error;
@@ -477,6 +481,27 @@ describe("AssistantService", () => {
       content: "助理：已同步",
     });
     expect(turn.status).toBe("queued");
+  });
+
+  it("does not start the assistant before the desktop request mirror is delivered", async () => {
+    let releaseRequest!: () => void;
+    const requestDelivered = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    const { service, runner, gateway } = await fixture();
+    gateway.sendGate = requestDelivered;
+    const profile = await service.upsertProfile(request());
+
+    await service.sendDesktopMessage({
+      assistantId: profile.id,
+      text: "先同步后处理",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runner.inputs).toHaveLength(0);
+
+    releaseRequest();
+    await waitFor(() => runner.inputs.length === 1);
+    expect(gateway.sent[0]?.content).toBe("你（来自客户端）：先同步后处理");
   });
 
   it("records desktop mirror delivery failures on the completed turn", async () => {
