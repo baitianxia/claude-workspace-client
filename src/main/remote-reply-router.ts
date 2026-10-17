@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { stripAnsi } from "./claude-session-files";
 
 const DEFAULT_PENDING_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -57,6 +58,8 @@ export interface RemoteReplyAction {
   inputChunks?: string[];
   nextStage?: RemoteReplyStage;
   followUpMessage?: string;
+  /** 1-based menu options the keystrokes will select, for screen checks. */
+  menuSelections?: number[];
 }
 
 export type RegisterPendingResult =
@@ -213,18 +216,24 @@ function singleMenuAction(
   selection: number,
   extras: MenuActionExtras = {},
 ): RemoteReplyAction {
-  return menuAction(
-    singleMenuSelectionInput(selection),
-    singleMenuSelectionChunks(selection),
-    extras,
-  );
+  return {
+    ...menuAction(
+      singleMenuSelectionInput(selection),
+      singleMenuSelectionChunks(selection),
+      extras,
+    ),
+    menuSelections: [selection],
+  };
 }
 
 function multipleMenuAction(selections: number[]): RemoteReplyAction {
-  return menuAction(
-    multipleMenuSelectionInput(selections),
-    multipleMenuSelectionChunks(selections),
-  );
+  return {
+    ...menuAction(
+      multipleMenuSelectionInput(selections),
+      multipleMenuSelectionChunks(selections),
+    ),
+    menuSelections: [...selections],
+  };
 }
 
 /**
@@ -800,4 +809,87 @@ export function terminalInputForRemoteReply(
   reply: string,
 ): string {
   return terminalActionForRemoteReply(pending, reply).input;
+}
+
+// Only the most recent output can show the menu that is currently waiting.
+const SCREEN_CHECK_TAIL_LENGTH = 12_000;
+// A numbered option such as "❯ 1. Yes" or "2.允许". The option text must start
+// with a letter so numbers like "1.5" inside a command are not counted.
+const MENU_OPTION_PATTERN = /(?:^|[\s❯›>│|])(\d{1,2})\.[ \t\u00a0]*\p{L}/gu;
+
+/**
+ * Count the options of the most recently rendered numbered menu, or return
+ * null when no menu can be recognised. Ink redraws the whole menu on every
+ * change, so the last "1." starts the menu that is currently on screen.
+ */
+export function latestMenuOptionCount(screen: string): number | null {
+  const matches = [...screen.matchAll(MENU_OPTION_PATTERN)].map((match) =>
+    Number(match[1]),
+  );
+  const start = matches.lastIndexOf(1);
+  if (start < 0) {
+    return null;
+  }
+  let count = 0;
+  for (const value of matches.slice(start)) {
+    if (value === count + 1) {
+      count += 1;
+    } else if (value <= count) {
+      break;
+    }
+  }
+  return count > 0 ? count : null;
+}
+
+/**
+ * Check that the terminal still shows the menu a remote reply was computed
+ * for, before any navigation keys are written. Remote replies select options
+ * by position, so a menu with a different number of options (Claude Code
+ * changed its layout, or the prompt was already handled locally) would make
+ * the same keys pick a different answer. Returns a reason to refuse the
+ * reply, or null when the screen matches or cannot be recognised.
+ */
+export function remoteMenuMismatch(
+  pending: PendingRemoteReply,
+  action: RemoteReplyAction,
+  screen: string,
+): string | null {
+  if (pending.replyStage || !action.menuSelections?.length) {
+    return null;
+  }
+  const text = stripAnsi(screen).slice(-SCREEN_CHECK_TAIL_LENGTH);
+  if (pending.kind === "permission") {
+    // The notice lists allow-once, each "don't ask again" suggestion and
+    // deny; the keystrokes assume exactly that many options on screen.
+    const expected =
+      Math.max(0, Math.floor(pending.permissionSuggestionCount ?? 0)) + 2;
+    const visible = latestMenuOptionCount(text);
+    if (visible !== null && visible !== expected) {
+      return `终端当前的权限菜单有 ${visible} 个选项，与通知中的 ${expected} 个选项不一致`;
+    }
+    return null;
+  }
+  if (
+    pending.kind === "question" &&
+    (pending.questionSelectionModes?.length ?? 0) === 1
+  ) {
+    const labels = pending.questionOptionLabels?.[0] ?? [];
+    const compactScreen = text.replace(/\s+/gu, "");
+    for (const selection of action.menuSelections) {
+      const label = labels[selection - 1];
+      if (!label) {
+        // "Type something" / "Chat about this" are not in the label list.
+        continue;
+      }
+      const probe = [...label.replace(/\s+/gu, "")].slice(0, 12).join("");
+      if (
+        probe &&
+        latestMenuOptionCount(text) !== null &&
+        !compactScreen.includes(probe)
+      ) {
+        return `终端当前的菜单中没有选项“${label}”`;
+      }
+    }
+  }
+  return null;
 }

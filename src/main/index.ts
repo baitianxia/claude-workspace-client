@@ -1,6 +1,14 @@
-import { app, BrowserWindow, dialog, safeStorage, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  powerMonitor,
+  safeStorage,
+  shell,
+} from "electron";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { appIndexPath, isAppPageUrl } from "./app-navigation";
 import { ClaudeLocator } from "./claude-locator";
 import { AssistantService } from "./assistant-service";
 import { AssistantStore } from "./assistant-store";
@@ -11,6 +19,10 @@ import { terminateTrackedClaudeProcesses } from "./claude-agent-sdk-process";
 import { ClaudeCodeAssistantRunner } from "./claude-code-assistant-runner";
 import { ClaudeCodeAssistantTaskRunner } from "./claude-code-assistant-task-runner";
 import { ClaudeHookServer } from "./claude-hook-server";
+import {
+  findClaudeTranscript,
+  findClaudeTranscriptSync,
+} from "./claude-session-files";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
 import { withTimeout } from "./promise-timeout";
@@ -33,6 +45,9 @@ let shutdownPromise: Promise<void> | null = null;
 let forceExitTimer: NodeJS.Timeout | null = null;
 
 const SHUTDOWN_STEP_TIMEOUT_MILLISECONDS = 8_000;
+// Without keyboard or mouse input for this long (or with the screen locked)
+// the owner counts as away, and completion notices go to WeCom.
+const OWNER_AWAY_IDLE_SECONDS = 180;
 const FORCE_EXIT_TIMEOUT_MILLISECONDS = 20_000;
 
 function createWindow(backgroundColor = "#12110f"): BrowserWindow {
@@ -60,15 +75,13 @@ function createWindow(backgroundColor = "#12110f"): BrowserWindow {
     return { action: "deny" };
   });
 
+  // Only the app's own page may be loaded in this window. Allowing any
+  // file:// URL let a file dropped onto the window replace the whole UI (and
+  // that page would still see the preload API).
   window.webContents.on("will-navigate", (event, url) => {
-    const developmentUrl = process.env.VITE_DEV_SERVER_URL;
-    if (developmentUrl && url.startsWith(developmentUrl)) {
-      return;
+    if (!isAppPageUrl(url, process.env.VITE_DEV_SERVER_URL)) {
+      event.preventDefault();
     }
-    if (url.startsWith("file://")) {
-      return;
-    }
-    event.preventDefault();
   });
 
   window.once("ready-to-show", () => window.show());
@@ -125,7 +138,7 @@ function createWindow(backgroundColor = "#12110f"): BrowserWindow {
   if (developmentUrl) {
     void window.loadURL(developmentUrl);
   } else {
-    void window.loadFile(join(__dirname, "../../renderer/index.html"));
+    void window.loadFile(appIndexPath());
   }
 
   return window;
@@ -169,6 +182,8 @@ async function startApplication(): Promise<void> {
     process.platform,
     projectStore.listSessions(),
     hookLaunchOptions,
+    undefined,
+    (claudeSessionId) => findClaudeTranscriptSync(claudeSessionId),
   );
   await projectStore.replaceSessions(sessionManager.listSessions());
 
@@ -178,6 +193,7 @@ async function startApplication(): Promise<void> {
     undefined,
     undefined,
     hookAvailabilityError,
+    () => powerMonitor.getSystemIdleState(OWNER_AWAY_IDLE_SECONDS) !== "active",
   );
   const wecomAssistantEntries = new AssistantWeComBotManager(
     assistantStore,
@@ -247,6 +263,8 @@ async function startApplication(): Promise<void> {
     (projectId) => projectStore.getProject(projectId),
     wecomAssistantEntries,
     assistantTasks,
+    Date.now,
+    (claudeSessionId) => findClaudeTranscript(claudeSessionId),
   );
   await assistantService.initialize();
   resolveAssistantServiceReady(assistantService);
@@ -257,6 +275,19 @@ async function startApplication(): Promise<void> {
   const temporaryWorkspace = new TemporaryWorkspace(
     join(app.getPath("userData"), "temporary-workspaces"),
   );
+  // Clean up temporary session directories that no saved session uses any
+  // more (e.g. a removal that failed while the process still held them).
+  const sessionsForCleanup = sessionManager;
+  void temporaryWorkspace
+    .removeOrphans(() =>
+      sessionsForCleanup
+        .listSessions()
+        .filter((session) => session.projectId === null)
+        .map((session) => session.cwd),
+    )
+    .catch((error: unknown) =>
+      console.error("Failed to clean temporary workspaces", error),
+    );
   removeIpcHandlers = registerIpcHandlers({
     window: mainWindow,
     projectStore,

@@ -9,6 +9,7 @@ import {
 import type {
   AssistantProfileRecord,
   AssistantSnapshot,
+  AssistantTaskAction,
   AssistantTaskRunRecord,
   AssistantTurnRecord,
   ProjectRecord,
@@ -226,6 +227,7 @@ export function AssistantPanel({
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dataWarningsDismissed, setDataWarningsDismissed] = useState(false);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const messageInputRef = useRef<HTMLTextAreaElement | null>(null);
   const draftDirtyRef = useRef(false);
@@ -626,6 +628,7 @@ export function AssistantPanel({
           </header>
 
           {error ? <div className="assistant-inline-error" role="alert">{error}<button type="button" onClick={() => setError(null)}>×</button></div> : null}
+          {(assistant.dataWarnings?.length ?? 0) > 0 && !dataWarningsDismissed ? <div className="assistant-inline-error" role="alert">{`数据加载提示：${(assistant.dataWarnings ?? []).join(" ")}`}<button type="button" aria-label="关闭数据加载提示" onClick={() => setDataWarningsDismissed(true)}>×</button></div> : null}
           {editing ? (
             <form className="assistant-config assistant-config-form assistant-config-form--profile" onSubmit={saveProfile}>
               <div className="assistant-config-intro"><strong>保持简单</strong><span>选择独立运行目录、写一句助理定位，就可以开始对话。定时任务以后直接在聊天里告诉它。</span></div>
@@ -780,7 +783,7 @@ export function AssistantPanel({
                     {visibleTurns.length === 0 ? <div className="assistant-welcome"><span className="assistant-avatar assistant-avatar--large">{selected.name.slice(0, 1)}</span><h3>和 {selected.name} 开始对话</h3><p>你也可以直接说：“每个工作日 9 点帮我整理行业动态，有异常一定通知我。”</p></div> : visibleTurns.map((turn) => (
                       <div className="assistant-turn" key={turn.id}>
                         <article className="assistant-message assistant-message--user"><header><span>你</span><time>{shortTime(turn.createdAt)}</time></header><p>{turn.request}</p>{turn.source === "wecom" ? <small>来自企业微信</small> : null}</article>
-                        <article className="assistant-message assistant-message--agent"><header><span>{selected.name}</span><small className={`assistant-turn-state assistant-turn-state--${turn.status}`}>{turnState(turn)}</small></header>{turn.response ? <MarkdownPreview content={turn.response} /> : turn.error ? <p className="assistant-message-error">{turn.error}</p> : <div className="assistant-thinking"><i /><i /><i /></div>}{turn.deliveryError ? <p className="assistant-delivery-error">{turn.deliveryError}</p> : null}</article>
+                        <article className="assistant-message assistant-message--agent"><header><span>{selected.name}</span><small className={`assistant-turn-state assistant-turn-state--${turn.status}`}>{turnState(turn)}</small></header>{turn.notice ? <p className="assistant-turn-notice">{turn.notice}</p> : null}{turn.response ? <MarkdownPreview content={turn.response} /> : turn.error ? <p className="assistant-message-error">{turn.error}</p> : <div className="assistant-thinking"><i /><i /><i /></div>}{turn.deliveryError ? <p className="assistant-delivery-error">{turn.deliveryError}</p> : null}</article>
                       </div>
                     ))}
                     <div ref={messageEndRef} />
@@ -844,11 +847,20 @@ export function AssistantPanel({
                     <strong>{assistant.schedulerActive ? "调度器运行中" : "调度器已停止"}</strong>
                     <small>{assistant.lastSchedulerCheckAt ? `最近检查 ${shortTime(assistant.lastSchedulerCheckAt)}` : "尚未完成首次检查"}</small>
                   </div>
-                  <header className="assistant-task-heading"><div><h3>独立执行的定时任务</h3><p>在主人聊天里创建和修改；可指定企业微信 userid 或群 chatid 作为结果目标；每次运行不读取主聊天历史，也不复用上一次任务会话。</p></div><button type="button" className="primary-button" onClick={() => { setTab("chat"); setMessage("请帮我创建一个定时任务："); requestComposerFocus(); }}>在聊天里创建</button></header>
+                  <header className="assistant-task-heading"><div><h3>独立执行的定时任务</h3><p>在主人聊天里创建和修改，也可以在卡片上暂停、立即运行、停止或删除；可指定企业微信 userid 或群 chatid 作为结果目标；每次运行不读取主聊天历史，也不复用上一次任务会话。</p></div><button type="button" className="primary-button" onClick={() => { setTab("chat"); setMessage("请帮我创建一个定时任务："); requestComposerFocus(); }}>在聊天里创建</button></header>
                   {tasks.length === 0 ? <div className="assistant-task-empty"><strong>还没有定时任务</strong><span>告诉助理什么时候做什么，它会确认并保存 Cron 计划。</span></div> : <div className="assistant-task-list">{tasks.map((task) => {
                     const latest = latestRunByTask.get(task.id);
                     const failed = latest && (latest.status === "failed" || latest.status === "timed-out" || latest.status === "cancelled" || latest.deliveryError);
-                    return <article key={task.id} className={failed ? "assistant-task-card assistant-task-card--failed" : "assistant-task-card"}><header><div><span className={`status-dot ${task.enabled ? "status-dot--online" : "status-dot--offline"}`} /><strong>{task.name}</strong></div><code>{task.schedule}</code></header><p>{task.prompt}</p><small className="assistant-task-delivery-target">{taskDeliveryTargetLabel(task)}</small><footer><span className={`assistant-task-run-state assistant-task-run-state--${latest?.status ?? "idle"}`}>{taskRunState(latest)}</span>{latest ? <time>{shortTime(latest.finishedAt ?? latest.startedAt ?? latest.createdAt)}</time> : null}</footer>{latest?.error ? <div className="assistant-task-run-error"><strong>执行异常</strong><span>{latest.error}</span></div> : null}{latest?.deliveryError ? <div className="assistant-task-run-error"><strong>通知目标失败</strong><span>{latest.deliveryError}</span></div> : null}{latest?.response ? <details><summary>查看最近结果</summary><MarkdownPreview content={latest.response} /></details> : null}</article>;
+                    const taskRunning = assistant.runningTaskIds.includes(task.id);
+                    const manageTask = (action: AssistantTaskAction) =>
+                      void runSimpleAction(() =>
+                        window.claudeWorkspace.manageAssistantTask({
+                          assistantId: selected.id,
+                          taskId: task.id,
+                          action,
+                        }),
+                      );
+                    return <article key={task.id} className={failed ? "assistant-task-card assistant-task-card--failed" : "assistant-task-card"}><header><div><span className={`status-dot ${task.enabled ? "status-dot--online" : "status-dot--offline"}`} /><strong>{task.name}</strong></div><code>{task.schedule}</code></header><p>{task.prompt}</p><small className="assistant-task-delivery-target">{taskDeliveryTargetLabel(task)}</small><footer><span className={`assistant-task-run-state assistant-task-run-state--${latest?.status ?? "idle"}`}>{taskRunState(latest)}</span>{latest ? <time>{shortTime(latest.finishedAt ?? latest.startedAt ?? latest.createdAt)}</time> : null}</footer><div className="assistant-task-actions">{taskRunning ? <button type="button" className="assistant-task-action assistant-task-action--danger" disabled={busy} onClick={() => manageTask("cancel-run")}>停止本次运行</button> : <><button type="button" className="assistant-task-action" disabled={busy || !selected.enabled} title={selected.enabled ? undefined : "助理已停用"} onClick={() => manageTask("run-now")}>立即运行</button><button type="button" className="assistant-task-action" disabled={busy || (!task.enabled && !selected.enabled)} onClick={() => manageTask(task.enabled ? "pause" : "resume")}>{task.enabled ? "暂停" : "恢复"}</button><button type="button" className="assistant-task-action assistant-task-action--danger" disabled={busy} onClick={() => { if (window.confirm(`删除定时任务“${task.name}”？运行记录会保留在客户端历史中。`)) manageTask("delete"); }}>删除</button></>}</div>{latest?.error ? <div className="assistant-task-run-error"><strong>执行异常</strong><span>{latest.error}</span></div> : null}{latest?.deliveryError ? <div className="assistant-task-run-error"><strong>通知目标失败</strong><span>{latest.deliveryError}</span></div> : null}{latest?.response ? <details><summary>查看最近结果</summary><MarkdownPreview content={latest.response} /></details> : null}</article>;
                   })}</div>}
                 </div>
               )}

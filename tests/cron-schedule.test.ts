@@ -38,6 +38,25 @@ describe("cron schedule", () => {
     );
   });
 
+  it("treats a stepped wildcard day field as unrestricted like Vixie cron", () => {
+    // "*/2" starts with "*", so both day fields must match: an odd day that
+    // is also a Monday. 2026-08-31 (Mon, 31st) matches; 2026-09-01 (Tue,
+    // 1st) and 2026-09-14 (Mon, 14th) do not.
+    expect(matchesCronSchedule("0 9 */2 * 1", new Date(2026, 7, 31, 9, 0))).toBe(
+      true,
+    );
+    expect(matchesCronSchedule("0 9 */2 * 1", new Date(2026, 8, 1, 9, 0))).toBe(
+      false,
+    );
+    expect(matchesCronSchedule("0 9 */2 * 1", new Date(2026, 8, 14, 9, 0))).toBe(
+      false,
+    );
+    // An explicit range is restricted, so the OR rule still applies.
+    expect(matchesCronSchedule("0 9 1-31/2 * 1", new Date(2026, 8, 1, 9, 0))).toBe(
+      true,
+    );
+  });
+
   it("normalizes whitespace and rejects unsupported expressions", () => {
     expect(parseCronSchedule("  0   9  * *  1-5 ").expression).toBe(
       "0 9 * * 1-5",

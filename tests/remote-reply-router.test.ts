@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  latestMenuOptionCount,
+  remoteMenuMismatch,
   RemoteReplyRouter,
   terminalActionForRemoteReply,
   terminalInputForRemoteReply,
@@ -271,6 +273,7 @@ describe("RemoteReplyRouter", () => {
       inputChunks: [DOWN, DOWN, "\r"],
       nextStage: "question-custom-answer",
       followUpMessage: expect.stringContaining("Type something"),
+      menuSelections: [3],
     });
     expect(
       terminalActionForRemoteReply(customPending, "输入其他回答"),
@@ -319,6 +322,7 @@ describe("RemoteReplyRouter", () => {
       inputChunks: [DOWN, DOWN, DOWN, "\r"],
       nextStage: "question-chat-message",
       followUpMessage: expect.stringContaining("Chat about this"),
+      menuSelections: [4],
     });
     expect(
       terminalActionForRemoteReply(chatPending, "Chat about this"),
@@ -644,5 +648,80 @@ describe("RemoteReplyRouter", () => {
         lineSeparated.reply,
       ),
     ).toBe("213\t4\r");
+  });
+});
+
+describe("remote menu screen check", () => {
+  const permissionMenu = (options: string[]) =>
+    "  echo version 1.5 && npm test\r\n Do you want to proceed?\r\n" +
+    options
+      .map(
+        (option, index) =>
+          `${index === 0 ? "\u001b[36m❯\u001b[39m" : " "} ${index + 1}.\u001b[1C${option}`,
+      )
+      .join("\r\n");
+
+  it("counts the options of the latest rendered menu", () => {
+    const two = permissionMenu(["Yes", "No, and tell Claude what to do differently"]);
+    const three = permissionMenu(["Yes", "Yes, and don't ask again", "No"]);
+    const strip = (value: string) => value.replace(/\u001b\[[0-9;]*[A-Za-z]/gu, "");
+
+    expect(latestMenuOptionCount(strip(two))).toBe(2);
+    expect(latestMenuOptionCount(strip(three))).toBe(3);
+    // An older render above the current one does not count.
+    expect(latestMenuOptionCount(strip(`${three}\u001b[5A${two}`))).toBe(2);
+    expect(latestMenuOptionCount("没有菜单的普通输出 1.5")).toBeNull();
+  });
+
+  it("refuses permission keys when the menu has a different number of options", () => {
+    const router = new RemoteReplyRouter(() => "PERMIT");
+    const pending = router.register(
+      "zhangsan",
+      attention("session-a", "launch-a", {
+        kind: "permission",
+        inputMode: "menu",
+        permissionSuggestionCount: 0,
+      }),
+    ).pending;
+    const deny = terminalActionForRemoteReply(pending, "2");
+
+    expect(deny.menuSelections).toEqual([2]);
+    expect(
+      remoteMenuMismatch(pending, deny, permissionMenu(["Yes", "No"])),
+    ).toBeNull();
+    expect(
+      remoteMenuMismatch(
+        pending,
+        deny,
+        permissionMenu(["Yes", "Yes, and don't ask again", "No"]),
+      ),
+    ).toContain("3 个选项");
+    // Nothing recognisable on screen: do not block the reply.
+    expect(remoteMenuMismatch(pending, deny, "")).toBeNull();
+  });
+
+  it("refuses a question answer whose option is not on screen", () => {
+    const router = new RemoteReplyRouter(() => "ASKKK");
+    const pending = router.register(
+      "zhangsan",
+      attention("session-q", "launch-q", {
+        kind: "question",
+        inputMode: "menu",
+        questionSelectionModes: ["single"],
+        questionOptionLabels: [["方案 A：直接发布", "方案 B：先灰度"]],
+      }),
+    ).pending;
+    const action = terminalActionForRemoteReply(pending, "2");
+
+    expect(
+      remoteMenuMismatch(
+        pending,
+        action,
+        "❯ 1. 方案 A：直接发布\r\n  2. 方案 B：先灰度\r\n  3. Type something.\r\n",
+      ),
+    ).toBeNull();
+    expect(
+      remoteMenuMismatch(pending, action, "❯ 1. Yes\r\n  2. No\r\n"),
+    ).toContain("方案 B：先灰度");
   });
 });

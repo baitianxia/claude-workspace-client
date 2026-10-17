@@ -27,11 +27,13 @@ interface FakePty {
   process: IPty;
   writes: string[];
   emitExit(exitCode: number): void;
+  emitData(data: string): void;
 }
 
 function fakePty(pid: number): FakePty {
   let exitListener: (event: { exitCode: number; signal?: number }) => void = () =>
     undefined;
+  let dataListener: (data: string) => void = () => undefined;
   const writes: string[] = [];
   return {
     process: {
@@ -40,7 +42,10 @@ function fakePty(pid: number): FakePty {
       cols: 120,
       rows: 36,
       handleFlowControl: false,
-      onData: () => ({ dispose: () => undefined }),
+      onData: (listener) => {
+        dataListener = listener;
+        return { dispose: () => undefined };
+      },
       onExit: (listener) => {
         exitListener = listener;
         return { dispose: () => undefined };
@@ -54,6 +59,7 @@ function fakePty(pid: number): FakePty {
     },
     writes,
     emitExit: (exitCode) => exitListener({ exitCode, signal: 0 }),
+    emitData: (data) => dataListener(data),
   };
 }
 
@@ -293,6 +299,86 @@ describe("WeComBridge", () => {
     client.emit("message", incomingMessage("unknown-menu", "拒绝", "zhangsan", content));
     await vi.waitFor(() => expect(client.replies).toContainEqual(expect.stringContaining("未提供完整权限选项")));
     expect(pty.writes).toEqual([]);
+    bridge.dispose();
+  });
+
+  it("only pushes completion notices while the owner is away from the computer", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe", (() => pty.process) as PtySpawner, "win32", [],
+      (_id, currentLaunchId) => { launchId = currentLaunchId; return { args: [] }; },
+    );
+    const session = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const client = new FakeWeComClient();
+    let away = false;
+    const bridge = new WeComBridge(
+      manager,
+      () => [],
+      undefined,
+      () => client,
+      undefined,
+      () => away,
+    );
+    bridge.configure({ enabled: true, botId: "bot-id", targetUserId: "zhangsan", secret: "secret", hasSecret: true });
+    client.emit("authenticated");
+    const stop = (message: string): ClaudeHookEvent => ({
+      workspaceSessionId: session.id,
+      launchId,
+      payload: {
+        session_id: `claude-${session.id}`,
+        transcript_path: `C:\\transcripts\\${session.id}.jsonl`,
+        cwd: "C:\\work",
+        hook_event_name: "Stop",
+        last_assistant_message: message,
+      },
+    });
+
+    bridge.handleClaudeHook(stop("第一轮已经完成。"));
+    expect(bridge.getState().lastClaudeHookDetail).toContain("你正在使用电脑");
+
+    // Prompts that block Claude Code are pushed even while the owner is here.
+    bridge.handleClaudeHook(hook(session.id, launchId, "npm test"));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    expect(markdownContent(client.sent[0].body)).toContain("npm test");
+
+    away = true;
+    bridge.handleClaudeHook(stop("第二轮已经完成。"));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    expect(markdownContent(client.sent[1].body)).toContain("第二轮已经完成");
+    bridge.dispose();
+  });
+
+  it("refuses a remote menu reply when the terminal shows a different menu", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe", (() => pty.process) as PtySpawner, "win32", [],
+      (_id, currentLaunchId) => { launchId = currentLaunchId; return { args: [] }; },
+    );
+    const session = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const client = new FakeWeComClient();
+    const bridge = new WeComBridge(manager, () => [], undefined, () => client);
+    bridge.configure({ enabled: true, botId: "bot-id", targetUserId: "zhangsan", secret: "secret", hasSecret: true });
+    client.emit("authenticated");
+
+    // The notice was computed for allow / deny (two options)...
+    bridge.handleClaudeHook(hook(session.id, launchId, "npm test"));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const code = routeCode(markdownContent(client.sent[0].body));
+
+    // ...but the terminal shows three, so position 2 would mean something else.
+    pty.emitData("\u001b[36m❯\u001b[39m 1. Yes\r\n  2. Yes, and don't ask again\r\n  3. No\r\n");
+    client.emit("message", incomingMessage("menu-mismatch", `${code} 2`));
+    await vi.waitFor(() =>
+      expect(client.replies).toContainEqual(expect.stringContaining("未发送任何按键")),
+    );
+    expect(pty.writes).toEqual([]);
+
+    // Once the screen matches the notice, the same code is answered normally.
+    pty.emitData("❯ 1. Yes\r\n  2. No, and tell Claude what to do differently\r\n");
+    client.emit("message", incomingMessage("menu-match", `${code} 2`));
+    await vi.waitFor(() => expect(pty.writes).toEqual([DOWN, "\r"]));
     bridge.dispose();
   });
 

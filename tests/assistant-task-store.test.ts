@@ -144,4 +144,34 @@ describe("AssistantTaskStore", () => {
       deliveryError: "企业微信投递失败",
     });
   });
+  it("skips invalid task records instead of resetting the whole file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-task-partial-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant-tasks.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 1,
+        tasks: [task(), { ...task(), id: "task-bad-cron", schedule: "every day" }],
+        runs: [
+          run({ status: "succeeded", finishedAt: 3, response: "完成" }),
+          run({ id: "run-bad", status: "unknown-status" as never }),
+        ],
+      }),
+      "utf8",
+    );
+
+    const store = new AssistantTaskStore(storePath);
+    await store.initialize();
+
+    expect(store.listTasks()).toEqual([
+      expect.objectContaining({ id: "task-one" }),
+    ]);
+    expect(store.listRuns()).toEqual([
+      expect.objectContaining({ id: "run-one", response: "完成" }),
+    ]);
+    expect(store.getLoadWarnings()).toEqual([
+      expect.stringContaining("2 条记录无法读取"),
+    ]);
+  });
 });

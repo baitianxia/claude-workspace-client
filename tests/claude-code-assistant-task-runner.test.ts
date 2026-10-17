@@ -99,6 +99,40 @@ describe("ClaudeCodeAssistantTaskRunner", () => {
     }
   });
 
+  it("applies a cancellation that arrives before the query is registered", async () => {
+    let closed = 0;
+    const runner = new ClaudeCodeAssistantTaskRunner(
+      () => "/usr/bin/claude",
+      (() => {
+        const query = {
+          close: () => {
+            closed += 1;
+          },
+          interrupt: async () => undefined,
+          async *[Symbol.asyncIterator]() {
+            yield {
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              result: "不应采用的结果",
+            };
+          },
+        };
+        return query as unknown as ReturnType<ClaudeTaskSdkQueryFactory>;
+      }) as ClaudeTaskSdkQueryFactory,
+    );
+
+    expect(runner.cancel("run-one")).toBe(false);
+    await expect(runner.run(taskInput())).resolves.toMatchObject({
+      status: "cancelled",
+    });
+    expect(closed).toBeGreaterThan(0);
+    // The pending cancellation is consumed and does not affect later runs.
+    await expect(
+      runner.run(taskInput({ runId: "run-two" })),
+    ).resolves.toMatchObject({ status: "succeeded" });
+  });
+
   it("builds a task-only prompt without a main chat transcript", () => {
     const prompt = buildAssistantTaskPrompt(taskInput());
 

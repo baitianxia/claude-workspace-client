@@ -677,6 +677,27 @@ export function installDevelopmentPreview(): void {
         );
       publishAssistant();
     },
+    manageAssistantTask: async ({ taskId, action }) => {
+      const task = snapshot.assistant.tasks.find(
+        (candidate) => candidate.id === taskId,
+      );
+      if (!task) {
+        throw new Error("Preview task does not exist.");
+      }
+      if (action === "pause" || action === "resume") {
+        task.enabled = action === "resume";
+      } else if (action === "delete") {
+        snapshot.assistant.tasks = snapshot.assistant.tasks.filter(
+          (candidate) => candidate.id !== taskId,
+        );
+      } else if (action === "cancel-run") {
+        snapshot.assistant.runningTaskIds =
+          snapshot.assistant.runningTaskIds.filter(
+            (candidate) => candidate !== taskId,
+          );
+      }
+      publishAssistant();
+    },
     createSession: async (request) => {
       const project =
         request.scope === "project"
@@ -744,6 +765,7 @@ export function installDevelopmentPreview(): void {
       }
     },
     readClipboardText: async () => clipboardText,
+    getPathsForFiles: (files) => Array.from(files).map((file) => file.name),
     writeClipboardText: async (text) => {
       clipboardText = text;
     },

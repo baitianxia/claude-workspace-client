@@ -159,36 +159,59 @@ function normalizeRun(value: unknown): AssistantTaskRunRecord | null {
   return clone(candidate as AssistantTaskRunRecord);
 }
 
-function parseStore(raw: string): AssistantTaskStoreData {
+/**
+ * Parse task data, skipping individual bad records instead of rejecting the
+ * whole file. Only a structurally unreadable file is treated as corrupt.
+ */
+function parseStore(raw: string): {
+  data: AssistantTaskStoreData;
+  droppedRecords: number;
+} {
   const parsed = JSON.parse(raw) as {
     version?: unknown;
     tasks?: unknown;
     runs?: unknown;
-  };
+  } | null;
   if (
+    !parsed ||
+    typeof parsed !== "object" ||
     parsed.version !== 1 ||
     !Array.isArray(parsed.tasks) ||
     !Array.isArray(parsed.runs)
   ) {
     throw new Error("Assistant task data has an unsupported format.");
   }
-  const tasks = parsed.tasks.map(normalizeTask);
-  const runs = parsed.runs.map(normalizeRun);
-  if (
-    tasks.some((entry) => entry === null) ||
-    runs.some((entry) => entry === null) ||
-    tasks.length > MAX_TASKS ||
-    new Set((tasks as AssistantTaskRecord[]).map((entry) => entry.id)).size !==
-      tasks.length ||
-    new Set((runs as AssistantTaskRunRecord[]).map((entry) => entry.id)).size !==
-      runs.length
-  ) {
-    throw new Error("Assistant task data contains invalid records.");
+  let droppedRecords = 0;
+  const keepValidUnique = <T extends { id: string }>(
+    values: unknown[],
+    normalize: (value: unknown) => T | null,
+  ): T[] => {
+    const seen = new Set<string>();
+    const kept: T[] = [];
+    for (const value of values) {
+      const normalized = normalize(value);
+      if (!normalized || seen.has(normalized.id)) {
+        droppedRecords += 1;
+        continue;
+      }
+      seen.add(normalized.id);
+      kept.push(normalized);
+    }
+    return kept;
+  };
+  let tasks = keepValidUnique(parsed.tasks, normalizeTask);
+  if (tasks.length > MAX_TASKS) {
+    droppedRecords += tasks.length - MAX_TASKS;
+    tasks = tasks.slice(0, MAX_TASKS);
   }
+  const runs = keepValidUnique(parsed.runs, normalizeRun);
   return {
-    version: 1,
-    tasks: tasks as AssistantTaskRecord[],
-    runs: (runs as AssistantTaskRunRecord[]).slice(-MAX_STORED_RUNS),
+    data: {
+      version: 1,
+      tasks,
+      runs: runs.slice(-MAX_STORED_RUNS),
+    },
+    droppedRecords,
   };
 }
 
@@ -196,6 +219,7 @@ export class AssistantTaskStore {
   private data: AssistantTaskStoreData = clone(EMPTY_STORE);
   private initialized = false;
   private persistQueue: Promise<void> = Promise.resolve();
+  private readonly loadWarnings: string[] = [];
 
   constructor(private readonly storePath: string) {}
 
@@ -209,14 +233,33 @@ export class AssistantTaskStore {
       if (!storeStat.isFile() || storeStat.size > MAX_STORE_BYTES) {
         throw new Error("Assistant task data file is not a regular file or is too large.");
       }
-      this.data = parseStore(await readFile(this.storePath, "utf8"));
+      const parsed = parseStore(await readFile(this.storePath, "utf8"));
+      this.data = parsed.data;
+      if (parsed.droppedRecords > 0) {
+        const backupPath = await this.backupCorruptStore().catch(() => undefined);
+        this.loadWarnings.push(
+          `定时任务数据中有 ${parsed.droppedRecords} 条记录无法读取，已跳过${
+            backupPath ? `；原文件已备份到 ${backupPath}` : "；原文件备份失败"
+          }。`,
+        );
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        await this.backupCorruptStore().catch(() => undefined);
+        const backupPath = await this.backupCorruptStore().catch(() => undefined);
+        this.loadWarnings.push(
+          `定时任务数据文件无法读取，已重置为空${
+            backupPath ? `；原文件已备份到 ${backupPath}` : "；原文件备份失败"
+          }。`,
+        );
       }
       this.data = clone(EMPTY_STORE);
     }
     this.initialized = true;
+  }
+
+  /** Problems found while loading the data file, for display to the owner. */
+  getLoadWarnings(): string[] {
+    return [...this.loadWarnings];
   }
 
   listTasks(assistantId?: string): AssistantTaskRecord[] {
@@ -399,11 +442,10 @@ export class AssistantTaskStore {
     return operation;
   }
 
-  private async backupCorruptStore(): Promise<void> {
-    await copyFile(
-      this.storePath,
-      `${this.storePath}.corrupt-${Date.now()}.json`,
-    );
+  private async backupCorruptStore(): Promise<string> {
+    const backupPath = `${this.storePath}.corrupt-${Date.now()}.json`;
+    await copyFile(this.storePath, backupPath);
+    return backupPath;
   }
 
   private assertInitialized(): void {

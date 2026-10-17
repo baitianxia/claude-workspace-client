@@ -79,7 +79,9 @@ describe("AssistantStore", () => {
 
     const restored = new AssistantStore(storePath);
     await restored.initialize();
-    expect(await restored.recoverInterruptedTurns(100)).toBe(1);
+    expect(await restored.recoverInterruptedTurns(100)).toEqual([
+      expect.objectContaining({ id: "turn-one", status: "failed" }),
+    ]);
     expect(restored.listTurns()).toEqual([
       expect.objectContaining({
         id: "turn-one",
@@ -213,7 +215,7 @@ describe("AssistantStore", () => {
     expect(await readFile(legacyPath, "utf8")).toContain("legacy-job");
   });
 
-  it("rejects persisted non-owner conversations as corrupt data", async () => {
+  it("drops persisted non-owner conversations without discarding the assistant", async () => {
     const root = await mkdtemp(join(tmpdir(), "assistant-store-owner-only-"));
     temporaryDirectories.push(root);
     const storePath = join(root, "assistant.json");
@@ -238,9 +240,107 @@ describe("AssistantStore", () => {
     const store = new AssistantStore(storePath);
     await store.initialize();
 
-    expect(store.listProfiles()).toEqual([]);
+    // The non-owner conversation is never loaded, but one bad record must not
+    // wipe every assistant, binding and chat history in the file.
+    expect(store.listProfiles()).toEqual([
+      expect.objectContaining({ id: "assistant-one" }),
+    ]);
+    expect(store.listConversations()).toEqual([]);
     expect((await readdir(root)).some((name) => name.includes(".corrupt-"))).toBe(
       true,
     );
+    expect(store.getLoadWarnings()).toEqual([
+      expect.stringContaining("1 条记录无法读取"),
+    ]);
+  });
+
+  it("skips individual invalid turns and keeps the rest of the data", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-store-partial-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        profiles: [profile()],
+        conversations: [conversation()],
+        turns: [
+          { ...turn(), status: "succeeded", response: "好的" },
+          {
+            ...turn(),
+            id: "turn-too-long-error",
+            status: "failed",
+            error: "错".repeat(10_001),
+          },
+          { ...turn(), status: "failed" },
+        ],
+        wecomBots: [],
+        legacyWeComBotsImported: true,
+      }),
+      "utf8",
+    );
+
+    const store = new AssistantStore(storePath);
+    await store.initialize();
+
+    expect(store.listProfiles()).toHaveLength(1);
+    expect(store.listTurns()).toEqual([
+      expect.objectContaining({ id: "turn-one", response: "好的" }),
+    ]);
+    expect(store.getLoadWarnings()).toEqual([
+      expect.stringContaining("2 条记录无法读取"),
+    ]);
+    expect((await readdir(root)).some((name) => name.includes(".corrupt-"))).toBe(
+      true,
+    );
+  });
+
+  it("reports and backs up an unreadable data file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-store-unreadable-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant.json");
+    await writeFile(storePath, "{ not json", "utf8");
+
+    const store = new AssistantStore(storePath);
+    await store.initialize();
+
+    expect(store.listProfiles()).toEqual([]);
+    expect(store.getLoadWarnings()).toEqual([
+      expect.stringContaining("已重置为空"),
+    ]);
+    expect(store.getLoadWarnings()[0]).toContain(".corrupt-");
+  });
+
+  it("clamps long runtime diagnostics so the file still loads on the next start", async () => {
+    const root = await mkdtemp(join(tmpdir(), "assistant-store-clamp-"));
+    temporaryDirectories.push(root);
+    const storePath = join(root, "assistant.json");
+    const first = new AssistantStore(storePath);
+    await first.initialize();
+    await first.putProfile(profile());
+    await first.putConversation(conversation());
+    await first.appendTurn(turn());
+    await first.completeTurn(
+      {
+        ...turn(),
+        status: "failed",
+        finishedAt: 4,
+        error: "超".repeat(12_000),
+        deliveryError: `企业微信回复失败：${"长".repeat(8_000)}；企业微信回复失败：${"长".repeat(8_000)}`,
+      },
+      undefined,
+      4,
+    );
+
+    const stored = first.listTurns()[0];
+    expect([...(stored.error ?? "")].length).toBe(10_000);
+    expect([...(stored.deliveryError ?? "")].length).toBe(10_000);
+
+    const restored = new AssistantStore(storePath);
+    await restored.initialize();
+    expect(restored.getLoadWarnings()).toEqual([]);
+    expect(restored.listTurns()).toEqual([
+      expect.objectContaining({ id: "turn-one", status: "failed" }),
+    ]);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildAssistantSdkOptions,
   ClaudeCodeAssistantRunner,
@@ -143,7 +143,47 @@ function automaticFactory(state: {
   }) as ClaudeSdkQueryFactory;
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("ClaudeCodeAssistantRunner", () => {
+  it("closes an idle owner process and resumes the saved session on the next message", async () => {
+    vi.useFakeTimers();
+    const state: {
+      calls: Array<Parameters<ClaudeSdkQueryFactory>[0]>;
+      queries: FakeQuery[];
+    } = { calls: [], queries: [] };
+    const runner = new ClaudeCodeAssistantRunner(
+      () => "/usr/bin/claude",
+      automaticFactory(state),
+      60_000,
+    );
+
+    await expect(runner.run(input())).resolves.toMatchObject({
+      status: "succeeded",
+    });
+    expect(runner.listOpenAssistantIds()).toEqual(["assistant-one"]);
+
+    // A message before the deadline keeps the same process and restarts it.
+    await vi.advanceTimersByTimeAsync(59_000);
+    await runner.run(input({ turnId: SECOND_TURN, prompt: "继续" }));
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(state.calls).toHaveLength(1);
+    expect(runner.listOpenAssistantIds()).toEqual(["assistant-one"]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(runner.listOpenAssistantIds()).toEqual([]);
+    expect(state.queries[0].closeCalls).toBeGreaterThan(0);
+
+    await runner.run(
+      input({ turnId: "550e8400-e29b-41d4-a716-446655440012", sessionId: SESSION_ID }),
+    );
+    expect(state.calls).toHaveLength(2);
+    expect(state.calls[1].options).toMatchObject({ resume: SESSION_ID });
+    await runner.close("assistant-one");
+  });
+
   it("keeps the owner's local capabilities but routes scheduling through the app", () => {
     const taskServer = {} as never;
     const wecomServer = {} as never;

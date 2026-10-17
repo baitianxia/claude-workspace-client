@@ -12,6 +12,7 @@ import type {
   SendAssistantMessageRequest,
   AppSnapshot,
   CreateSessionRequest,
+  ManageAssistantTaskRequest,
   ReadWorkspaceFileRequest,
   RenameSessionRequest,
   ResizeTerminalRequest,
@@ -262,6 +263,20 @@ export function registerIpcHandlers(options: {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.manageAssistantTask,
+    (_event, request: ManageAssistantTaskRequest) => {
+      if (!request || typeof request !== "object") {
+        throw new Error("定时任务操作请求无效。");
+      }
+      return assistantService.manageTask({
+        assistantId: requireIdentifier(request.assistantId, "Assistant profile ID"),
+        taskId: requireIdentifier(request.taskId, "Assistant task ID"),
+        action: request.action,
+      });
+    },
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.createSession,
     async (_event, request: CreateSessionRequest) => {
       if (!request || typeof request !== "object") {
@@ -334,7 +349,7 @@ export function registerIpcHandlers(options: {
   ipcMain.handle(
     IPC_CHANNELS.removeSession,
     async (_event, sessionId: unknown) => {
-      const removed = sessionManager.removeSession(
+      const removed = await sessionManager.removeSessionAndWait(
         requireIdentifier(sessionId, "Session ID"),
       );
       await projectStore.replaceSessions(sessionManager.listSessions());
