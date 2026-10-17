@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  describeRemoteMenuMismatch,
   latestMenuOptionCount,
   remoteMenuMismatch,
   RemoteReplyRouter,
@@ -690,52 +689,15 @@ describe("remote menu screen check", () => {
     expect(
       remoteMenuMismatch(pending, deny, permissionMenu(["Yes", "No"])),
     ).toBeNull();
-    const countMismatch = remoteMenuMismatch(
-      pending,
-      deny,
-      permissionMenu(["Yes", "Yes, and don't ask again", "No"]),
-    );
-    expect(countMismatch).toEqual({
-      kind: "option-count",
-      visibleOptions: 3,
-      expectedOptions: 2,
-    });
-    expect(describeRemoteMenuMismatch(countMismatch!, pending.code)).toContain(
-      "重发也无法解决",
-    );
-  });
-
-  it("refuses menu keys when no menu is on screen any more", () => {
-    const router = new RemoteReplyRouter(() => "GONEE");
-    const pending = router.register(
-      "zhangsan",
-      attention("session-gone", "launch-gone", {
-        kind: "permission",
-        inputMode: "menu",
-        permissionSuggestionCount: 0,
-      }),
-    ).pending;
-    const allow = terminalActionForRemoteReply(pending, "1");
-
-    // e.g. the prompt was replaced by Claude's input box.
-    const mismatch = remoteMenuMismatch(pending, allow, "> 请输入下一条指令\r\n");
-    expect(mismatch).toEqual({ kind: "no-menu" });
-    expect(describeRemoteMenuMismatch(mismatch!, pending.code)).toContain(
-      `同一个回复码 ${pending.code}`,
-    );
-
-    // Text replies are never blocked by the screen check.
-    const textPending = router.register(
-      "zhangsan",
-      attention("session-text", "launch-text", { inputMode: "text" }),
-    ).pending;
     expect(
       remoteMenuMismatch(
-        textPending,
-        terminalActionForRemoteReply(textPending, "继续"),
-        "",
+        pending,
+        deny,
+        permissionMenu(["Yes", "Yes, and don't ask again", "No"]),
       ),
-    ).toBeNull();
+    ).toContain("3 个选项");
+    // Nothing recognisable on screen: do not block the reply.
+    expect(remoteMenuMismatch(pending, deny, "")).toBeNull();
   });
 
   it("refuses a question answer whose option is not on screen", () => {
@@ -760,6 +722,6 @@ describe("remote menu screen check", () => {
     ).toBeNull();
     expect(
       remoteMenuMismatch(pending, action, "❯ 1. Yes\r\n  2. No\r\n"),
-    ).toEqual({ kind: "option-missing", optionLabel: "方案 B：先灰度" });
+    ).toContain("方案 B：先灰度");
   });
 });

@@ -841,54 +841,31 @@ export function latestMenuOptionCount(screen: string): number | null {
   return count > 0 ? count : null;
 }
 
-export interface RemoteMenuMismatch {
-  /**
-   * - "no-menu": no numbered menu is on screen (already handled or closed);
-   *   the same code can be used again if the menu reappears.
-   * - "option-count": the menu has a different number of options than the
-   *   notice, e.g. Claude Code's layout changed; resending will not help.
-   * - "option-missing": the chosen question option is not on screen; the
-   *   screen probably shows another prompt.
-   */
-  kind: "no-menu" | "option-count" | "option-missing";
-  visibleOptions?: number;
-  expectedOptions?: number;
-  optionLabel?: string;
-}
-
 /**
  * Check that the terminal still shows the menu a remote reply was computed
  * for, before any navigation keys are written. Remote replies select options
- * by position, so pressing them into a different menu — or into an input
- * box once the menu is gone — could select the wrong answer or type into
- * the prompt. Returns why the reply must be refused, or null when the
- * screen matches. Text replies and the multi-question wizard are not
- * checked.
+ * by position, so a menu with a different number of options (Claude Code
+ * changed its layout, or the prompt was already handled locally) would make
+ * the same keys pick a different answer. Returns a reason to refuse the
+ * reply, or null when the screen matches or cannot be recognised.
  */
 export function remoteMenuMismatch(
   pending: PendingRemoteReply,
   action: RemoteReplyAction,
   screen: string,
-): RemoteMenuMismatch | null {
+): string | null {
   if (pending.replyStage || !action.menuSelections?.length) {
     return null;
   }
   const text = stripAnsi(screen).slice(-SCREEN_CHECK_TAIL_LENGTH);
-  const visible = latestMenuOptionCount(text);
-  if (visible === null) {
-    return { kind: "no-menu" };
-  }
   if (pending.kind === "permission") {
     // The notice lists allow-once, each "don't ask again" suggestion and
     // deny; the keystrokes assume exactly that many options on screen.
     const expected =
       Math.max(0, Math.floor(pending.permissionSuggestionCount ?? 0)) + 2;
-    if (visible !== expected) {
-      return {
-        kind: "option-count",
-        visibleOptions: visible,
-        expectedOptions: expected,
-      };
+    const visible = latestMenuOptionCount(text);
+    if (visible !== null && visible !== expected) {
+      return `终端当前的权限菜单有 ${visible} 个选项，与通知中的 ${expected} 个选项不一致`;
     }
     return null;
   }
@@ -905,34 +882,14 @@ export function remoteMenuMismatch(
         continue;
       }
       const probe = [...label.replace(/\s+/gu, "")].slice(0, 12).join("");
-      if (probe && !compactScreen.includes(probe)) {
-        return { kind: "option-missing", optionLabel: label };
+      if (
+        probe &&
+        latestMenuOptionCount(text) !== null &&
+        !compactScreen.includes(probe)
+      ) {
+        return `终端当前的菜单中没有选项“${label}”`;
       }
     }
   }
   return null;
-}
-
-/** Owner-facing explanation for a refused remote menu reply. */
-export function describeRemoteMenuMismatch(
-  mismatch: RemoteMenuMismatch,
-  code: string,
-): string {
-  switch (mismatch.kind) {
-    case "no-menu":
-      return (
-        "终端当前没有显示可选择的菜单，这个提示可能已经处理或关闭。" +
-        `未发送任何按键；如果终端稍后重新显示该菜单，可以用同一个回复码 ${code} 再次回复。`
-      );
-    case "option-count":
-      return (
-        `终端菜单显示 ${mismatch.visibleOptions} 个选项，通知按 ${mismatch.expectedOptions} 个选项计算，` +
-        "可能是 Claude Code 的界面有更新。为避免选错，未发送任何按键；重发也无法解决，请回到开发工作台处理这个提示。"
-      );
-    case "option-missing":
-      return (
-        `终端当前的菜单中没有选项“${mismatch.optionLabel}”，屏幕可能已切换到其他提示。` +
-        `未发送任何按键；如果稍后重新显示该问题，可以用同一个回复码 ${code} 再次回复。`
-      );
-  }
 }

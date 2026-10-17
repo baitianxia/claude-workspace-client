@@ -17,7 +17,6 @@ import type {
 import { attentionFromClaudeHook } from "./claude-attention";
 import type { ClaudeHookEvent } from "./claude-hook-server";
 import {
-  describeRemoteMenuMismatch,
   RemoteReplyRouter,
   remoteMenuMismatch,
   terminalActionForRemoteReply,
@@ -755,9 +754,10 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     );
     if (mismatch) {
       // Navigation keys select by position. Writing them into a different
-      // menu, or into an input box once the menu is gone, could pick the
-      // wrong answer (e.g. allow instead of deny). The code stays valid.
-      const detail = describeRemoteMenuMismatch(mismatch, pending.code);
+      // menu could pick the wrong answer (e.g. allow instead of deny).
+      const detail =
+        `${mismatch}。可能已在本机处理，或 Claude Code 的界面已变化；` +
+        `为避免选错，回复码 ${pending.code} 未发送任何按键，请回到开发工作台查看。`;
       this.recordInbound("rejected", detail);
       await this.replyToMessage(client, frame, detail);
       return;
