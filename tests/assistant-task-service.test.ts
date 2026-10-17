@@ -77,6 +77,15 @@ class ControllableRunner extends FakeRunner {
     return new Promise((resolve) => this.pending.set(input.runId, resolve));
   }
 
+  complete(runId: string, result: ClaudeCodeAssistantTaskResult): void {
+    const resolve = this.pending.get(runId);
+    if (!resolve) {
+      throw new Error(`No pending run ${runId}.`);
+    }
+    this.pending.delete(runId);
+    resolve(result);
+  }
+
   override cancel(runId: string): boolean {
     this.cancelled.push(runId);
     const resolve = this.pending.get(runId);
@@ -128,6 +137,7 @@ async function waitFor(check: () => boolean): Promise<void> {
 
 async function fixture<T extends FakeRunner = FakeRunner>(
   runner: T = new FakeRunner() as T,
+  maxConcurrentRuns?: number,
 ) {
   const root = await mkdtemp(join(tmpdir(), "assistant-task-service-"));
   temporaryDirectories.push(root);
@@ -152,6 +162,7 @@ async function fixture<T extends FakeRunner = FakeRunner>(
     (projectId) => (projectId === project.id ? project : undefined),
     gateway,
     () => 1_000,
+    maxConcurrentRuns,
   );
   services.push(service);
   await service.initialize();
@@ -343,6 +354,54 @@ describe("AssistantTaskService", () => {
       status: "cancelled",
       error: expect.stringContaining("开始执行前"),
     });
+  });
+
+  it("limits how many task runs execute at the same time", async () => {
+    const runner = new ControllableRunner();
+    const { service } = await fixture(runner, 1);
+    const create = (name: string) =>
+      service.createTask("assistant-one", {
+        name,
+        schedule: "0 9 * * *",
+        prompt: `${name}的内容`,
+      });
+    const first = await create("任务一");
+    const second = await create("任务二");
+    const third = await create("任务三");
+
+    const firstRun = await service.runTaskNow("assistant-one", first.id);
+    await waitFor(() => runner.inputs.length === 1);
+    const secondRun = await service.runTaskNow("assistant-one", second.id);
+    await service.runTaskNow("assistant-one", third.id);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Only one Claude query runs; the others wait as "queued".
+    expect(runner.inputs.map((input) => input.task.id)).toEqual([first.id]);
+    expect(service.listRuns({ taskId: second.id }).at(-1)?.status).toBe("queued");
+
+    // Stopping a queued run cancels it without waiting for a slot.
+    await service.cancelTaskRun("assistant-one", second.id);
+    await waitFor(
+      () => service.listRuns({ taskId: second.id }).at(-1)?.status === "cancelled",
+    );
+    expect(service.listRuns({ taskId: second.id }).at(-1)).toMatchObject({
+      id: secondRun.id,
+      error: expect.stringContaining("开始执行前"),
+    });
+
+    runner.complete(firstRun.id, { status: "succeeded", response: "完成" });
+    await waitFor(() => runner.inputs.length === 2);
+    expect(runner.inputs[1].task.id).toBe(third.id);
+  });
+
+  it("builds a separate MCP server instance for every Claude query", async () => {
+    const { service } = await fixture();
+
+    const first = await service.createMcpServer("assistant-one");
+    const second = await service.createMcpServer("assistant-one");
+
+    // An SDK MCP server can only be connected to one transport at a time.
+    expect(first).not.toBe(second);
   });
 
   it("only stops an active run of the assistant's own task", async () => {

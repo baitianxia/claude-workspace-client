@@ -229,6 +229,11 @@ async function fixture(
   runner: FakeRunner = new FakeRunner(),
   options: {
     findTranscript?: (claudeSessionId: string) => Promise<ClaudeTranscriptLookup>;
+    /** Seed persisted data as if left behind by a previous client run. */
+    prepareStore?: (
+      store: AssistantStore,
+      paths: { independentRoot: string },
+    ) => Promise<void>;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "assistant-service-"));
@@ -282,6 +287,10 @@ async function fixture(
     options.findTranscript,
   );
   services.push(service);
+  if (options.prepareStore) {
+    await store.initialize();
+    await options.prepareStore(store, { independentRoot });
+  }
   await service.initialize();
   return { service, store, runner, gateway, independentRoot };
 }
@@ -803,6 +812,88 @@ describe("AssistantService", () => {
         action: "unknown" as never,
       }),
     ).rejects.toThrow();
+  });
+
+  it("tells the owner on WeCom which message the last exit interrupted", async () => {
+    const { service, gateway } = await fixture(new FakeRunner(), {
+      prepareStore: async (store, { independentRoot }) => {
+        await store.putProfile({
+          id: "assistant-one",
+          name: "小岚",
+          enabled: true,
+          projectPath: independentRoot,
+          instructions: "",
+          ownerWeComUserId: "zhangsan",
+          wecomBotProfileId: "bot-one",
+          timeoutMinutes: 20,
+          maxTurns: 20,
+          createdAt: 1,
+          updatedAt: 1,
+        });
+        await store.putConversation({
+          id: "assistant-one",
+          assistantId: "assistant-one",
+          kind: "owner",
+          createdAt: 1,
+          updatedAt: 1,
+        });
+        await store.appendTurn({
+          id: "turn-interrupted",
+          assistantId: "assistant-one",
+          conversationId: "assistant-one",
+          source: "wecom",
+          messageId: "message-before-exit",
+          botProfileId: "bot-one",
+          userId: "zhangsan",
+          request: "帮我整理昨天的会议纪要",
+          status: "running",
+          createdAt: 2,
+          startedAt: 3,
+        });
+      },
+    });
+
+    await waitFor(() =>
+      gateway.sent.some((entry) => entry.content.includes("还没有处理完")),
+    );
+    expect(
+      gateway.sent.find((entry) => entry.content.includes("还没有处理完")),
+    ).toMatchObject({
+      botProfileId: "bot-one",
+      targetId: "zhangsan",
+      content: expect.stringContaining("帮我整理昨天的会议纪要"),
+    });
+    expect(service.getSnapshot().turns).toEqual([
+      expect.objectContaining({ id: "turn-interrupted", status: "failed" }),
+    ]);
+  });
+
+  it("tells the owner when shutdown cancels a queued WeCom message", async () => {
+    const runner = new ControllableRunner();
+    const { service, gateway } = await fixture(runner);
+    await service.upsertProfile(request());
+    const owner = (messageId: string, text: string) => ({
+      botProfileId: "bot-one",
+      messageId,
+      chatType: "single" as const,
+      chatId: "zhangsan",
+      userId: "zhangsan",
+      text,
+      quoteText: "",
+    });
+
+    await service.handleWeComMessage(owner("running-message", "第一条正在处理"));
+    await waitFor(() => runner.inputs.length === 1);
+    await service.handleWeComMessage(owner("queued-message", "第二条排队消息"));
+    await service.dispose();
+
+    expect(
+      gateway.sent.some(
+        (entry) =>
+          entry.content.includes("客户端正在关闭") &&
+          entry.content.includes("第二条排队消息"),
+      ),
+    ).toBe(true);
   });
 
   it("only exposes the group chat ID diagnostic and never starts the Agent", async () => {

@@ -18,6 +18,7 @@ import { attentionFromClaudeHook } from "./claude-attention";
 import type { ClaudeHookEvent } from "./claude-hook-server";
 import {
   RemoteReplyRouter,
+  remoteMenuMismatch,
   terminalActionForRemoteReply,
   type PendingRemoteReply,
 } from "./remote-reply-router";
@@ -97,6 +98,9 @@ function defaultClientFactory(options: {
     },
   });
 }
+
+// Enough recent PTY output to contain the prompt currently on screen.
+const REMOTE_SCREEN_CHECK_LENGTH = 16_000;
 
 function copyState(state: WeComState): WeComState {
   return { ...state };
@@ -345,6 +349,13 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     private readonly router = new RemoteReplyRouter(),
     private readonly clientFactory: WeComClientFactory = defaultClientFactory,
     private readonly availabilityError?: string,
+    /**
+     * Whether the owner is away from this computer. Completion and idle
+     * notices are only pushed while away; prompts that block Claude Code
+     * (permissions, questions, plans) are always pushed. The default keeps
+     * pushing everything.
+     */
+    private readonly isOwnerAway: () => boolean = () => true,
   ) {
     super();
     this.sessionManager.on("input", this.handleSessionInput);
@@ -353,6 +364,15 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
 
   getState(): WeComState {
     return copyState(this.state);
+  }
+
+  private ownerAway(): boolean {
+    try {
+      return this.isOwnerAway();
+    } catch {
+      // If presence cannot be determined, fall back to pushing.
+      return true;
+    }
   }
 
   isClaudePushEnabled(): boolean {
@@ -469,6 +489,17 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         : `已收到 Claude Code ${event.payload.hook_event_name} 事件，但没有可推送的消息内容。`,
     );
     if (!attention) {
+      return;
+    }
+    if (
+      (attention.kind === "completion" || attention.kind === "idle") &&
+      !this.ownerAway()
+    ) {
+      // The owner is at the computer and sees the terminal; a WeCom message
+      // for every finished turn is noise. Blocking prompts are still pushed.
+      this.recordClaudeHook(
+        "你正在使用电脑，本次完成提醒未推送到企业微信；需要你确认的权限、问题和计划仍会推送。",
+      );
       return;
     }
     const result = this.router.register(
@@ -711,6 +742,24 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         frame,
         detail,
       );
+      return;
+    }
+    const mismatch = remoteMenuMismatch(
+      pending,
+      action,
+      this.sessionManager.getTerminalTail(
+        pending.workspaceSessionId,
+        REMOTE_SCREEN_CHECK_LENGTH,
+      ),
+    );
+    if (mismatch) {
+      // Navigation keys select by position. Writing them into a different
+      // menu could pick the wrong answer (e.g. allow instead of deny).
+      const detail =
+        `${mismatch}。可能已在本机处理，或 Claude Code 的界面已变化；` +
+        `为避免选错，回复码 ${pending.code} 未发送任何按键，请回到开发工作台查看。`;
+      this.recordInbound("rejected", detail);
+      await this.replyToMessage(client, frame, detail);
       return;
     }
     if (

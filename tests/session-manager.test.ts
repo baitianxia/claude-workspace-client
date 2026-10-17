@@ -742,6 +742,29 @@ describe("SessionManager", () => {
     expect(() => manager.removeSession(created.id)).toThrow("已经被移除");
   });
 
+  it("waits for the process to exit before reporting a removed session", async () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      (() => fake.process) as PtySpawner,
+      "darwin",
+    );
+    const created = manager.createSession(project());
+
+    let finished = false;
+    const removal = manager.removeSessionAndWait(created.id).then((record) => {
+      finished = true;
+      return record;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake.killed).toBe(true);
+    expect(manager.listSessions()).toEqual([]);
+    expect(finished).toBe(false);
+
+    fake.emitExit(0);
+    await expect(removal).resolves.toMatchObject({ id: created.id });
+  });
+
   it("renames a session and publishes the updated record", () => {
     const fake = fakePty();
     const manager = new SessionManager(

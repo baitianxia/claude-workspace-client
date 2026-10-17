@@ -3,12 +3,14 @@ import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-
 };
 import { z } from "zod";
 import type { AssistantProfileRecord } from "../shared/contracts";
-import { MAX_ASSISTANT_WECOM_MARKDOWN_BYTES } from "./assistant-wecom-bot-manager";
+import {
+  assistantWeComDeliveryTimeoutMs,
+  MAX_ASSISTANT_WECOM_MARKDOWN_BYTES,
+} from "./assistant-wecom-bot-manager";
 import { describeWeComError } from "./wecom-error";
 import { withTimeout } from "./promise-timeout";
 
 const MAX_TARGET_CHARACTERS = 200;
-const DELIVERY_TIMEOUT_MS = 15_000;
 
 export interface AssistantWeComToolGateway {
   sendMarkdown(
@@ -35,8 +37,8 @@ export async function sendAssistantWeComMessage(
   }
   await withTimeout(
     gateway.sendMarkdown(botProfileId, target, content),
-    DELIVERY_TIMEOUT_MS,
-    "企业微信投递超过 15 秒仍未确认，结果未知",
+    assistantWeComDeliveryTimeoutMs(content),
+    "企业微信投递超时仍未确认，结果未知",
   );
   return `企业微信已确认接收当前助理绑定机器人发往 ${target} 的消息；这不表示收件人已读。`;
 }

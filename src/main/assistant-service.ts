@@ -17,6 +17,7 @@ import type {
   AssistantWeComMessage,
   AssistantWeComMessageResult,
 } from "./assistant-wecom-bot-manager";
+import { assistantWeComDeliveryTimeoutMs } from "./assistant-wecom-bot-manager";
 import { AssistantStore } from "./assistant-store";
 import {
   assistantRuntimePathKey,
@@ -39,7 +40,13 @@ import { withTimeout } from "./promise-timeout";
 const MAX_QUEUED_TURNS_PER_ASSISTANT = 10;
 const MAX_ASSISTANT_MESSAGE_CHARACTERS = 4_000;
 const MAX_ASSISTANT_INSTRUCTION_CHARACTERS = 4_000;
-const WECOM_DELIVERY_TIMEOUT_MILLISECONDS = 15_000;
+// Shutdown is bounded (see index.ts); deliveries during it must be short so
+// they cannot hold up the exit.
+const SHUTDOWN_DELIVERY_TIMEOUT_MILLISECONDS = 3_000;
+// After a restart the bots may still be connecting; retry the "message was
+// interrupted" notice a few times before recording it as undelivered.
+const INTERRUPTED_NOTICE_RETRY_DELAYS_MILLISECONDS = [0, 15_000, 30_000, 45_000];
+const INTERRUPTED_REQUEST_PREVIEW_CHARACTERS = 120;
 const SESSION_EXPIRED_NOTICE =
   "上次保存的 Claude 会话记录已不存在（可能已超过 Claude Code 的保留期被自动清理），本轮已开始新的会话，之前的对话上下文不再可用。";
 const SESSION_INVALIDATED_SUFFIX =
@@ -89,6 +96,13 @@ function readableError(error: unknown): string {
       " ",
     )
     .slice(-8_000);
+}
+
+function requestPreview(request: string): string {
+  const characters = [...request.replace(/\s+/gu, " ").trim()];
+  return characters.length <= INTERRUPTED_REQUEST_PREVIEW_CHARACTERS
+    ? characters.join("")
+    : `${characters.slice(0, INTERRUPTED_REQUEST_PREVIEW_CHARACTERS).join("")}…`;
 }
 
 function withTurnNotice(turn: AssistantTurnRecord, content: string): string {
@@ -208,13 +222,105 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     }
     await this.store.initialize();
     await this.migrateLegacyRuntimePaths();
-    await this.store.recoverInterruptedTurns(this.now());
+    const interrupted = await this.store.recoverInterruptedTurns(this.now());
     await this.runner.initialize?.();
     await this.tasks.initialize();
     this.runner.on?.("stateChanged", this.onNestedStateChanged);
     this.wecomBots.on?.("stateChanged", this.onNestedStateChanged);
     this.tasks.on("stateChanged", this.onNestedStateChanged);
     this.initialized = true;
+    this.emitStateChanged();
+    if (interrupted.length > 0) {
+      void this.notifyInterruptedTurns(interrupted).catch((error: unknown) =>
+        console.error("Failed to report interrupted assistant turns", error),
+      );
+    }
+  }
+
+  /**
+   * Tell the owner on WeCom which messages were left unfinished when the
+   * client last exited. Without this the owner, typically on their phone,
+   * waits indefinitely for a reply that will never come.
+   */
+  private async notifyInterruptedTurns(
+    turns: AssistantTurnRecord[],
+  ): Promise<void> {
+    await Promise.allSettled(
+      turns.map(async (turn) => {
+        const target = this.wecomTargetForTurn(turn);
+        if (!target) {
+          return;
+        }
+        const content =
+          "上次客户端退出时，这条消息还没有处理完，结果未知；如仍需要请重新发送：\n" +
+          `> ${requestPreview(turn.request)}`;
+        let errors: string[] = [];
+        for (const delay of INTERRUPTED_NOTICE_RETRY_DELAYS_MILLISECONDS) {
+          if (delay > 0) {
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, delay);
+              timer.unref?.();
+            });
+          }
+          if (this.shuttingDown) {
+            return;
+          }
+          errors = await this.deliverWeComMessages(
+            target.botProfileId,
+            target.targetId,
+            [{ content, failureLabel: "企业微信中断通知失败" }],
+          );
+          if (errors.length === 0) {
+            return;
+          }
+        }
+        await this.recordDeliveryErrors(turn.id, errors);
+      }),
+    );
+  }
+
+  /** Where the owner expects to hear about this turn on WeCom, if anywhere. */
+  private wecomTargetForTurn(
+    turn: AssistantTurnRecord,
+  ): { botProfileId: string; targetId: string } | null {
+    if (turn.source === "wecom" && turn.botProfileId && turn.userId) {
+      return { botProfileId: turn.botProfileId, targetId: turn.userId };
+    }
+    const profile = this.store.getProfile(turn.assistantId);
+    if (
+      turn.source === "desktop" &&
+      profile?.wecomBotProfileId &&
+      profile.ownerWeComUserId
+    ) {
+      // Desktop turns are mirrored to the owner's WeCom chat.
+      return {
+        botProfileId: profile.wecomBotProfileId,
+        targetId: profile.ownerWeComUserId,
+      };
+    }
+    return null;
+  }
+
+  private async recordDeliveryErrors(
+    turnId: string,
+    errors: string[],
+  ): Promise<void> {
+    const current = this.store
+      .listTurns()
+      .find((candidate) => candidate.id === turnId);
+    if (!current || errors.length === 0) {
+      return;
+    }
+    await this.store
+      .replaceTurn({
+        ...current,
+        deliveryError: [current.deliveryError, ...errors]
+          .filter(Boolean)
+          .join("；"),
+      })
+      .catch((error: unknown) =>
+        console.error("Failed to record assistant delivery error", error),
+      );
     this.emitStateChanged();
   }
 
@@ -917,6 +1023,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     await this.tasks.dispose();
     await Promise.allSettled([...this.workers.values()]);
     const timestamp = this.now();
+    const cancelled: AssistantTurnRecord[] = [];
     for (const turn of this.store.listTurns().filter(isActiveTurn)) {
       await this.store.completeTurn(
         {
@@ -928,8 +1035,35 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         undefined,
         timestamp,
       );
+      cancelled.push(turn);
     }
     this.emitStateChanged();
+    // Queued WeCom messages never reached Claude. Make a short best-effort
+    // attempt to tell the owner before the bots disconnect; the bound
+    // shutdown deadline in index.ts still applies. Desktop turns are skipped:
+    // the owner is the one closing the client.
+    await Promise.allSettled(
+      cancelled.map(async (turn) => {
+        const target =
+          turn.source === "wecom" ? this.wecomTargetForTurn(turn) : null;
+        if (!target) {
+          return;
+        }
+        const errors = await this.deliverWeComMessages(
+          target.botProfileId,
+          target.targetId,
+          [
+            {
+              content:
+                "客户端正在关闭，这条消息还没有开始处理，已取消；如仍需要请稍后重新发送：\n" +
+                `> ${requestPreview(turn.request)}`,
+              failureLabel: "企业微信关闭通知失败",
+            },
+          ],
+        );
+        await this.recordDeliveryErrors(turn.id, errors);
+      }),
+    );
   }
 
   private requireProfile(assistantId: string): AssistantProfileRecord {
@@ -1317,8 +1451,10 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       try {
         await withTimeout(
           this.wecomBots.sendMarkdown(botProfileId, targetId, message.content),
-          WECOM_DELIVERY_TIMEOUT_MILLISECONDS,
-          "企业微信回复超过 15 秒仍未完成。",
+          this.shuttingDown
+            ? SHUTDOWN_DELIVERY_TIMEOUT_MILLISECONDS
+            : assistantWeComDeliveryTimeoutMs(message.content),
+          "企业微信回复超时仍未完成。",
         );
       } catch (error) {
         errors.push(`${message.failureLabel}：${readableError(error)}`);

@@ -349,7 +349,7 @@ export function registerIpcHandlers(options: {
   ipcMain.handle(
     IPC_CHANNELS.removeSession,
     async (_event, sessionId: unknown) => {
-      const removed = sessionManager.removeSession(
+      const removed = await sessionManager.removeSessionAndWait(
         requireIdentifier(sessionId, "Session ID"),
       );
       await projectStore.replaceSessions(sessionManager.listSessions());

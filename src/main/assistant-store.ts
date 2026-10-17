@@ -954,10 +954,17 @@ export class AssistantStore {
     return clone(conversation);
   }
 
-  async recoverInterruptedTurns(now = Date.now()): Promise<number> {
+  /**
+   * Fail turns that were still queued or running when the client last exited
+   * and return them, so the caller can tell the owner which messages need to
+   * be sent again.
+   */
+  async recoverInterruptedTurns(
+    now = Date.now(),
+  ): Promise<AssistantTurnRecord[]> {
     this.assertInitialized();
     const affectedConversationIds = new Set<string>();
-    let recovered = 0;
+    const recovered: AssistantTurnRecord[] = [];
     for (const turn of this.data.turns) {
       if (turn.status !== "queued" && turn.status !== "running") {
         continue;
@@ -966,14 +973,14 @@ export class AssistantStore {
       turn.finishedAt = now;
       turn.error = "客户端上次退出时这一轮尚未完成，结果未知；下一条消息将从已保存的会话恢复。";
       affectedConversationIds.add(turn.conversationId);
-      recovered += 1;
+      recovered.push(clone(turn));
     }
     for (const conversation of this.data.conversations) {
       if (affectedConversationIds.has(conversation.id)) {
         conversation.updatedAt = now;
       }
     }
-    if (recovered > 0) {
+    if (recovered.length > 0) {
       await this.persist();
     }
     return recovered;

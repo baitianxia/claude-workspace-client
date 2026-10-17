@@ -20,6 +20,7 @@ import {
 } from "./claude-session-files";
 import { terminateProcessTree } from "./process-tree";
 import { nextSessionTitle } from "./session-title";
+import { TerminalBuffer } from "./terminal-buffer";
 
 const MAX_TERMINAL_BUFFER_LENGTH = 2_000_000;
 // Only the beginning of a resumed launch can contain Claude's "No
@@ -34,12 +35,32 @@ const RESUME_FAILURE_EXIT_WINDOW_MS = 30_000;
 // Claude Code's Ink picker reads one keypress per PTY write. A short gap keeps
 // consecutive arrow/Enter events distinct on Windows ConPTY and Unix PTYs.
 const REMOTE_INPUT_KEY_DELAY_MS = 35;
+// Upper bound for waiting on a terminated PTY to report its exit.
+const PROCESS_EXIT_WAIT_MS = 3_000;
+
+function waitForPtyExit(processHandle: IPty, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      subscription.dispose();
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    const subscription = processHandle.onExit(finish);
+  });
+}
 
 interface ManagedSession {
   record: SessionRecord;
   process: IPty | null;
   launchId: string | null;
-  terminalBuffer: string;
+  terminal: TerminalBuffer;
   sequence: number;
   /** How the current process was launched; used to detect a failed resume. */
   launchMode?: ClaudeSessionLaunchMode;
@@ -227,7 +248,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         record,
         process: null,
         launchId: null,
-        terminalBuffer: restoredTerminalMessage(record),
+        terminal: new TerminalBuffer(
+          MAX_TERMINAL_BUFFER_LENGTH,
+          restoredTerminalMessage(record),
+        ),
         sequence: 0,
       });
     }
@@ -280,7 +304,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         record,
         process: processHandle,
         launchId,
-        terminalBuffer: "",
+        terminal: new TerminalBuffer(MAX_TERMINAL_BUFFER_LENGTH),
         sequence: 0,
       };
       this.sessions.set(sessionId, managed);
@@ -298,7 +322,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         record,
         process: null,
         launchId: null,
-        terminalBuffer: restoredTerminalMessage(record),
+        terminal: new TerminalBuffer(
+          MAX_TERMINAL_BUFFER_LENGTH,
+          restoredTerminalMessage(record),
+        ),
         sequence: 0,
       };
       this.sessions.set(sessionId, managed);
@@ -720,21 +747,43 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   }
 
   removeSession(sessionId: string): SessionRecord {
+    const { record, terminated } = this.detachSession(sessionId);
+    void terminated;
+    return record;
+  }
+
+  /**
+   * Remove a session and wait until its process has exited. A temporary
+   * workspace can only be deleted once nothing uses it as its working
+   * directory; on Windows a running process keeps the directory locked.
+   */
+  async removeSessionAndWait(sessionId: string): Promise<SessionRecord> {
+    const { record, terminated } = this.detachSession(sessionId);
+    await terminated;
+    return record;
+  }
+
+  private detachSession(sessionId: string): {
+    record: SessionRecord;
+    terminated: Promise<void>;
+  } {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error("会话不存在或已经被移除。");
     }
+    let terminated: Promise<void> = Promise.resolve();
     if (
-      session.record.status === "running" ||
-      session.record.status === "starting"
+      (session.record.status === "running" ||
+        session.record.status === "starting") &&
+      session.process
     ) {
-      if (session.process) {
-        void this.terminateSessionProcess(session.process);
-      }
+      const processHandle = session.process;
+      const exited = waitForPtyExit(processHandle, PROCESS_EXIT_WAIT_MS);
+      terminated = this.terminateSessionProcess(processHandle).then(() => exited);
     }
     this.cancelQueuedInput(sessionId);
     this.sessions.delete(sessionId);
-    return { ...session.record };
+    return { record: { ...session.record }, terminated };
   }
 
   removeProjectSessions(projectId: string): void {
@@ -755,13 +804,19 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     );
   }
 
+  /** Recent terminal output, for checking what a prompt currently shows. */
+  getTerminalTail(sessionId: string, length: number): string {
+    const session = this.sessions.get(sessionId);
+    return session ? session.terminal.tail(length) : "";
+  }
+
   getTerminalSnapshot(sessionId: string): TerminalSnapshot {
     const session = this.sessions.get(sessionId);
     if (!session) {
       throw new Error("Session does not exist.");
     }
     return {
-      data: session.terminalBuffer,
+      data: session.terminal.toString(),
       lastSequence: session.sequence,
     };
   }
@@ -899,12 +954,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   private appendTerminalData(session: ManagedSession, data: string): void {
     session.sequence += 1;
-    session.terminalBuffer = `${session.terminalBuffer}${data}`;
-    if (session.terminalBuffer.length > MAX_TERMINAL_BUFFER_LENGTH) {
-      session.terminalBuffer = session.terminalBuffer.slice(
-        session.terminalBuffer.length - MAX_TERMINAL_BUFFER_LENGTH,
-      );
-    }
+    session.terminal.append(data);
     this.emit("data", {
       sessionId: session.record.id,
       data,

@@ -16,6 +16,9 @@ import { assistantWeComInstructions } from "./assistant-wecom-tools";
 const MAX_RESPONSE_CHARACTERS = 50_000;
 const MAX_DIAGNOSTIC_CHARACTERS = 8_000;
 const INTERRUPT_GRACE_MILLISECONDS = 5_000;
+// A resident Claude Code process uses hundreds of MB. Close it after this
+// long without a message; the saved session ID resumes it on the next one.
+export const DEFAULT_ASSISTANT_IDLE_TIMEOUT_MILLISECONDS = 30 * 60_000;
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -63,6 +66,7 @@ interface AssistantRuntime {
   sessionId?: string;
   pending?: PendingTurn;
   closed: boolean;
+  idleTimer?: NodeJS.Timeout;
   onSessionId?: (sessionId: string) => Promise<void> | void;
 }
 
@@ -215,6 +219,7 @@ export class ClaudeCodeAssistantRunner extends EventEmitter<ClaudeCodeAssistantR
   constructor(
     private readonly getClaudeExecutable: () => string,
     private readonly injectedQueryFactory?: ClaudeSdkQueryFactory,
+    private readonly idleTimeoutMs: number = DEFAULT_ASSISTANT_IDLE_TIMEOUT_MILLISECONDS,
   ) {
     super();
   }
@@ -277,6 +282,7 @@ export class ClaudeCodeAssistantRunner extends EventEmitter<ClaudeCodeAssistantR
     if (runtime.pending) {
       throw new Error("同一私人助理只能串行处理主人消息。");
     }
+    this.clearIdleTimer(runtime);
     this.activeTurnIds.add(input.turnId);
     try {
       const resultPromise = new Promise<ClaudeCodeAssistantResult>((resolve) => {
@@ -355,6 +361,7 @@ export class ClaudeCodeAssistantRunner extends EventEmitter<ClaudeCodeAssistantR
       }
     } finally {
       runtime.closed = true;
+      this.clearIdleTimer(runtime);
       runtime.input.close();
       if (this.runtimes.get(runtime.assistantId) === runtime) {
         this.runtimes.delete(runtime.assistantId);
@@ -477,6 +484,28 @@ export class ClaudeCodeAssistantRunner extends EventEmitter<ClaudeCodeAssistantR
       clearTimeout(pending.interruptGraceTimer);
     }
     pending.resolve(result);
+    this.scheduleIdleClose(runtime);
+  }
+
+  private scheduleIdleClose(runtime: AssistantRuntime): void {
+    this.clearIdleTimer(runtime);
+    if (runtime.closed || this.idleTimeoutMs <= 0) {
+      return;
+    }
+    runtime.idleTimer = setTimeout(() => {
+      runtime.idleTimer = undefined;
+      if (!runtime.closed && !runtime.pending) {
+        this.closeRuntime(runtime, "主人会话空闲超时，已关闭常驻进程。");
+      }
+    }, this.idleTimeoutMs);
+    runtime.idleTimer.unref?.();
+  }
+
+  private clearIdleTimer(runtime: AssistantRuntime): void {
+    if (runtime.idleTimer) {
+      clearTimeout(runtime.idleTimer);
+      runtime.idleTimer = undefined;
+    }
   }
 
   private closeRuntime(
@@ -488,6 +517,7 @@ export class ClaudeCodeAssistantRunner extends EventEmitter<ClaudeCodeAssistantR
       return;
     }
     runtime.closed = true;
+    this.clearIdleTimer(runtime);
     runtime.input.close();
     this.finishPending(runtime, {
       status,

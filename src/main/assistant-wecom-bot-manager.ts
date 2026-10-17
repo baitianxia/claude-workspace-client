@@ -20,7 +20,7 @@ import {
 import type { SecretProtector } from "./wecom-settings";
 import type { WeComClient, WeComClientFactory } from "./wecom-bridge";
 import { describeWeComError as readableError } from "./wecom-error";
-import { splitUtf8ByBytes } from "./wecom-message-chunks";
+import { splitMarkdownByBytes } from "./wecom-message-chunks";
 import { withTimeout } from "./promise-timeout";
 
 export interface AssistantWeComMessage {
@@ -93,6 +93,27 @@ export const MAX_ASSISTANT_WECOM_MARKDOWN_BYTES = 18_000;
 const OUTBOUND_RETRY_DELAYS_MS = [250, 750, 1_500] as const;
 const OUTBOUND_DEADLINE_MS = 12_000;
 const OUTBOUND_TIMEOUT_MESSAGE = "企业微信消息投递超过 12 秒，已停止继续重试。";
+// Callers wait slightly longer than the bot's own per-chunk deadline so the
+// bot reports its precise failure instead of the caller's generic timeout.
+const CALLER_DELIVERY_GRACE_MS = 3_000;
+
+/** WeCom chunks for one assistant message, as sendMarkdown will send them. */
+export function assistantWeComMarkdownChunks(content: string): string[] {
+  return splitMarkdownByBytes(content, MAX_ASSISTANT_WECOM_MARKDOWN_BYTES);
+}
+
+/**
+ * How long a caller should wait for sendMarkdown. Each chunk gets its own
+ * deadline, so a long reply split into several messages is not cut off by a
+ * single fixed timeout.
+ */
+export function assistantWeComDeliveryTimeoutMs(content: string): number {
+  return (
+    OUTBOUND_DEADLINE_MS * assistantWeComMarkdownChunks(content).length +
+    CALLER_DELIVERY_GRACE_MS
+  );
+}
+
 const INBOUND_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 const INBOUND_RETRY_MAX_AGE_MS = 30_000;
 const MAX_PENDING_INBOUND_MESSAGES = 100;
@@ -444,15 +465,20 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
     if (!target || [...target].length > 200 || /\p{Cc}|\s/u.test(target)) {
       throw new Error("企业微信投递目标格式无效。");
     }
-    const expiresAt = Date.now() + OUTBOUND_DEADLINE_MS;
-    const chunks = splitUtf8ByBytes(
-      content,
-      MAX_ASSISTANT_WECOM_MARKDOWN_BYTES,
-    );
+    const chunks = assistantWeComMarkdownChunks(content);
+    const queuedAt = Date.now();
+    const overallDeadlineMs = OUTBOUND_DEADLINE_MS * chunks.length;
     const send = runtime.outboundSendChain.then(async () => {
-      // Keep all chunks in this one per-bot queue item and reuse the original
-      // deadline. A later chunk may fail without replaying earlier successes.
+      // Keep all chunks in this one per-bot queue item. Each chunk gets its
+      // own deadline, bounded by the overall one measured from when the
+      // message was queued, so a delivery that waited too long behind another
+      // still expires instead of arriving late. A later chunk may fail
+      // without replaying earlier successes.
       for (const chunk of chunks) {
+        const expiresAt = Math.min(
+          queuedAt + overallDeadlineMs,
+          Date.now() + OUTBOUND_DEADLINE_MS,
+        );
         await this.sendMarkdownWithRetry(runtime, target, chunk, expiresAt);
       }
     });
@@ -462,7 +488,7 @@ export class AssistantWeComBotManager extends EventEmitter<AssistantWeComBotMana
       () => undefined,
       () => undefined,
     );
-    await withTimeout(send, OUTBOUND_DEADLINE_MS, OUTBOUND_TIMEOUT_MESSAGE);
+    await withTimeout(send, overallDeadlineMs, OUTBOUND_TIMEOUT_MESSAGE);
   }
 
   refreshReservedManagementBotId(): void {

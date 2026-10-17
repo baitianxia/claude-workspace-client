@@ -10,7 +10,11 @@ import type {
 } from "@wecom/aibot-node-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantStore } from "../src/main/assistant-store";
-import { AssistantWeComBotManager } from "../src/main/assistant-wecom-bot-manager";
+import {
+  AssistantWeComBotManager,
+  assistantWeComDeliveryTimeoutMs,
+  assistantWeComMarkdownChunks,
+} from "../src/main/assistant-wecom-bot-manager";
 import type { SecretProtector } from "../src/main/wecom-settings";
 import type { WeComClient } from "../src/main/wecom-bridge";
 
@@ -348,6 +352,29 @@ describe("AssistantWeComBotManager", () => {
     await manager.sendMarkdown(bot.id, "zhangsan", "第二条");
     expect(manager.listBots()[0].lastOutboundError).toBeUndefined();
     expect(manager.listBots()[0].lastOutboundErrorAt).toBeUndefined();
+    manager.dispose();
+  });
+
+  it("gives each chunk of a long reply its own delivery deadline", async () => {
+    const { manager, client, bot } = await outboundFixture();
+    const content = "🙂中文".repeat(9_000);
+    const expectedChunks = assistantWeComMarkdownChunks(content).length;
+    expect(expectedChunks).toBeGreaterThanOrEqual(3);
+    const send = vi.spyOn(client, "sendMessage").mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve({}), 8_000)),
+    );
+    vi.useFakeTimers();
+
+    const delivery = manager.sendMarkdown(bot.id, "zhangsan", content);
+    const settled = expect(delivery).resolves.toBeUndefined();
+    // Well beyond the old single 12 second budget for the whole message.
+    await vi.advanceTimersByTimeAsync(8_000 * expectedChunks + 1_000);
+    await settled;
+
+    expect(send).toHaveBeenCalledTimes(expectedChunks);
+    expect(assistantWeComDeliveryTimeoutMs(content)).toBeGreaterThan(
+      12_000 * expectedChunks,
+    );
     manager.dispose();
   });
 

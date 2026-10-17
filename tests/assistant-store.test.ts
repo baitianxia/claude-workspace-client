@@ -79,7 +79,9 @@ describe("AssistantStore", () => {
 
     const restored = new AssistantStore(storePath);
     await restored.initialize();
-    expect(await restored.recoverInterruptedTurns(100)).toBe(1);
+    expect(await restored.recoverInterruptedTurns(100)).toEqual([
+      expect.objectContaining({ id: "turn-one", status: "failed" }),
+    ]);
     expect(restored.listTurns()).toEqual([
       expect.objectContaining({
         id: "turn-one",

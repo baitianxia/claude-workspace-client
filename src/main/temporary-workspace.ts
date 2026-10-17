@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -37,8 +37,47 @@ export class TemporaryWorkspace {
     await rm(resolvedCandidate, {
       recursive: true,
       force: true,
-      maxRetries: 5,
-      retryDelay: 150,
+      // A just-terminated process can hold the directory for a moment on
+      // Windows; retry for about two seconds before giving up.
+      maxRetries: 10,
+      retryDelay: 200,
     });
+  }
+
+  /**
+   * Delete temporary session directories that no saved session refers to,
+   * for example ones left behind when an earlier removal failed. Returns the
+   * number of directories removed.
+   */
+  async removeOrphans(
+    referencedPaths: string[],
+    platform: NodeJS.Platform = process.platform,
+  ): Promise<number> {
+    const key = (value: string) =>
+      platform === "win32" ? resolve(value).toLocaleLowerCase("en-US") : resolve(value);
+    const referenced = new Set(referencedPaths.map(key));
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(this.rootPath, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+    let removed = 0;
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith("session-")) {
+        continue;
+      }
+      const candidate = join(this.rootPath, entry.name);
+      if (referenced.has(key(candidate))) {
+        continue;
+      }
+      try {
+        await this.removeDirectory(candidate);
+        removed += 1;
+      } catch (error) {
+        console.error("Failed to remove orphaned temporary workspace", error);
+      }
+    }
+    return removed;
   }
 }

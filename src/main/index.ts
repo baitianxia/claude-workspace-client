@@ -1,4 +1,11 @@
-import { app, BrowserWindow, dialog, safeStorage, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  powerMonitor,
+  safeStorage,
+  shell,
+} from "electron";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ClaudeLocator } from "./claude-locator";
@@ -37,6 +44,9 @@ let shutdownPromise: Promise<void> | null = null;
 let forceExitTimer: NodeJS.Timeout | null = null;
 
 const SHUTDOWN_STEP_TIMEOUT_MILLISECONDS = 8_000;
+// Without keyboard or mouse input for this long (or with the screen locked)
+// the owner counts as away, and completion notices go to WeCom.
+const OWNER_AWAY_IDLE_SECONDS = 180;
 const FORCE_EXIT_TIMEOUT_MILLISECONDS = 20_000;
 
 function createWindow(backgroundColor = "#12110f"): BrowserWindow {
@@ -184,6 +194,7 @@ async function startApplication(): Promise<void> {
     undefined,
     undefined,
     hookAvailabilityError,
+    () => powerMonitor.getSystemIdleState(OWNER_AWAY_IDLE_SECONDS) !== "active",
   );
   const wecomAssistantEntries = new AssistantWeComBotManager(
     assistantStore,
@@ -265,6 +276,18 @@ async function startApplication(): Promise<void> {
   const temporaryWorkspace = new TemporaryWorkspace(
     join(app.getPath("userData"), "temporary-workspaces"),
   );
+  // Clean up temporary session directories that no saved session uses any
+  // more (e.g. a removal that failed while the process still held them).
+  void temporaryWorkspace
+    .removeOrphans(
+      sessionManager
+        .listSessions()
+        .filter((session) => session.projectId === null)
+        .map((session) => session.cwd),
+    )
+    .catch((error: unknown) =>
+      console.error("Failed to clean temporary workspaces", error),
+    );
   removeIpcHandlers = registerIpcHandlers({
     window: mainWindow,
     projectStore,

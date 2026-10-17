@@ -59,7 +59,10 @@ function parseCronField(
   definition: CronFieldDefinition,
 ): ParsedCronField {
   const values = new Set<number>();
-  const wildcard = source === "*";
+  // Follow Vixie cron: a field whose text starts with "*" (including "*/2")
+  // counts as unrestricted for the day-of-month/day-of-week OR rule. Only
+  // when both day fields are restricted does either one select the day.
+  const wildcard = source.startsWith("*");
   const parts = source.split(",");
   if (parts.some((part) => !part)) {
     throw new Error(`${definition.label}字段包含空白列表项。`);
@@ -155,14 +158,12 @@ export function matchesParsedCronSchedule(
 
   const dayOfMonthMatches = schedule.dayOfMonth.values.has(date.getDate());
   const dayOfWeekMatches = schedule.dayOfWeek.values.has(date.getDay());
-  if (schedule.dayOfMonth.wildcard) {
-    return schedule.dayOfWeek.wildcard || dayOfWeekMatches;
+  // Vixie cron: if either day field starts with "*", both must match (a plain
+  // "*" contains every value, so this reduces to the other field). Only when
+  // both are restricted can either one select the day.
+  if (schedule.dayOfMonth.wildcard || schedule.dayOfWeek.wildcard) {
+    return dayOfMonthMatches && dayOfWeekMatches;
   }
-  if (schedule.dayOfWeek.wildcard) {
-    return dayOfMonthMatches;
-  }
-  // Match traditional cron behavior: when both day fields are restricted,
-  // either one can select the day.
   return dayOfMonthMatches || dayOfWeekMatches;
 }
 

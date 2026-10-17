@@ -24,11 +24,14 @@ import { parseCronSchedule } from "./cron-schedule";
 import { withTimeout } from "./promise-timeout";
 import { ScheduledJobService } from "./scheduled-job-service";
 import { createAssistantWeComMcpServer } from "./assistant-wecom-tools";
+import { assistantWeComDeliveryTimeoutMs } from "./assistant-wecom-bot-manager";
 
 const MAX_TASKS_PER_ASSISTANT = 50;
+// Each run starts its own Claude Code process. Tasks scheduled for the same
+// minute (e.g. many "0 9 * * *") would otherwise all start at once.
+export const DEFAULT_MAX_CONCURRENT_TASK_RUNS = 3;
 const MAX_TASK_NAME_CHARACTERS = 80;
 const MAX_TASK_PROMPT_CHARACTERS = 20_000;
-const WECOM_DELIVERY_TIMEOUT_MILLISECONDS = 15_000;
 
 interface AssistantTaskServiceEvents {
   stateChanged: [];
@@ -130,7 +133,13 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
   private readonly activeRuns = new Map<string, Promise<void>>();
   /** Runs the owner asked to stop before the Claude query had started. */
   private readonly cancelRequestedRunIds = new Set<string>();
-  private readonly mcpServers = new Map<string, Promise<McpServerConfig>>();
+  /** Runs currently holding one of the global execution slots. */
+  private occupiedRunSlots = 0;
+  /** Queued runs waiting for a slot, in arrival order. */
+  private readonly runSlotWaiters = new Map<
+    string,
+    (acquired: boolean) => void
+  >();
   private readonly scheduler: ScheduledJobService;
   private initialized = false;
   private shuttingDown = false;
@@ -148,6 +157,7 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
       | undefined,
     private readonly wecomBots: AssistantTaskWeComGateway,
     private readonly now: () => number = Date.now,
+    private readonly maxConcurrentRuns: number = DEFAULT_MAX_CONCURRENT_TASK_RUNS,
   ) {
     super();
     this.scheduler = new ScheduledJobService(
@@ -378,19 +388,57 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
     if (!run) {
       throw new Error("这个定时任务当前没有正在运行的实例。");
     }
-    // The run may still be preparing (resolving its directory or tools)
-    // before the Claude query exists; executeRun checks this flag before it
-    // starts the query, and the runner cancels a query already in progress.
+    // The run may still be waiting for a slot or preparing (resolving its
+    // directory or tools) before the Claude query exists; executeRun checks
+    // this flag before it starts the query, and the runner cancels a query
+    // already in progress.
     this.cancelRequestedRunIds.add(run.id);
-    this.runner.cancel(run.id);
+    if (!this.abandonRunSlot(run.id)) {
+      this.runner.cancel(run.id);
+    }
     return run;
+  }
+
+  private acquireRunSlot(runId: string): Promise<boolean> {
+    if (this.shuttingDown) {
+      return Promise.resolve(false);
+    }
+    if (this.occupiedRunSlots < Math.max(1, this.maxConcurrentRuns)) {
+      this.occupiedRunSlots += 1;
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => {
+      this.runSlotWaiters.set(runId, resolve);
+    });
+  }
+
+  private releaseRunSlot(): void {
+    const next = this.runSlotWaiters.entries().next();
+    if (!next.done) {
+      // Hand the slot straight to the oldest waiting run.
+      const [runId, resolve] = next.value;
+      this.runSlotWaiters.delete(runId);
+      resolve(true);
+      return;
+    }
+    this.occupiedRunSlots = Math.max(0, this.occupiedRunSlots - 1);
+  }
+
+  /** Stop waiting for a slot. Returns true when the run was still queued. */
+  private abandonRunSlot(runId: string): boolean {
+    const resolve = this.runSlotWaiters.get(runId);
+    if (!resolve) {
+      return false;
+    }
+    this.runSlotWaiters.delete(runId);
+    resolve(false);
+    return true;
   }
 
   async removeAssistant(assistantId: string): Promise<void> {
     if (this.hasRunningRunsForAssistant(assistantId)) {
       throw new Error("私人助理仍有定时任务正在运行。");
     }
-    this.mcpServers.delete(assistantId);
     await this.store.removeAssistant(assistantId);
     this.emitStateChanged();
   }
@@ -400,14 +448,16 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
     this.emitStateChanged();
   }
 
+  /**
+   * Build a fresh in-process MCP server for one Claude query. An SDK MCP
+   * server instance can be connected to only one transport at a time, so a
+   * cached instance shared by an old query that is still shutting down and
+   * a new one (for example after the assistant's settings changed) could
+   * fail with "Already connected". Building one is cheap.
+   */
   async createMcpServer(assistantId: string): Promise<McpServerConfig> {
     this.requireProfile(assistantId);
-    let server = this.mcpServers.get(assistantId);
-    if (!server) {
-      server = this.buildMcpServer(assistantId);
-      this.mcpServers.set(assistantId, server);
-    }
-    return server;
+    return this.buildMcpServer(assistantId);
   }
 
   async dispose(): Promise<void> {
@@ -416,6 +466,9 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
     }
     this.shuttingDown = true;
     this.scheduler.stop();
+    for (const runId of [...this.runSlotWaiters.keys()]) {
+      this.abandonRunSlot(runId);
+    }
     this.runner.dispose();
     await Promise.allSettled([...this.activeRuns.values()]);
     await this.scheduler.settle();
@@ -499,89 +552,107 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
     queued: AssistantTaskRunRecord,
     task: AssistantTaskRecord,
   ): Promise<void> {
-    const startedAt = this.now();
-    const running: AssistantTaskRunRecord = {
-      ...queued,
-      status: "running",
-      startedAt,
-    };
-    await this.store.replaceRun(running);
-    this.emitStateChanged();
-    let result: ClaudeCodeAssistantTaskResult;
-    let profile: AssistantProfileRecord | undefined;
-    try {
-      profile = this.requireProfile(task.assistantId);
-      if (!profile.enabled) {
-        throw new Error("任务所属私人助理当前已停用。");
-      }
-      const configuredPath = legacyRuntimePath(profile, this.getProject);
-      if (!configuredPath) {
-        throw new Error("任务所属私人助理没有配置可用的运行目录。");
-      }
-      const projectRoot = await validateAssistantRuntimePath(configuredPath);
-      const wecomMcpServer = profile.wecomBotProfileId
-        ? await createAssistantWeComMcpServer(
-            profile.id,
-            this.getProfile,
-            this.wecomBots,
-          )
-        : undefined;
-      result = this.cancelRequestedRunIds.has(running.id)
-        ? { status: "cancelled", error: "主人在任务开始执行前停止了这次运行。" }
-        : await this.runner.run({
-            runId: running.id,
-            profile,
-            task,
-            projectRoot,
-            ...(wecomMcpServer ? { wecomMcpServer } : {}),
-            ...(running.scheduledFor === undefined
-              ? {}
-              : { scheduledFor: running.scheduledFor }),
-          });
-    } catch (error) {
-      result = { status: "failed", error: readableError(error) };
-    }
-    const completed: AssistantTaskRunRecord = {
-      ...running,
-      status: result.status,
-      finishedAt: this.now(),
-      ...(result.response ? { response: result.response } : {}),
-      ...(result.error ? { error: result.error } : {}),
-    };
-    await this.store.replaceRun(completed);
-    this.emitStateChanged();
-    if (!profile?.wecomBotProfileId) {
-      return;
-    }
-    const deliveryTarget = task.deliveryTarget ?? profile.ownerWeComUserId;
-    if (!deliveryTarget) {
+    // Wait for a global execution slot; the run stays "queued" meanwhile.
+    const acquired = await this.acquireRunSlot(queued.id);
+    if (!acquired) {
       await this.store.replaceRun({
-        ...completed,
-        deliveryError: "企业微信投递失败：任务没有投递目标，且助理未配置主人 userid。",
+        ...queued,
+        status: "cancelled",
+        finishedAt: this.now(),
+        error: this.shuttingDown
+          ? "客户端关闭，排队中的定时任务已取消。"
+          : "主人在任务开始执行前停止了这次运行。",
       });
       this.emitStateChanged();
       return;
     }
-    const content =
-      completed.status === "succeeded" && completed.response
-        ? `### 定时任务：${completed.taskName}\n\n${completed.response}`
-        : `### 定时任务未完成：${completed.taskName}\n\n${completed.error ?? "未知错误"}`;
     try {
-      await withTimeout(
-        this.wecomBots.sendMarkdown(
-          profile.wecomBotProfileId,
-          deliveryTarget,
-          content,
-        ),
-        WECOM_DELIVERY_TIMEOUT_MILLISECONDS,
-        "企业微信投递超过 15 秒仍未完成。",
-      );
-    } catch (error) {
-      await this.store.replaceRun({
-        ...completed,
-        deliveryError: `企业微信投递失败：${readableError(error)}`,
-      });
+      const startedAt = this.now();
+      const running: AssistantTaskRunRecord = {
+        ...queued,
+        status: "running",
+        startedAt,
+      };
+      await this.store.replaceRun(running);
       this.emitStateChanged();
+      let result: ClaudeCodeAssistantTaskResult;
+      let profile: AssistantProfileRecord | undefined;
+      try {
+        profile = this.requireProfile(task.assistantId);
+        if (!profile.enabled) {
+          throw new Error("任务所属私人助理当前已停用。");
+        }
+        const configuredPath = legacyRuntimePath(profile, this.getProject);
+        if (!configuredPath) {
+          throw new Error("任务所属私人助理没有配置可用的运行目录。");
+        }
+        const projectRoot = await validateAssistantRuntimePath(configuredPath);
+        const wecomMcpServer = profile.wecomBotProfileId
+          ? await createAssistantWeComMcpServer(
+              profile.id,
+              this.getProfile,
+              this.wecomBots,
+            )
+          : undefined;
+        result = this.cancelRequestedRunIds.has(running.id)
+          ? { status: "cancelled", error: "主人在任务开始执行前停止了这次运行。" }
+          : await this.runner.run({
+              runId: running.id,
+              profile,
+              task,
+              projectRoot,
+              ...(wecomMcpServer ? { wecomMcpServer } : {}),
+              ...(running.scheduledFor === undefined
+                ? {}
+                : { scheduledFor: running.scheduledFor }),
+            });
+      } catch (error) {
+        result = { status: "failed", error: readableError(error) };
+      }
+      const completed: AssistantTaskRunRecord = {
+        ...running,
+        status: result.status,
+        finishedAt: this.now(),
+        ...(result.response ? { response: result.response } : {}),
+        ...(result.error ? { error: result.error } : {}),
+      };
+      await this.store.replaceRun(completed);
+      this.emitStateChanged();
+      if (!profile?.wecomBotProfileId) {
+        return;
+      }
+      const deliveryTarget = task.deliveryTarget ?? profile.ownerWeComUserId;
+      if (!deliveryTarget) {
+        await this.store.replaceRun({
+          ...completed,
+          deliveryError: "企业微信投递失败：任务没有投递目标，且助理未配置主人 userid。",
+        });
+        this.emitStateChanged();
+        return;
+      }
+      const content =
+        completed.status === "succeeded" && completed.response
+          ? `### 定时任务：${completed.taskName}\n\n${completed.response}`
+          : `### 定时任务未完成：${completed.taskName}\n\n${completed.error ?? "未知错误"}`;
+      try {
+        await withTimeout(
+          this.wecomBots.sendMarkdown(
+            profile.wecomBotProfileId,
+            deliveryTarget,
+            content,
+          ),
+          assistantWeComDeliveryTimeoutMs(content),
+          "企业微信投递超时仍未完成。",
+        );
+      } catch (error) {
+        await this.store.replaceRun({
+          ...completed,
+          deliveryError: `企业微信投递失败：${readableError(error)}`,
+        });
+        this.emitStateChanged();
+      }
+    } finally {
+      this.releaseRunSlot();
     }
   }
 
