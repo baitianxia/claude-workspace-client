@@ -6,6 +6,7 @@ import type {
   SessionRecord,
   TerminalDataEvent,
 } from "../shared/contracts";
+import { formatDroppedPaths } from "../shared/terminal-drop";
 import { consumeTerminalShortcut } from "../shared/terminal-shortcuts";
 import { TerminalOutputScheduler } from "./terminal-output-scheduler";
 
@@ -242,6 +243,39 @@ export function TerminalView({
     };
     container.addEventListener("paste", handlePaste, true);
 
+    // Dropping files inserts their paths, like a native terminal. Claude Code
+    // attaches dropped images when it sees their path.
+    const hasFiles = (event: DragEvent) =>
+      Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    const handleDragOver = (event: DragEvent) => {
+      if (!hasFiles(event) || !event.dataTransfer) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "copy";
+    };
+    const handleDrop = (event: DragEvent) => {
+      if (!hasFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (disposed || !event.dataTransfer) {
+        return;
+      }
+      const text = formatDroppedPaths(
+        window.claudeWorkspace.getPathsForFiles(Array.from(event.dataTransfer.files)),
+        /^win/iu.test(navigator.platform),
+      );
+      if (text) {
+        terminal.paste(text);
+        terminal.focus();
+      }
+    };
+    container.addEventListener("dragover", handleDragOver);
+    container.addEventListener("drop", handleDrop);
+
     const resizeTerminal = () => {
       if (container.clientWidth < 40 || container.clientHeight < 40) {
         return;
@@ -270,6 +304,8 @@ export function TerminalView({
       observer.disconnect();
       container.removeEventListener("contextmenu", handleContextMenu);
       container.removeEventListener("paste", handlePaste, true);
+      container.removeEventListener("dragover", handleDragOver);
+      container.removeEventListener("drop", handleDrop);
       inputDisposable.dispose();
       unsubscribe();
       outputScheduler.dispose();

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AssistantStateChangedEvent,
   DesktopApi,
@@ -90,6 +90,16 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.stopSession, sessionId),
   readClipboardText: () =>
     ipcRenderer.invoke(IPC_CHANNELS.readClipboardText),
+  getPathsForFiles: (files) =>
+    Array.from(files)
+      .map((file) => {
+        try {
+          return webUtils.getPathForFile(file);
+        } catch {
+          return "";
+        }
+      })
+      .filter((path) => path.length > 0),
   writeClipboardText: (text) =>
     ipcRenderer.invoke(IPC_CHANNELS.writeClipboardText, text),
   showSessionNotification: (request) =>

@@ -8,6 +8,7 @@ import {
 } from "electron";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { appIndexPath, isAppPageUrl } from "./app-navigation";
 import { ClaudeLocator } from "./claude-locator";
 import { AssistantService } from "./assistant-service";
 import { AssistantStore } from "./assistant-store";
@@ -74,15 +75,13 @@ function createWindow(backgroundColor = "#12110f"): BrowserWindow {
     return { action: "deny" };
   });
 
+  // Only the app's own page may be loaded in this window. Allowing any
+  // file:// URL let a file dropped onto the window replace the whole UI (and
+  // that page would still see the preload API).
   window.webContents.on("will-navigate", (event, url) => {
-    const developmentUrl = process.env.VITE_DEV_SERVER_URL;
-    if (developmentUrl && url.startsWith(developmentUrl)) {
-      return;
+    if (!isAppPageUrl(url, process.env.VITE_DEV_SERVER_URL)) {
+      event.preventDefault();
     }
-    if (url.startsWith("file://")) {
-      return;
-    }
-    event.preventDefault();
   });
 
   window.once("ready-to-show", () => window.show());
@@ -139,7 +138,7 @@ function createWindow(backgroundColor = "#12110f"): BrowserWindow {
   if (developmentUrl) {
     void window.loadURL(developmentUrl);
   } else {
-    void window.loadFile(join(__dirname, "../../renderer/index.html"));
+    void window.loadFile(appIndexPath());
   }
 
   return window;
@@ -278,9 +277,10 @@ async function startApplication(): Promise<void> {
   );
   // Clean up temporary session directories that no saved session uses any
   // more (e.g. a removal that failed while the process still held them).
+  const sessionsForCleanup = sessionManager;
   void temporaryWorkspace
-    .removeOrphans(
-      sessionManager
+    .removeOrphans(() =>
+      sessionsForCleanup
         .listSessions()
         .filter((session) => session.projectId === null)
         .map((session) => session.cwd),

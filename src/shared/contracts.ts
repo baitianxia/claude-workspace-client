@@ -446,6 +446,11 @@ export interface DesktopApi {
   removeSession(sessionId: string): Promise<void>;
   stopSession(sessionId: string): Promise<void>;
   readClipboardText(): Promise<string>;
+  /**
+   * Local paths of files dropped onto the window. Files without a local path
+   * (for example dragged from a browser) are left out.
+   */
+  getPathsForFiles(files: readonly File[]): string[];
   writeClipboardText(text: string): Promise<void>;
   showSessionNotification(request: SessionNotificationRequest): Promise<void>;
   writeTerminal(request: WriteTerminalRequest): void;

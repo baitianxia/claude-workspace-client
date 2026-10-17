@@ -765,6 +765,7 @@ export function installDevelopmentPreview(): void {
       }
     },
     readClipboardText: async () => clipboardText,
+    getPathsForFiles: (files) => Array.from(files).map((file) => file.name),
     writeClipboardText: async (text) => {
       clipboardText = text;
     },
