@@ -22,6 +22,9 @@ import {
 } from "../src/main/wecom-bridge";
 
 const DOWN = "\x1b[B";
+// What Claude Code shows for a permission request without suggestions.
+const TWO_OPTION_PERMISSION_MENU =
+  " Do you want to proceed?\r\n❯ 1. Yes\r\n  2. No, and tell Claude what to do differently (esc)\r\n";
 
 interface FakePty {
   process: IPty;
@@ -367,11 +370,20 @@ describe("WeComBridge", () => {
     await vi.waitFor(() => expect(client.sent).toHaveLength(1));
     const code = routeCode(markdownContent(client.sent[0].body));
 
-    // ...but the terminal shows three, so position 2 would mean something else.
+    // No menu on screen yet: arrow keys would land in an input box.
+    client.emit("message", incomingMessage("menu-absent", `${code} 2`));
+    await vi.waitFor(() =>
+      expect(client.replies).toContainEqual(
+        expect.stringContaining("没有显示可选择的菜单"),
+      ),
+    );
+    expect(pty.writes).toEqual([]);
+
+    // ...and then the terminal shows three, so position 2 means something else.
     pty.emitData("\u001b[36m❯\u001b[39m 1. Yes\r\n  2. Yes, and don't ask again\r\n  3. No\r\n");
     client.emit("message", incomingMessage("menu-mismatch", `${code} 2`));
     await vi.waitFor(() =>
-      expect(client.replies).toContainEqual(expect.stringContaining("未发送任何按键")),
+      expect(client.replies).toContainEqual(expect.stringContaining("重发也无法解决")),
     );
     expect(pty.writes).toEqual([]);
 
@@ -494,6 +506,9 @@ describe("WeComBridge", () => {
       hook(second.id, launchIds.get(second.id)!, "npm test -- second"),
     );
     await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    // Remote menu replies are only written while a matching menu is shown.
+    firstPty.emitData(TWO_OPTION_PERMISSION_MENU);
+    secondPty.emitData(TWO_OPTION_PERMISSION_MENU);
 
     const firstCode = routeCode(markdownContent(client.sent[0].body));
     const secondCode = routeCode(markdownContent(client.sent[1].body));
@@ -673,6 +688,7 @@ describe("WeComBridge", () => {
 
     bridge.handleClaudeHook(hook(session.id, launchId, "npm test -- first"));
     await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    pty.emitData(TWO_OPTION_PERMISSION_MENU);
     const firstCode = routeCode(markdownContent(client.sent[0].body));
     const controlInput = [
       "\x1b[O",
