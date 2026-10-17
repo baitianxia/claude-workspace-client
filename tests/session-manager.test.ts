@@ -361,6 +361,156 @@ describe("SessionManager", () => {
     );
   });
 
+  it("starts a new Claude session when the bound transcript no longer exists", () => {
+    const first = fakePty();
+    const second = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process) as unknown as PtySpawner;
+    const lookups: string[] = [];
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      spawner,
+      "win32",
+      [],
+      undefined,
+      undefined,
+      (claudeSessionId) => {
+        lookups.push(claudeSessionId);
+        return "missing";
+      },
+    );
+
+    const created = manager.createSession(project());
+    first.emitExit(0);
+    const restarted = manager.restartSession(created.id);
+
+    expect(lookups).toEqual([created.claudeSessionId]);
+    expect(restarted.claudeSessionId).toEqual(expect.any(String));
+    expect(restarted.claudeSessionId).not.toBe(created.claudeSessionId);
+    expect(spawner).toHaveBeenNthCalledWith(
+      2,
+      "C:\\Tools\\claude.exe",
+      ["--session-id", restarted.claudeSessionId],
+      expect.objectContaining({ cwd: created.cwd }),
+    );
+    expect(manager.getTerminalSnapshot(created.id).data).toContain(
+      "原来绑定的对话记录已不存在",
+    );
+  });
+
+  it("starts a new session after Claude reports that a resumed conversation is missing", () => {
+    const first = fakePty();
+    const second = fakePty();
+    const third = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process)
+      .mockReturnValueOnce(third.process) as unknown as PtySpawner;
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      spawner,
+      "darwin",
+      [],
+      undefined,
+      undefined,
+      () => "found",
+    );
+
+    const created = manager.createSession(project());
+    first.emitExit(0);
+    manager.restartSession(created.id);
+    expect(spawner).toHaveBeenNthCalledWith(
+      2,
+      "/usr/local/bin/claude",
+      ["--resume", created.claudeSessionId],
+      expect.objectContaining({ cwd: created.cwd }),
+    );
+
+    // The error can arrive split across PTY chunks and wrapped in colours.
+    second.emitData("\u001b[31mNo conversation found with ");
+    second.emitData(`session ID: ${created.claudeSessionId}\u001b[0m\r\n`);
+    second.emitExit(1);
+    expect(manager.getTerminalSnapshot(created.id).data).toContain(
+      "找不到原来绑定的对话记录",
+    );
+
+    const restarted = manager.restartSession(created.id);
+    expect(restarted.claudeSessionId).not.toBe(created.claudeSessionId);
+    expect(spawner).toHaveBeenNthCalledWith(
+      3,
+      "/usr/local/bin/claude",
+      ["--session-id", restarted.claudeSessionId],
+      expect.objectContaining({ cwd: created.cwd }),
+    );
+  });
+
+  it("does not discard a resumed conversation that only mentions the resume error", () => {
+    const first = fakePty();
+    const second = fakePty();
+    const third = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process)
+      .mockReturnValueOnce(third.process) as unknown as PtySpawner;
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      spawner,
+      "darwin",
+      [],
+      undefined,
+      undefined,
+      () => "found",
+    );
+
+    const created = manager.createSession(project());
+    first.emitExit(0);
+    manager.restartSession(created.id);
+    // Rendered history of the resumed conversation quotes the error text.
+    second.emitData("上次讨论：No conversation found with session ID 是什么意思？\r\n");
+    second.emitExit(0);
+
+    manager.restartSession(created.id);
+    expect(spawner).toHaveBeenNthCalledWith(
+      3,
+      "/usr/local/bin/claude",
+      ["--resume", created.claudeSessionId],
+      expect.objectContaining({ cwd: created.cwd }),
+    );
+  });
+
+  it("keeps resuming when the transcript lookup is inconclusive", () => {
+    const first = fakePty();
+    const second = fakePty();
+    const spawner = vi
+      .fn()
+      .mockReturnValueOnce(first.process)
+      .mockReturnValueOnce(second.process) as unknown as PtySpawner;
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      spawner,
+      "darwin",
+      [],
+      undefined,
+      undefined,
+      () => "unknown",
+    );
+
+    const created = manager.createSession(project());
+    first.emitExit(0);
+    manager.restartSession(created.id);
+
+    expect(spawner).toHaveBeenNthCalledWith(
+      2,
+      "/usr/local/bin/claude",
+      ["--resume", created.claudeSessionId],
+      expect.objectContaining({ cwd: created.cwd }),
+    );
+  });
+
   it("ignores a SessionStart ID from a stale launch", () => {
     const fake = fakePty();
     const manager = new SessionManager(

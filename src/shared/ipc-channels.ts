@@ -14,6 +14,7 @@ export const IPC_CHANNELS = {
   resetAssistantConversation: "workspace:reset-assistant-conversation",
   closeAssistantConversation: "workspace:close-assistant-conversation",
   cancelAssistantTurn: "workspace:cancel-assistant-turn",
+  manageAssistantTask: "workspace:manage-assistant-task",
   createSession: "workspace:create-session",
   restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",

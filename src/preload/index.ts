@@ -27,6 +27,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   resetAssistantConversation: "workspace:reset-assistant-conversation",
   closeAssistantConversation: "workspace:close-assistant-conversation",
   cancelAssistantTurn: "workspace:cancel-assistant-turn",
+  manageAssistantTask: "workspace:manage-assistant-task",
   createSession: "workspace:create-session",
   restartSession: "workspace:restart-session",
   renameSession: "workspace:rename-session",
@@ -75,6 +76,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.closeAssistantConversation, assistantId),
   cancelAssistantTurn: (conversationId, turnId) =>
     ipcRenderer.invoke(IPC_CHANNELS.cancelAssistantTurn, conversationId, turnId),
+  manageAssistantTask: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.manageAssistantTask, request),
   createSession: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.createSession, request),
   restartSession: (sessionId) =>

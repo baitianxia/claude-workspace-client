@@ -129,8 +129,15 @@ export function buildAssistantTaskSdkOptions(
   };
 }
 
+const MAX_PENDING_CANCELLATIONS = 100;
+
 export class ClaudeCodeAssistantTaskRunner {
   private readonly active = new Map<string, ActiveTaskQuery>();
+  /**
+   * Cancellation requests that arrived before `run()` registered the query
+   * (it first awaits the SDK import). They are applied as soon as it does.
+   */
+  private readonly cancelBeforeStart = new Set<string>();
   private queryFactoryPromise: Promise<ClaudeTaskSdkQueryFactory> | null = null;
 
   constructor(
@@ -140,7 +147,17 @@ export class ClaudeCodeAssistantTaskRunner {
 
   cancel(runId: string): boolean {
     const active = this.active.get(runId);
-    if (!active || active.termination) {
+    if (!active) {
+      this.cancelBeforeStart.add(runId);
+      if (this.cancelBeforeStart.size > MAX_PENDING_CANCELLATIONS) {
+        const oldest = this.cancelBeforeStart.values().next().value;
+        if (typeof oldest === "string") {
+          this.cancelBeforeStart.delete(oldest);
+        }
+      }
+      return false;
+    }
+    if (active.termination) {
       return false;
     }
     active.termination = "cancelled";
@@ -173,6 +190,9 @@ export class ClaudeCodeAssistantTaskRunner {
     });
     const active: ActiveTaskQuery = { query, abortController };
     this.active.set(input.runId, active);
+    if (this.cancelBeforeStart.delete(input.runId)) {
+      this.cancel(input.runId);
+    }
     const timeout = setTimeout(() => {
       if (!active.termination) {
         active.termination = "timed-out";

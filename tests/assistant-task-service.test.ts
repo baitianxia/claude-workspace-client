@@ -54,12 +54,45 @@ class FakeRunner implements AssistantTaskRunner {
     );
   }
 
-  cancel(): boolean {
+  cancel(_runId: string): boolean {
     return false;
   }
 
   dispose(): void {
     this.disposed = true;
+  }
+}
+
+class ControllableRunner extends FakeRunner {
+  readonly cancelled: string[] = [];
+  private readonly pending = new Map<
+    string,
+    (result: ClaudeCodeAssistantTaskResult) => void
+  >();
+
+  override async run(
+    input: ClaudeCodeAssistantTaskInput,
+  ): Promise<ClaudeCodeAssistantTaskResult> {
+    this.inputs.push(input);
+    return new Promise((resolve) => this.pending.set(input.runId, resolve));
+  }
+
+  override cancel(runId: string): boolean {
+    this.cancelled.push(runId);
+    const resolve = this.pending.get(runId);
+    if (!resolve) {
+      return false;
+    }
+    this.pending.delete(runId);
+    resolve({ status: "cancelled", error: "定时任务运行已取消。" });
+    return true;
+  }
+
+  override dispose(): void {
+    super.dispose();
+    for (const [runId] of this.pending) {
+      this.cancel(runId);
+    }
   }
 }
 
@@ -93,11 +126,12 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for assistant task state.");
 }
 
-async function fixture() {
+async function fixture<T extends FakeRunner = FakeRunner>(
+  runner: T = new FakeRunner() as T,
+) {
   const root = await mkdtemp(join(tmpdir(), "assistant-task-service-"));
   temporaryDirectories.push(root);
   const store = new AssistantTaskStore(join(root, "assistant-tasks.json"));
-  const runner = new FakeRunner();
   const gateway = new FakeGateway();
   const profiles = new Map([
     ["assistant-one", profile()],
@@ -272,6 +306,55 @@ describe("AssistantTaskService", () => {
       response: "任务完成",
       deliveryError: expect.stringContaining("connection lost"),
     });
+  });
+
+  it("stops a running task run on the owner's request", async () => {
+    const runner = new ControllableRunner();
+    const { service } = await fixture(runner);
+    const task = await createTask(service);
+
+    const run = await service.runTaskNow("assistant-one", task.id);
+    await waitFor(() => runner.inputs.length === 1);
+    expect(service.listRunningTaskIds()).toEqual([task.id]);
+
+    await service.cancelTaskRun("assistant-one", task.id);
+
+    expect(runner.cancelled).toEqual([run.id]);
+    await waitFor(() => service.listRunningTaskIds().length === 0);
+    expect(service.listRuns({ taskId: task.id }).at(-1)).toMatchObject({
+      id: run.id,
+      status: "cancelled",
+    });
+  });
+
+  it("does not start Claude when a run is stopped while it is still preparing", async () => {
+    const runner = new ControllableRunner();
+    const { service } = await fixture(runner);
+    const task = await createTask(service);
+
+    const run = await service.runTaskNow("assistant-one", task.id);
+    // The run is registered but still awaiting its own setup.
+    await service.cancelTaskRun("assistant-one", task.id);
+
+    await waitFor(() => service.listRunningTaskIds().length === 0);
+    expect(runner.inputs).toEqual([]);
+    expect(service.listRuns({ taskId: task.id }).at(-1)).toMatchObject({
+      id: run.id,
+      status: "cancelled",
+      error: expect.stringContaining("开始执行前"),
+    });
+  });
+
+  it("only stops an active run of the assistant's own task", async () => {
+    const { service } = await fixture();
+    const task = await createTask(service);
+
+    await expect(
+      service.cancelTaskRun("assistant-one", task.id),
+    ).rejects.toThrow("没有正在运行的实例");
+    await expect(
+      service.cancelTaskRun("assistant-two", task.id),
+    ).rejects.toThrow("不属于当前助理");
   });
 
   it("turns a thrown runner error into a terminal visible failure", async () => {

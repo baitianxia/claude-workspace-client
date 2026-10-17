@@ -152,6 +152,11 @@ export interface AssistantTurnRecord {
   response?: string;
   error?: string;
   deliveryError?: string;
+  /**
+   * Client-generated note shown with the reply, e.g. that the saved Claude
+   * session had expired and this turn started a new one.
+   */
+  notice?: string;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -215,6 +220,11 @@ export interface AssistantSnapshot {
   lastSchedulerCheckAt?: number;
   schedulerError?: string;
   schedulerErrorAt?: number;
+  /**
+   * Problems found while loading assistant or task data (skipped records or
+   * an unreadable file that was backed up and reset).
+   */
+  dataWarnings?: string[];
 }
 
 export interface AppSnapshot {
@@ -392,6 +402,19 @@ export interface WriteTerminalRequest {
   data: string;
 }
 
+export type AssistantTaskAction =
+  | "pause"
+  | "resume"
+  | "run-now"
+  | "cancel-run"
+  | "delete";
+
+export interface ManageAssistantTaskRequest {
+  assistantId: string;
+  taskId: string;
+  action: AssistantTaskAction;
+}
+
 export interface DesktopApi {
   getSnapshot(): Promise<AppSnapshot>;
   setTheme(theme: AppTheme): Promise<AppTheme>;
@@ -415,6 +438,8 @@ export interface DesktopApi {
   closeAssistantConversation(assistantId: string): Promise<void>;
   /** Cancel the running turn, or a specific queued turn when turnId is given. */
   cancelAssistantTurn(conversationId: string, turnId?: string): Promise<void>;
+  /** Pause, resume, run, stop or delete a scheduled task from the UI. */
+  manageAssistantTask(request: ManageAssistantTaskRequest): Promise<void>;
   createSession(request: CreateSessionRequest): Promise<SessionRecord>;
   restartSession(sessionId: string): Promise<SessionRecord>;
   renameSession(request: RenameSessionRequest): Promise<SessionRecord>;

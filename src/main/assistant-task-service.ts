@@ -128,6 +128,8 @@ function toolText(value: unknown) {
 export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvents> {
   private readonly activeTaskIds = new Set<string>();
   private readonly activeRuns = new Map<string, Promise<void>>();
+  /** Runs the owner asked to stop before the Claude query had started. */
+  private readonly cancelRequestedRunIds = new Set<string>();
   private readonly mcpServers = new Map<string, Promise<McpServerConfig>>();
   private readonly scheduler: ScheduledJobService;
   private initialized = false;
@@ -209,6 +211,10 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
 
   getSchedulerErrorAt(): number | undefined {
     return this.schedulerErrorAt;
+  }
+
+  getStoreLoadWarnings(): string[] {
+    return this.store.getLoadWarnings();
   }
 
   hasRunningRuns(): boolean {
@@ -355,6 +361,31 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
     return this.startRun(task, "manual");
   }
 
+  /**
+   * Stop the running instance of a task. Without this a stuck run could only
+   * end at its timeout (up to 120 minutes), and until then the assistant
+   * could not be edited, disabled or deleted.
+   */
+  async cancelTaskRun(
+    assistantId: string,
+    taskId: string,
+  ): Promise<AssistantTaskRunRecord> {
+    this.requireOwnedTask(assistantId, taskId);
+    const run = this.store
+      .listRuns({ assistantId, taskId })
+      .filter((candidate) => isActiveRun(candidate) && this.activeRuns.has(candidate.id))
+      .at(-1);
+    if (!run) {
+      throw new Error("这个定时任务当前没有正在运行的实例。");
+    }
+    // The run may still be preparing (resolving its directory or tools)
+    // before the Claude query exists; executeRun checks this flag before it
+    // starts the query, and the runner cancels a query already in progress.
+    this.cancelRequestedRunIds.add(run.id);
+    this.runner.cancel(run.id);
+    return run;
+  }
+
   async removeAssistant(assistantId: string): Promise<void> {
     if (this.hasRunningRunsForAssistant(assistantId)) {
       throw new Error("私人助理仍有定时任务正在运行。");
@@ -456,6 +487,7 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
       .finally(() => {
         this.activeTaskIds.delete(task.id);
         this.activeRuns.delete(run.id);
+        this.cancelRequestedRunIds.delete(run.id);
         this.emitStateChanged();
       });
     this.activeRuns.set(run.id, worker);
@@ -494,16 +526,18 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
             this.wecomBots,
           )
         : undefined;
-      result = await this.runner.run({
-        runId: running.id,
-        profile,
-        task,
-        projectRoot,
-        ...(wecomMcpServer ? { wecomMcpServer } : {}),
-        ...(running.scheduledFor === undefined
-          ? {}
-          : { scheduledFor: running.scheduledFor }),
-      });
+      result = this.cancelRequestedRunIds.has(running.id)
+        ? { status: "cancelled", error: "主人在任务开始执行前停止了这次运行。" }
+        : await this.runner.run({
+            runId: running.id,
+            profile,
+            task,
+            projectRoot,
+            ...(wecomMcpServer ? { wecomMcpServer } : {}),
+            ...(running.scheduledFor === undefined
+              ? {}
+              : { scheduledFor: running.scheduledFor }),
+          });
     } catch (error) {
       result = { status: "failed", error: readableError(error) };
     }
@@ -696,6 +730,17 @@ export class AssistantTaskService extends EventEmitter<AssistantTaskServiceEvent
           "立即启动当前私人助理的一个任务；本次运行会使用全新的一次性 Claude 会话。",
           { task_id: z.string().min(1).max(200) },
           (args) => guarded(() => this.runTaskNow(assistantId, args.task_id)),
+          { alwaysLoad: true },
+        ),
+        tool(
+          "cancel_task_run",
+          "停止当前私人助理某个定时任务正在运行的实例。只在主人明确要求停止时使用。",
+          { task_id: z.string().min(1).max(200) },
+          (args) =>
+            guarded(async () => {
+              await this.cancelTaskRun(assistantId, args.task_id);
+              return "已请求停止该任务的本次运行。";
+            }),
           { alwaysLoad: true },
         ),
         tool(

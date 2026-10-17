@@ -12,6 +12,7 @@ import type {
   SendAssistantMessageRequest,
   AppSnapshot,
   CreateSessionRequest,
+  ManageAssistantTaskRequest,
   ReadWorkspaceFileRequest,
   RenameSessionRequest,
   ResizeTerminalRequest,
@@ -259,6 +260,20 @@ export function registerIpcHandlers(options: {
       assistantService.closeOwnerConversation(
         requireIdentifier(assistantId, "Assistant profile ID"),
       ),
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.manageAssistantTask,
+    (_event, request: ManageAssistantTaskRequest) => {
+      if (!request || typeof request !== "object") {
+        throw new Error("定时任务操作请求无效。");
+      }
+      return assistantService.manageTask({
+        assistantId: requireIdentifier(request.assistantId, "Assistant profile ID"),
+        taskId: requireIdentifier(request.taskId, "Assistant task ID"),
+        action: request.action,
+      });
+    },
   );
 
   ipcMain.handle(

@@ -225,6 +225,7 @@ function normalizeTurn(value: unknown): AssistantTurnRecord | null {
     !optionalString(candidate.response) ||
     !optionalString(candidate.error) ||
     !optionalString(candidate.deliveryError) ||
+    !optionalString(candidate.notice) ||
     typeof candidate.createdAt !== "number" ||
     !Number.isFinite(candidate.createdAt) ||
     !optionalNumber(candidate.startedAt) ||
@@ -240,6 +241,8 @@ function normalizeTurn(value: unknown): AssistantTurnRecord | null {
       !validMultilineText(candidate.error, 10_000)) ||
     (candidate.deliveryError !== undefined &&
       !validMultilineText(candidate.deliveryError, 10_000)) ||
+    (candidate.notice !== undefined &&
+      !validMultilineText(candidate.notice, 1_000)) ||
     (candidate.source === "desktop" &&
       (candidate.messageId !== undefined ||
         candidate.botProfileId !== undefined ||
@@ -287,7 +290,80 @@ function normalizeStoredWeComBot(
   return clone(candidate as StoredAssistantWeComBot);
 }
 
-function parseStore(raw: string): AssistantStoreData {
+interface ParsedAssistantStore {
+  data: AssistantStoreData;
+  /**
+   * Records skipped because they failed validation or broke a store
+   * invariant (duplicate ID, record limit, a WeCom entry bound twice).
+   */
+  droppedRecords: number;
+}
+
+const CONTROL_CHARACTERS_PATTERN =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu;
+
+function clampStoredText(
+  value: string | undefined,
+  maximum: number,
+): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const characters = [...value.replace(CONTROL_CHARACTERS_PATTERN, " ")];
+  return characters.length <= maximum
+    ? characters.join("")
+    : `${characters.slice(0, maximum - 1).join("")}…`;
+}
+
+/**
+ * Apply the same rules on write as on read. Free-text fields that are built
+ * at runtime (errors, concatenated delivery failures) are clamped first so a
+ * long diagnostic can never produce a record that the next start rejects.
+ */
+function prepareTurnForStorage(turn: AssistantTurnRecord): AssistantTurnRecord {
+  const candidate: AssistantTurnRecord = { ...turn };
+  const limits = [
+    ["response", 50_000],
+    ["error", 10_000],
+    ["deliveryError", 10_000],
+    ["notice", 1_000],
+  ] as const;
+  for (const [field, maximum] of limits) {
+    const value = clampStoredText(candidate[field], maximum);
+    if (value === undefined) {
+      delete candidate[field];
+    } else {
+      candidate[field] = value;
+    }
+  }
+  const normalized = normalizeTurn(candidate);
+  if (!normalized) {
+    throw new Error("私人助理轮次数据格式无效，未写入。");
+  }
+  return normalized;
+}
+
+function keepFirstById<T extends { id: string }>(
+  records: T[],
+): { kept: T[]; dropped: number } {
+  const seen = new Set<string>();
+  const kept: T[] = [];
+  for (const record of records) {
+    if (seen.has(record.id)) {
+      continue;
+    }
+    seen.add(record.id);
+    kept.push(record);
+  }
+  return { kept, dropped: records.length - kept.length };
+}
+
+/**
+ * Parse assistant data, skipping individual bad records instead of rejecting
+ * the whole file. Only a structurally unreadable file (invalid JSON, unknown
+ * version, missing top-level lists) is treated as corrupt.
+ */
+function parseStore(raw: string): ParsedAssistantStore {
   const parsed = JSON.parse(raw) as {
     version?: unknown;
     profiles?: unknown;
@@ -295,8 +371,10 @@ function parseStore(raw: string): AssistantStoreData {
     turns?: unknown;
     wecomBots?: unknown;
     legacyWeComBotsImported?: unknown;
-  };
+  } | null;
   if (
+    !parsed ||
+    typeof parsed !== "object" ||
     (parsed.version !== 1 && parsed.version !== 2) ||
     !Array.isArray(parsed.profiles) ||
     !Array.isArray(parsed.conversations) ||
@@ -304,63 +382,79 @@ function parseStore(raw: string): AssistantStoreData {
   ) {
     throw new Error("Assistant data has an unsupported format.");
   }
-  const profiles = parsed.profiles.map(normalizeProfile);
-  const conversations = parsed.conversations.map(normalizeConversation);
-  const turns = parsed.turns.map(normalizeTurn);
-  const wecomBots =
+  const rawWeComBots =
     parsed.version === 1 && parsed.wecomBots === undefined
       ? []
-      : Array.isArray(parsed.wecomBots)
-        ? parsed.wecomBots.map(normalizeStoredWeComBot)
-        : null;
-  if (
-    profiles.some((entry) => entry === null) ||
-    conversations.some((entry) => entry === null) ||
-    turns.some((entry) => entry === null) ||
-    wecomBots === null ||
-    wecomBots.some((entry) => entry === null)
-  ) {
-    throw new Error("Assistant data contains an invalid record.");
+      : parsed.wecomBots;
+  if (!Array.isArray(rawWeComBots)) {
+    throw new Error("Assistant data has an invalid WeCom entry list.");
   }
-  if (
-    profiles.length > MAX_ASSISTANT_PROFILES ||
-    conversations.length > MAX_ASSISTANT_CONVERSATIONS ||
-    wecomBots.length > MAX_ASSISTANT_WECOM_BOTS
-  ) {
-    throw new Error("Assistant data exceeds its configured record limits.");
-  }
-  if (
-    new Set((profiles as AssistantProfileRecord[]).map((entry) => entry.id))
-      .size !== profiles.length ||
-    new Set(
-      (conversations as AssistantConversationRecord[]).map((entry) => entry.id),
-    ).size !== conversations.length ||
-    new Set((turns as AssistantTurnRecord[]).map((entry) => entry.id)).size !==
-      turns.length ||
-    new Set((wecomBots as StoredAssistantWeComBot[]).map((entry) => entry.id))
-      .size !== wecomBots.length
-  ) {
-    throw new Error("Assistant data contains duplicate record IDs.");
-  }
-  const configuredBotProfileIds = (profiles as AssistantProfileRecord[])
-    .flatMap((profile) =>
-      profile.wecomBotProfileId ? [profile.wecomBotProfileId] : [],
-    );
-  if (
-    new Set(configuredBotProfileIds).size !== configuredBotProfileIds.length
-  ) {
-    throw new Error("Assistant data binds one WeCom entry more than once.");
-  }
-  const profileRecords = profiles as AssistantProfileRecord[];
+  let droppedRecords = 0;
+  const keepValid = <T>(
+    values: unknown[],
+    normalize: (value: unknown) => T | null,
+  ): T[] => {
+    const valid: T[] = [];
+    for (const value of values) {
+      const normalized = normalize(value);
+      if (normalized) {
+        valid.push(normalized);
+      } else {
+        droppedRecords += 1;
+      }
+    }
+    return valid;
+  };
+  const keepUnique = <T extends { id: string }>(records: T[]): T[] => {
+    const result = keepFirstById(records);
+    droppedRecords += result.dropped;
+    return result.kept;
+  };
+  const keepWithinLimit = <T>(records: T[], maximum: number): T[] => {
+    if (records.length <= maximum) {
+      return records;
+    }
+    droppedRecords += records.length - maximum;
+    return records.slice(0, maximum);
+  };
+
+  const boundBotProfileIds = new Set<string>();
+  const profileRecords = keepWithinLimit(
+    keepUnique(keepValid(parsed.profiles, normalizeProfile)),
+    MAX_ASSISTANT_PROFILES,
+  ).map((profile) => {
+    if (!profile.wecomBotProfileId) {
+      return profile;
+    }
+    if (boundBotProfileIds.has(profile.wecomBotProfileId)) {
+      // A WeCom entry may belong to only one assistant. Keep the first
+      // binding and unbind the duplicate instead of rejecting the file.
+      droppedRecords += 1;
+      const unbound = { ...profile };
+      delete unbound.wecomBotProfileId;
+      return unbound;
+    }
+    boundBotProfileIds.add(profile.wecomBotProfileId);
+    return profile;
+  });
+  const wecomBots = keepWithinLimit(
+    keepUnique(keepValid(rawWeComBots, normalizeStoredWeComBot)),
+    MAX_ASSISTANT_WECOM_BOTS,
+  );
   const profileIds = new Set(profileRecords.map((profile) => profile.id));
-  const conversationRecords = (conversations as AssistantConversationRecord[])
-    .filter((conversation) => profileIds.has(conversation.assistantId))
-    .sort((left, right) => right.updatedAt - left.updatedAt);
+  // Orphaned conversations (their assistant was removed) are dropped
+  // silently, as before; only valid records count against the limit.
+  const conversationRecords = keepWithinLimit(
+    keepUnique(keepValid(parsed.conversations, normalizeConversation)).filter(
+      (conversation) => profileIds.has(conversation.assistantId),
+    ),
+    MAX_ASSISTANT_CONVERSATIONS,
+  ).sort((left, right) => right.updatedAt - left.updatedAt);
   const conversationIds = new Set(
     conversationRecords.map((conversation) => conversation.id),
   );
   const turnRecords = limitTurns(
-    (turns as AssistantTurnRecord[]).filter(
+    keepUnique(keepValid(parsed.turns, normalizeTurn)).filter(
       (turn) =>
         profileIds.has(turn.assistantId) &&
         conversationIds.has(turn.conversationId) &&
@@ -383,13 +477,16 @@ function parseStore(raw: string): AssistantStoreData {
     }
   }
   return {
-    version: 2,
-    profiles: profileRecords,
-    conversations: conversationRecords,
-    turns: turnRecords,
-    wecomBots: wecomBots as StoredAssistantWeComBot[],
-    legacyWeComBotsImported:
-      parsed.version === 2 && parsed.legacyWeComBotsImported === true,
+    data: {
+      version: 2,
+      profiles: profileRecords,
+      conversations: conversationRecords,
+      turns: turnRecords,
+      wecomBots,
+      legacyWeComBotsImported:
+        parsed.version === 2 && parsed.legacyWeComBotsImported === true,
+    },
+    droppedRecords,
   };
 }
 
@@ -397,6 +494,7 @@ export class AssistantStore {
   private data: AssistantStoreData = clone(EMPTY_STORE);
   private initialized = false;
   private persistQueue: Promise<void> = Promise.resolve();
+  private readonly loadWarnings: string[] = [];
 
   constructor(
     private readonly storePath: string,
@@ -413,15 +511,36 @@ export class AssistantStore {
       if (!storeStat.isFile() || storeStat.size > MAX_ASSISTANT_FILE_BYTES) {
         throw new Error("Assistant data file is not a regular file or is too large.");
       }
-      this.data = parseStore(await readFile(this.storePath, "utf8"));
+      const parsed = parseStore(await readFile(this.storePath, "utf8"));
+      this.data = parsed.data;
+      if (parsed.droppedRecords > 0) {
+        // Keep the original before the next write replaces it with the
+        // filtered data, so skipped records can still be recovered by hand.
+        const backupPath = await this.backupCorruptStore().catch(() => undefined);
+        this.loadWarnings.push(
+          `助理数据中有 ${parsed.droppedRecords} 条记录无法读取，已跳过${
+            backupPath ? `；原文件已备份到 ${backupPath}` : "；原文件备份失败"
+          }。`,
+        );
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        await this.backupCorruptStore().catch(() => undefined);
+        const backupPath = await this.backupCorruptStore().catch(() => undefined);
+        this.loadWarnings.push(
+          `助理数据文件无法读取，已重置为空${
+            backupPath ? `；原文件已备份到 ${backupPath}` : "；原文件备份失败"
+          }。`,
+        );
       }
       this.data = clone(EMPTY_STORE);
     }
     this.initialized = true;
     await this.importLegacyWeComBots();
+  }
+
+  /** Problems found while loading the data file, for display to the owner. */
+  getLoadWarnings(): string[] {
+    return [...this.loadWarnings];
   }
 
   private async importLegacyWeComBots(): Promise<void> {
@@ -706,7 +825,10 @@ export class AssistantStore {
     ) {
       throw new Error("当前助理等待处理的消息过多，请稍后再试。");
     }
-    this.data.turns = limitTurns([...this.data.turns, clone(turn)]);
+    this.data.turns = limitTurns([
+      ...this.data.turns,
+      prepareTurnForStorage(turn),
+    ]);
     const conversation = this.data.conversations.find(
       (candidate) => candidate.id === turn.conversationId,
     );
@@ -789,7 +911,27 @@ export class AssistantStore {
     ) {
       throw new Error("私人助理轮次的身份或原始消息不可修改。");
     }
-    this.data.turns[index] = clone(turn);
+    this.data.turns[index] = prepareTurnForStorage(turn);
+  }
+
+  /**
+   * Forget a saved Claude session ID without touching the visible chat
+   * history. Used when Claude no longer has the transcript for that ID.
+   */
+  async clearConversationSessionId(
+    conversationId: string,
+    now = Date.now(),
+  ): Promise<void> {
+    this.assertInitialized();
+    const conversation = this.data.conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    if (!conversation?.claudeSessionId) {
+      return;
+    }
+    delete conversation.claudeSessionId;
+    conversation.updatedAt = Math.max(conversation.updatedAt, now);
+    await this.persist();
   }
 
   async resetConversation(
@@ -871,11 +1013,10 @@ export class AssistantStore {
     return operation;
   }
 
-  private async backupCorruptStore(): Promise<void> {
-    await copyFile(
-      this.storePath,
-      `${this.storePath}.corrupt-${Date.now()}.json`,
-    );
+  private async backupCorruptStore(): Promise<string> {
+    const backupPath = `${this.storePath}.corrupt-${Date.now()}.json`;
+    await copyFile(this.storePath, backupPath);
+    return backupPath;
   }
 
   private assertInitialized(): void {

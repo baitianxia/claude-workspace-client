@@ -14,6 +14,7 @@ import {
   type AssistantTaskRunner,
 } from "../src/main/assistant-task-service";
 import { AssistantTaskStore } from "../src/main/assistant-task-store";
+import type { ClaudeTranscriptLookup } from "../src/main/claude-session-files";
 import type {
   ClaudeCodeAssistantInput,
   ClaudeCodeAssistantResult,
@@ -224,7 +225,12 @@ async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for assistant state.");
 }
 
-async function fixture(runner: FakeRunner = new FakeRunner()) {
+async function fixture(
+  runner: FakeRunner = new FakeRunner(),
+  options: {
+    findTranscript?: (claudeSessionId: string) => Promise<ClaudeTranscriptLookup>;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "assistant-service-"));
   temporaryDirectories.push(root);
   const projectRoot = join(root, "project");
@@ -272,6 +278,8 @@ async function fixture(runner: FakeRunner = new FakeRunner()) {
           : undefined,
     gateway,
     tasks,
+    undefined,
+    options.findTranscript,
   );
   services.push(service);
   await service.initialize();
@@ -629,6 +637,172 @@ describe("AssistantService", () => {
         .getSnapshot()
         .turns.some((turn) => turn.request === "第十一条"),
     ).toBe(false);
+  });
+
+  it("starts a new Claude session with a notice when the saved transcript is gone", async () => {
+    const lookups: string[] = [];
+    let transcript: ClaudeTranscriptLookup = "found";
+    const { service, store, runner, gateway } = await fixture(new FakeRunner(), {
+      findTranscript: async (claudeSessionId) => {
+        lookups.push(claudeSessionId);
+        return transcript;
+      },
+    });
+    const profile = await service.upsertProfile(request());
+
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第一问" });
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    // Nothing was saved before the first message, so nothing is looked up.
+    expect(lookups).toEqual([]);
+    expect(store.getConversation(profile.id)?.claudeSessionId).toBe(FIRST_SESSION);
+
+    await service.closeOwnerConversation(profile.id);
+    transcript = "missing";
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第二问" });
+    await waitFor(() => runner.inputs.length === 2);
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+
+    expect(lookups).toEqual([FIRST_SESSION]);
+    expect(runner.inputs[1].sessionId).toBeUndefined();
+    expect(service.getSnapshot().turns.at(-1)?.notice).toContain(
+      "已开始新的会话",
+    );
+    expect(store.getConversation(profile.id)?.claudeSessionId).toBe(
+      SECOND_SESSION,
+    );
+    await waitFor(() =>
+      gateway.sent.some((entry) => entry.content.includes("已开始新的会话")),
+    );
+  });
+
+  it("does not look up the transcript while the owner session is still open", async () => {
+    const lookups: string[] = [];
+    const { service, runner } = await fixture(new FakeRunner(), {
+      findTranscript: async (claudeSessionId) => {
+        lookups.push(claudeSessionId);
+        return "missing";
+      },
+    });
+    const profile = await service.upsertProfile(request());
+
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第一问" });
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第二问" });
+    await waitFor(() => runner.inputs.length === 2);
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+
+    expect(lookups).toEqual([]);
+    expect(runner.inputs[1].sessionId).toBe(FIRST_SESSION);
+    expect(service.getSnapshot().turns.at(-1)?.notice).toBeUndefined();
+  });
+
+  it("forgets a saved session when Claude reports the conversation is missing", async () => {
+    const runner = new FakeRunner();
+    const { service, store } = await fixture(runner);
+    const profile = await service.upsertProfile(request());
+
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第一问" });
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    await service.closeOwnerConversation(profile.id);
+    runner.results.push({
+      status: "failed",
+      error: `Claude Code 主人会话错误：No conversation found with session ID: ${FIRST_SESSION}`,
+    });
+
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第二问" });
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "failed",
+    );
+    expect(runner.inputs[1].sessionId).toBe(FIRST_SESSION);
+    expect(store.getConversation(profile.id)?.claudeSessionId).toBeUndefined();
+    expect(service.getSnapshot().turns.at(-1)?.error).toContain(
+      "下一条消息会开始新的会话",
+    );
+
+    await service.sendDesktopMessage({ assistantId: profile.id, text: "第三问" });
+    await waitFor(() => runner.inputs.length === 3);
+    expect(runner.inputs[2].sessionId).toBeUndefined();
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+  });
+
+  it("manages scheduled tasks from the desktop task cards", async () => {
+    const { service } = await fixture();
+    const profile = await service.upsertProfile(request());
+    const tasksService = (
+      service as unknown as { tasks: AssistantTaskService }
+    ).tasks;
+    const task = await tasksService.createTask(profile.id, {
+      name: "每日简报",
+      schedule: "0 9 * * *",
+      prompt: "整理今日简报",
+    });
+    const taskOf = () =>
+      service.getSnapshot().tasks.find((candidate) => candidate.id === task.id);
+
+    await service.manageTask({
+      assistantId: profile.id,
+      taskId: task.id,
+      action: "pause",
+    });
+    expect(taskOf()?.enabled).toBe(false);
+
+    await service.manageTask({
+      assistantId: profile.id,
+      taskId: task.id,
+      action: "resume",
+    });
+    expect(taskOf()?.enabled).toBe(true);
+
+    await service.manageTask({
+      assistantId: profile.id,
+      taskId: task.id,
+      action: "run-now",
+    });
+    await waitFor(
+      () =>
+        service
+          .getSnapshot()
+          .taskRuns.some(
+            (run) => run.taskId === task.id && run.status === "succeeded",
+          ),
+    );
+    // Result delivery finishes before the run leaves the running set.
+    await waitFor(() => service.getSnapshot().runningTaskIds.length === 0);
+
+    await expect(
+      service.manageTask({
+        assistantId: profile.id,
+        taskId: task.id,
+        action: "cancel-run",
+      }),
+    ).rejects.toThrow("没有正在运行的实例");
+
+    await service.manageTask({
+      assistantId: profile.id,
+      taskId: task.id,
+      action: "delete",
+    });
+    expect(taskOf()).toBeUndefined();
+
+    await expect(
+      service.manageTask({
+        assistantId: profile.id,
+        taskId: task.id,
+        action: "unknown" as never,
+      }),
+    ).rejects.toThrow();
   });
 
   it("only exposes the group chat ID diagnostic and never starts the Agent", async () => {

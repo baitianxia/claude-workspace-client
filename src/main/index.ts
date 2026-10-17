@@ -11,6 +11,10 @@ import { terminateTrackedClaudeProcesses } from "./claude-agent-sdk-process";
 import { ClaudeCodeAssistantRunner } from "./claude-code-assistant-runner";
 import { ClaudeCodeAssistantTaskRunner } from "./claude-code-assistant-task-runner";
 import { ClaudeHookServer } from "./claude-hook-server";
+import {
+  findClaudeTranscript,
+  findClaudeTranscriptSync,
+} from "./claude-session-files";
 import { registerIpcHandlers } from "./ipc";
 import { ProjectStore } from "./project-store";
 import { withTimeout } from "./promise-timeout";
@@ -169,6 +173,8 @@ async function startApplication(): Promise<void> {
     process.platform,
     projectStore.listSessions(),
     hookLaunchOptions,
+    undefined,
+    (claudeSessionId) => findClaudeTranscriptSync(claudeSessionId),
   );
   await projectStore.replaceSessions(sessionManager.listSessions());
 
@@ -247,6 +253,8 @@ async function startApplication(): Promise<void> {
     (projectId) => projectStore.getProject(projectId),
     wecomAssistantEntries,
     assistantTasks,
+    Date.now,
+    (claudeSessionId) => findClaudeTranscript(claudeSessionId),
   );
   await assistantService.initialize();
   resolveAssistantServiceReady(assistantService);

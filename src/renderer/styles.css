@@ -4168,6 +4168,15 @@ button:disabled {
   font-size: 9px;
 }
 
+.assistant-turn-notice {
+  margin: 0 0 8px;
+  padding-left: 8px;
+  border-left: 2px solid #d3a254;
+  color: #cdb68a;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .assistant-queued {
   flex: 0 0 auto;
   max-height: 148px;
@@ -4761,6 +4770,37 @@ button:disabled {
 .assistant-task-card > p { min-height: 34px; margin: 10px 0; color: #a49a91; font-size: 10px; line-height: 1.55; }
 .assistant-task-delivery-target { display: block; color: #8f867d; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
 .assistant-task-card > footer { color: #7d756e; font-size: 9px; }
+
+.assistant-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  gap: 6px;
+}
+
+.assistant-task-action {
+  padding: 3px 9px;
+  border: 1px solid #4a433c;
+  border-radius: 6px;
+  color: #c9beb3;
+  background: transparent;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.assistant-task-action:hover:not(:disabled) {
+  border-color: #6a5f55;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.assistant-task-action:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.assistant-task-action--danger {
+  color: #dc8c80;
+}
 
 .assistant-task-run-state--failed,
 .assistant-task-run-state--timed-out,
@@ -5511,6 +5551,11 @@ button:disabled {
   color: #a44336;
 }
 
+.app-shell[data-theme="light"] .assistant-turn-notice {
+  border-left-color: #b8862f;
+  color: #7a5a1f;
+}
+
 .app-shell[data-theme="light"] .assistant-composer-wrap {
   border-top-color: var(--light-border);
   background: rgba(250, 249, 247, 0.96);
@@ -5695,6 +5740,19 @@ button:disabled {
 
 .app-shell[data-theme="light"] .assistant-task-delivery-target {
   color: var(--light-muted);
+}
+
+.app-shell[data-theme="light"] .assistant-task-action {
+  border-color: var(--light-border);
+  color: var(--light-text);
+}
+
+.app-shell[data-theme="light"] .assistant-task-action:hover:not(:disabled) {
+  background: rgba(62, 54, 44, 0.05);
+}
+
+.app-shell[data-theme="light"] .assistant-task-action--danger {
+  color: #a44336;
 }
 
 .app-shell[data-theme="light"] .assistant-task-run-state--failed,

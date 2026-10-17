@@ -7,6 +7,7 @@ import type {
   AssistantTurnRecord,
   AssistantWeComBotDraft,
   AssistantWeComBotProfile,
+  ManageAssistantTaskRequest,
   ProjectRecord,
   SendAssistantMessageRequest,
   UpsertAssistantProfileRequest,
@@ -29,12 +30,20 @@ import type {
   ClaudeCodeAssistantResult,
 } from "./claude-code-assistant-runner";
 import { createAssistantWeComMcpServer } from "./assistant-wecom-tools";
+import {
+  CLAUDE_RESUME_NOT_FOUND_PATTERN,
+  type ClaudeTranscriptLookup,
+} from "./claude-session-files";
 import { withTimeout } from "./promise-timeout";
 
 const MAX_QUEUED_TURNS_PER_ASSISTANT = 10;
 const MAX_ASSISTANT_MESSAGE_CHARACTERS = 4_000;
 const MAX_ASSISTANT_INSTRUCTION_CHARACTERS = 4_000;
 const WECOM_DELIVERY_TIMEOUT_MILLISECONDS = 15_000;
+const SESSION_EXPIRED_NOTICE =
+  "上次保存的 Claude 会话记录已不存在（可能已超过 Claude Code 的保留期被自动清理），本轮已开始新的会话，之前的对话上下文不再可用。";
+const SESSION_INVALIDATED_SUFFIX =
+  "已清除失效的 Claude 会话关联，下一条消息会开始新的会话。";
 const CHAT_ID_COMMAND_PATTERN =
   /(?:^|[^\p{L}\p{N}_])\/chatid(?=$|[^\p{L}\p{N}_])/iu;
 
@@ -80,6 +89,10 @@ function readableError(error: unknown): string {
       " ",
     )
     .slice(-8_000);
+}
+
+function withTurnNotice(turn: AssistantTurnRecord, content: string): string {
+  return turn.notice ? `> ${turn.notice}\n\n${content}` : content;
 }
 
 function isChatIdCommand(value: string): boolean {
@@ -178,6 +191,13 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     private readonly wecomBots: AssistantWeComGateway,
     private readonly tasks: AssistantTaskService,
     private readonly now: () => number = Date.now,
+    /**
+     * Checks that Claude still has the saved transcript before resuming it.
+     * The default keeps the previous behaviour (always try to resume).
+     */
+    private readonly findTranscript: (
+      claudeSessionId: string,
+    ) => Promise<ClaudeTranscriptLookup> = async () => "unknown",
   ) {
     super();
   }
@@ -203,6 +223,10 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     const schedulerError = this.tasks.getSchedulerError();
     const schedulerErrorAt = this.tasks.getSchedulerErrorAt();
     const lastSchedulerCheckAt = this.tasks.getLastSchedulerCheckAt();
+    const dataWarnings = [
+      ...this.store.getLoadWarnings(),
+      ...this.tasks.getStoreLoadWarnings(),
+    ];
     return {
       profiles: this.store.listProfiles(),
       conversations: conversations.map((conversation) => {
@@ -224,6 +248,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       ...(lastSchedulerCheckAt === undefined ? {} : { lastSchedulerCheckAt }),
       ...(schedulerError ? { schedulerError } : {}),
       ...(schedulerErrorAt === undefined ? {} : { schedulerErrorAt }),
+      ...(dataWarnings.length > 0 ? { dataWarnings } : {}),
     };
   }
 
@@ -645,6 +670,39 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     }
   }
 
+  async manageTask(request: ManageAssistantTaskRequest): Promise<void> {
+    const profile = this.requireProfile(request.assistantId);
+    switch (request.action) {
+      case "pause":
+        await this.tasks.updateTask(profile.id, request.taskId, {
+          enabled: false,
+        });
+        return;
+      case "resume":
+        if (!profile.enabled) {
+          throw new Error("私人助理当前已停用，启用助理后才能恢复定时任务。");
+        }
+        await this.tasks.updateTask(profile.id, request.taskId, {
+          enabled: true,
+        });
+        return;
+      case "run-now":
+        if (!profile.enabled) {
+          throw new Error("私人助理当前已停用，不能立即运行定时任务。");
+        }
+        await this.tasks.runTaskNow(profile.id, request.taskId);
+        return;
+      case "cancel-run":
+        await this.tasks.cancelTaskRun(profile.id, request.taskId);
+        return;
+      case "delete":
+        await this.tasks.deleteTask(profile.id, request.taskId);
+        return;
+      default:
+        throw new Error("不支持的定时任务操作。");
+    }
+  }
+
   async disableProfilesForProject(projectId: string): Promise<void> {
     const profiles = this.store
       .listProfiles()
@@ -1016,10 +1074,12 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
         continue;
       }
       const conversation = await this.ensureOwnerConversation(turn.assistantId);
+      const resume = await this.resumableSessionId(conversation);
       const running: AssistantTurnRecord = {
         ...turn,
         status: "running",
         startedAt: this.now(),
+        ...(resume.notice ? { notice: resume.notice } : {}),
       };
       await this.store.replaceTurn(running);
       this.emitStateChanged();
@@ -1040,9 +1100,7 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
             );
             this.emitStateChanged();
           },
-          ...(conversation.claudeSessionId
-            ? { sessionId: conversation.claudeSessionId }
-            : {}),
+          ...(resume.sessionId ? { sessionId: resume.sessionId } : {}),
         });
       } catch (error) {
         result = { status: "failed", error: readableError(error) };
@@ -1051,12 +1109,43 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     }
   }
 
+  /**
+   * Decide which saved Claude session, if any, this turn should resume. A
+   * live runtime already holds its session, so only a closed conversation is
+   * checked. When Claude no longer has the transcript (it removes them after
+   * its retention period), `resume` would fail on every message; start a new
+   * session instead and tell the owner why the earlier context is gone.
+   */
+  private async resumableSessionId(
+    conversation: AssistantConversationRecord,
+  ): Promise<{ sessionId?: string; notice?: string }> {
+    const sessionId = conversation.claudeSessionId;
+    if (
+      !sessionId ||
+      this.runner.listOpenAssistantIds().includes(conversation.assistantId)
+    ) {
+      return sessionId ? { sessionId } : {};
+    }
+    let lookup: ClaudeTranscriptLookup;
+    try {
+      lookup = await this.findTranscript(sessionId);
+    } catch {
+      lookup = "unknown";
+    }
+    if (lookup !== "missing") {
+      return { sessionId };
+    }
+    await this.store.clearConversationSessionId(conversation.id, this.now());
+    this.emitStateChanged();
+    return { notice: SESSION_EXPIRED_NOTICE };
+  }
+
   private async finishTurn(
     turn: AssistantTurnRecord,
     result: ClaudeCodeAssistantResult,
   ): Promise<void> {
     const timestamp = this.now();
-    const normalizedResult: ClaudeCodeAssistantResult =
+    let normalizedResult: ClaudeCodeAssistantResult =
       result.status === "succeeded" &&
       (!result.response || !result.sessionId)
         ? {
@@ -1065,6 +1154,24 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
             error: "私人助理没有返回完整的回复或会话 ID。",
           }
         : result;
+    if (
+      normalizedResult.status !== "succeeded" &&
+      CLAUDE_RESUME_NOT_FOUND_PATTERN.test(
+        `${normalizedResult.error ?? ""}\n${normalizedResult.diagnostic ?? ""}`,
+      )
+    ) {
+      // The pre-launch transcript lookup can be inconclusive. If Claude still
+      // reports that the saved conversation is gone, forget the ID so the
+      // next message starts a new session instead of failing the same way.
+      await this.store.clearConversationSessionId(
+        turn.conversationId,
+        timestamp,
+      );
+      normalizedResult = {
+        status: normalizedResult.status,
+        error: `${normalizedResult.error ?? "Claude Code 找不到已保存的会话。"}\n${SESSION_INVALIDATED_SUFFIX}`,
+      };
+    }
     const previousDeliveryError = this.store
       .listTurns()
       .find((candidate) => candidate.id === turn.id)?.deliveryError;
@@ -1087,10 +1194,12 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     );
     this.emitStateChanged();
     if (turn.source === "wecom" && turn.botProfileId && turn.userId) {
-      const content =
+      const content = withTurnNotice(
+        turn,
         normalizedResult.status === "succeeded" && normalizedResult.response
           ? normalizedResult.response
-          : `本轮处理未完成：${normalizedResult.error ?? "未知错误"}`;
+          : `本轮处理未完成：${normalizedResult.error ?? "未知错误"}`,
+      );
       const deliveryErrors = await this.deliverWeComMessages(
         turn.botProfileId,
         turn.userId,
@@ -1117,10 +1226,12 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     ) {
       return;
     }
-    const response =
+    const response = withTurnNotice(
+      turn,
       normalizedResult.status === "succeeded" && normalizedResult.response
         ? normalizedResult.response
-        : `本轮处理未完成：${normalizedResult.error ?? "未知错误"}`;
+        : `本轮处理未完成：${normalizedResult.error ?? "未知错误"}`,
+    );
     await this.mirrorDesktopResponse(
       completed,
       profile.wecomBotProfileId,

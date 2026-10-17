@@ -13,10 +13,24 @@ import {
   splitTerminalPaste,
 } from "../shared/terminal-paste";
 import { createClaudeLaunchSpec } from "./claude-executable";
+import {
+  CLAUDE_RESUME_NOT_FOUND_PATTERN,
+  stripAnsi,
+  type ClaudeTranscriptLookup,
+} from "./claude-session-files";
 import { terminateProcessTree } from "./process-tree";
 import { nextSessionTitle } from "./session-title";
 
 const MAX_TERMINAL_BUFFER_LENGTH = 2_000_000;
+// Only the beginning of a resumed launch can contain Claude's "No
+// conversation found" error, and the probe keeps a short rolling window so a
+// message split across PTY chunks still matches.
+const RESUME_PROBE_WINDOW_LENGTH = 1_024;
+const RESUME_PROBE_MAX_OUTPUT_LENGTH = 16_000;
+// A real resume failure prints the error and exits immediately with a
+// non-zero code. Requiring both keeps a resumed conversation that merely
+// *mentions* the error text (in its rendered history) from being discarded.
+const RESUME_FAILURE_EXIT_WINDOW_MS = 30_000;
 // Claude Code's Ink picker reads one keypress per PTY write. A short gap keeps
 // consecutive arrow/Enter events distinct on Windows ConPTY and Unix PTYs.
 const REMOTE_INPUT_KEY_DELAY_MS = 35;
@@ -27,6 +41,19 @@ interface ManagedSession {
   launchId: string | null;
   terminalBuffer: string;
   sequence: number;
+  /** How the current process was launched; used to detect a failed resume. */
+  launchMode?: ClaudeSessionLaunchMode;
+  launchStartedAt?: number;
+  resumeProbe?: string;
+  resumeProbeLength?: number;
+  resumeNotFound?: boolean;
+  /**
+   * Set when a resume launch reported that Claude no longer has the
+   * conversation. The next restart starts a new Claude session instead of
+   * repeating the failing `--resume`. Kept in memory only: after a client
+   * restart the transcript lookup runs again.
+   */
+  forceNewOnRestart?: boolean;
 }
 
 interface InputQueueItem {
@@ -101,19 +128,36 @@ function restoredTerminalMessage(record: SessionRecord): string {
   );
 }
 
-function restartingTerminalMessage(record: SessionRecord): string {
-  return (
-    "\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n" +
-    `  正在原工作目录重新启动 Claude Code${
-      record.claudeSessionId
-        ? "，并恢复已绑定的对话"
-        : "，并启动新的会话"
-    }…\r\n` +
-    (record.claudeSessionId
-      ? "  Claude Code 会使用已保存的会话 ID。\r\n\r\n"
-      : "  旧记录没有绑定 ID，Claude Code 不会自动选择当前目录中的历史对话；需要恢复时请在终端执行 /resume。\r\n\r\n")
-  );
+type RestartKind = "resume" | "unbound" | "transcript-missing";
+
+function restartingTerminalMessage(kind: RestartKind): string {
+  const header = "\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n";
+  switch (kind) {
+    case "resume":
+      return (
+        header +
+        "  正在原工作目录重新启动 Claude Code，并恢复已绑定的对话…\r\n" +
+        "  Claude Code 会使用已保存的会话 ID。\r\n\r\n"
+      );
+    case "transcript-missing":
+      return (
+        header +
+        "  正在原工作目录重新启动 Claude Code，并启动新的会话…\r\n" +
+        "  原来绑定的对话记录已不存在：可能还没有发送过消息，或已超过 Claude Code 的保留期被自动清理。\r\n\r\n"
+      );
+    case "unbound":
+      return (
+        header +
+        "  正在原工作目录重新启动 Claude Code，并启动新的会话…\r\n" +
+        "  旧记录没有绑定 ID，Claude Code 不会自动选择当前目录中的历史对话；需要恢复时请在终端执行 /resume。\r\n\r\n"
+      );
+  }
 }
+
+const RESUME_NOT_FOUND_TERMINAL_MESSAGE =
+  "\r\n\x1b[38;2;217;119;87mClaude Workspace\x1b[0m\r\n\r\n" +
+  "  Claude Code 找不到原来绑定的对话记录（可能还没有发送过消息，或已超过保留期被自动清理）。\r\n" +
+  "  点击“重启会话”会在原工作目录启动新的对话。\r\n";
 
 export function describeClaudeSpawnError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -153,6 +197,14 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     initialSessions: SessionRecord[] = [],
     private readonly getLaunchOptions?: ClaudeSessionLaunchOptionsProvider,
     terminateTree?: SessionProcessTreeTerminator,
+    /**
+     * Looks up Claude's transcript before `--resume`. The default reports
+     * "unknown" so callers that do not opt in keep resuming as before; the
+     * application passes the real file-system lookup.
+     */
+    private readonly findTranscript: (
+      claudeSessionId: string,
+    ) => ClaudeTranscriptLookup = () => "unknown",
   ) {
     super();
     this.terminateTree =
@@ -274,8 +326,28 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     delete session.record.exitCode;
     delete session.record.error;
     const previousClaudeSessionId = session.record.claudeSessionId;
-    this.appendTerminalData(session, restartingTerminalMessage(session.record));
-    if (!previousClaudeSessionId) {
+    // `--resume <id>` exits immediately with "No conversation found" when
+    // Claude has no transcript for the ID: the session never received a
+    // message, or Claude removed it after its retention period. Restarting
+    // would then fail forever, so start a new Claude session instead.
+    const transcriptMissing =
+      previousClaudeSessionId !== undefined &&
+      (session.forceNewOnRestart === true ||
+        this.findTranscript(previousClaudeSessionId) === "missing");
+    const resumeClaudeSessionId = transcriptMissing
+      ? undefined
+      : previousClaudeSessionId;
+    this.appendTerminalData(
+      session,
+      restartingTerminalMessage(
+        resumeClaudeSessionId
+          ? "resume"
+          : transcriptMissing
+            ? "transcript-missing"
+            : "unbound",
+      ),
+    );
+    if (!resumeClaudeSessionId) {
       // Never let an unbound legacy record fall back to --continue: that
       // selects the newest conversation in the directory and can make
       // multiple workbench records point at the same Claude session. Start a
@@ -293,7 +365,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         this.claudeArguments(
           session.record,
           launchOptions?.args ?? [],
-          previousClaudeSessionId ? "resume" : "new",
+          resumeClaudeSessionId ? "resume" : "new",
         ),
         {
           platform: this.platform,
@@ -302,6 +374,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       );
       const processHandle = this.spawnProcess(session.record.cwd, launch);
       session.launchId = launchId;
+      this.resetResumeProbe(session, resumeClaudeSessionId ? "resume" : "new");
+      session.forceNewOnRestart = false;
       this.attachProcess(sessionId, session, processHandle);
       session.record.status = "running";
       this.emitChanged(session.record);
@@ -309,8 +383,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     } catch (error) {
       session.process = null;
       session.launchId = null;
-      if (!previousClaudeSessionId) {
-        delete session.record.claudeSessionId;
+      if (!resumeClaudeSessionId) {
+        // Keep the record exactly as it was before this failed attempt.
+        if (previousClaudeSessionId) {
+          session.record.claudeSessionId = previousClaudeSessionId;
+        } else {
+          delete session.record.claudeSessionId;
+        }
       }
       session.record.status = "failed";
       session.record.error = describeClaudeSpawnError(error);
@@ -781,7 +860,41 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session || session.process !== processHandle) {
       return;
     }
+    this.probeResumeOutput(session, data);
     this.appendTerminalData(session, data);
+  }
+
+  private resetResumeProbe(
+    session: ManagedSession,
+    launchMode: ClaudeSessionLaunchMode,
+  ): void {
+    session.launchMode = launchMode;
+    session.launchStartedAt = Date.now();
+    session.resumeProbe = "";
+    session.resumeProbeLength = 0;
+    session.resumeNotFound = false;
+  }
+
+  /**
+   * Watch the first output of a `--resume` launch for Claude's "No
+   * conversation found" error. A transcript file can exist without any
+   * resumable message, so the pre-launch lookup alone is not sufficient.
+   */
+  private probeResumeOutput(session: ManagedSession, data: string): void {
+    if (
+      session.launchMode !== "resume" ||
+      session.resumeNotFound ||
+      (session.resumeProbeLength ?? 0) >= RESUME_PROBE_MAX_OUTPUT_LENGTH
+    ) {
+      return;
+    }
+    session.resumeProbeLength = (session.resumeProbeLength ?? 0) + data.length;
+    session.resumeProbe = `${session.resumeProbe ?? ""}${stripAnsi(data)}`.slice(
+      -RESUME_PROBE_WINDOW_LENGTH,
+    );
+    if (CLAUDE_RESUME_NOT_FOUND_PATTERN.test(session.resumeProbe)) {
+      session.resumeNotFound = true;
+    }
   }
 
   private appendTerminalData(session: ManagedSession, data: string): void {
@@ -813,6 +926,19 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.launchId = null;
     session.record.status = "exited";
     session.record.exitCode = exitCode;
+    if (
+      session.resumeNotFound &&
+      exitCode !== 0 &&
+      Date.now() - (session.launchStartedAt ?? 0) <= RESUME_FAILURE_EXIT_WINDOW_MS
+    ) {
+      session.forceNewOnRestart = true;
+      this.appendTerminalData(session, RESUME_NOT_FOUND_TERMINAL_MESSAGE);
+    }
+    session.launchMode = undefined;
+    session.launchStartedAt = undefined;
+    session.resumeProbe = undefined;
+    session.resumeProbeLength = undefined;
+    session.resumeNotFound = undefined;
     this.emitChanged(session.record);
   }
 
