@@ -104,9 +104,12 @@ function defaultClientFactory(options: {
   });
 }
 
-// Hook delivery can race xterm's parser. Give the renderer a short window to
-// report the rows it has actually laid out before falling back to Hook data.
-const REMOTE_MENU_SYNC_TIMEOUT_MS = 250;
+// A PermissionRequest Hook arrives before Claude Code draws the dialog. Give
+// the renderer time to lay out the dialog (xterm parses asynchronously, and a
+// hidden window runs timers less often) before falling back to Hook data.
+const REMOTE_MENU_SYNC_TIMEOUT_MS = 2_000;
+// Before writing reply keys, let the renderer catch up with recent output.
+const REMOTE_REPLY_SYNC_TIMEOUT_MS = 1_000;
 
 function copyState(state: WeComState): WeComState {
   return { ...state };
@@ -507,30 +510,71 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     hookAttention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
   ): Promise<void> {
     let attention = hookAttention;
-    let visible: TerminalVisibleLinesRequest | null = null;
-    try {
-      const snapshot = this.sessionManager.getTerminalSnapshot(
-        event.workspaceSessionId,
-      );
-      visible = await this.sessionManager.waitForTerminalVisibleLines(
-        event.workspaceSessionId,
-        snapshot.lastSequence,
-        REMOTE_MENU_SYNC_TIMEOUT_MS,
-      );
-    } catch {
-      // The launch guard below handles a session that exits while waiting.
-    }
-    const options = visible
-      ? extractNumberedMenuOptions(visible.lines)
-      : null;
-    if (visible && options && options.length >= 2) {
+    const rendered = await this.renderedPermissionMenu(event.workspaceSessionId);
+    if (rendered) {
       attention = withRenderedPermissionMenu(
         hookAttention,
-        options,
-        visible.sequence,
+        rendered.options,
+        rendered.sequence,
       );
     }
     this.publishClaudeAttention(event, attention);
+  }
+
+  /**
+   * Read the permission menu Claude Code is showing for a PermissionRequest
+   * Hook. The Hook usually arrives before Claude Code draws the dialog, so
+   * rows already reported for older output (which may still show Claude's
+   * answer or an earlier dialog) are only used when nothing has been written
+   * since. Otherwise wait for the renderer to lay out newer output that
+   * contains a menu, and fall back to the Hook data when it does not appear.
+   */
+  private async renderedPermissionMenu(
+    sessionId: string,
+  ): Promise<{ options: string[]; sequence: number } | null> {
+    const menuOf = (request: TerminalVisibleLinesRequest | null | undefined) => {
+      const options = request ? extractNumberedMenuOptions(request.lines) : null;
+      return request && options && options.length >= 2
+        ? { options, sequence: request.sequence }
+        : null;
+    };
+    try {
+      const current = this.sessionManager.getTerminalVisibleLines(sessionId);
+      if (!current) {
+        // No renderer terminal reports for this session.
+        return null;
+      }
+      const hookSequence = this.sessionManager.getTerminalSequence(sessionId);
+      if (current.sequence >= hookSequence) {
+        const menu = menuOf(current);
+        if (menu) {
+          return menu;
+        }
+      }
+      return menuOf(
+        await this.sessionManager.waitForTerminalVisibleLines(
+          sessionId,
+          hookSequence + 1,
+          REMOTE_MENU_SYNC_TIMEOUT_MS,
+          (request) => menuOf(request) !== null,
+        ),
+      );
+    } catch {
+      // The launch guard in publishClaudeAttention handles a session that
+      // exits while waiting.
+      return null;
+    }
+  }
+
+  /** Visible rows that include all PTY output written so far, if available. */
+  private async currentVisibleLines(
+    sessionId: string,
+  ): Promise<TerminalVisibleLinesRequest | undefined> {
+    const sequence = this.sessionManager.getTerminalSequence(sessionId);
+    const latest = await this.sessionManager
+      .waitForTerminalVisibleLines(sessionId, sequence, REMOTE_REPLY_SYNC_TIMEOUT_MS)
+      .catch(() => null);
+    return latest ?? this.sessionManager.getTerminalVisibleLines(sessionId);
   }
 
   private publishClaudeAttention(
@@ -802,9 +846,21 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       );
       return;
     }
-    const visibleLines = this.sessionManager.getTerminalVisibleLines(
+    const visibleLines = await this.currentVisibleLines(
       pending.workspaceSessionId,
     );
+    if (
+      !this.sessionManager.isCurrentLaunch(
+        pending.workspaceSessionId,
+        pending.launchId,
+      )
+    ) {
+      this.router.complete(pending.code);
+      const detail = `回复码 ${pending.code} 对应的 Claude Code 进程已经退出或重启，未发送任何输入。`;
+      this.recordInbound("rejected", detail);
+      await this.replyToMessage(client, frame, detail);
+      return;
+    }
     const visibleOptions = visibleLines
       ? extractNumberedMenuOptions(visibleLines.lines)
       : null;

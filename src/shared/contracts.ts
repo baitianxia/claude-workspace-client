@@ -257,6 +257,7 @@ export interface TerminalVisibleLinesRequest {
   /** PTY data sequence that has been parsed into these rows. */
   sequence: number;
   lines: string[];
+  /** Buffer row of the first line: the top of the bottom screen (baseY). */
   viewportY: number;
   rows: number;
   columns: number;

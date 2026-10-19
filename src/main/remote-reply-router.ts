@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { stripAnsi } from "./claude-session-files";
-import { extractNumberedMenuOptions } from "../shared/terminal-menu";
+import {
+  extractNumberedMenuOptions,
+  menuLabelMatches,
+  menuLabelsEqual,
+} from "../shared/terminal-menu";
 
 const DEFAULT_PENDING_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -112,10 +116,6 @@ function normalizedReplyText(value: string): string {
     .replace(/[\r\n\t]+/gu, " ")
     .replace(/\p{Cc}/gu, "")
     .trim();
-}
-
-function normalizedMenuLabel(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
 }
 
 function normalizedReplyForPending(
@@ -933,7 +933,7 @@ export function remoteMenuMismatch(
         if (
           expectedLabel &&
           visibleLabel &&
-          normalizedMenuLabel(expectedLabel) !== normalizedMenuLabel(visibleLabel)
+          !menuLabelsEqual(expectedLabel, visibleLabel)
         ) {
           return `终端当前的权限菜单第 ${index + 1} 项与通知中的文字不一致`;
         }
@@ -948,7 +948,12 @@ export function remoteMenuMismatch(
     const labels = pending.questionOptionLabels?.[0] ?? [];
     const visibleLabels =
       visibleMenu === undefined ? latestMenuOptions(text) : visibleMenu;
-    const expectedOptionCount = labels.length + 2;
+    // A single-select question adds "Type something" and "Chat about this";
+    // a multi-select question adds only "Type something" (Claude Code may
+    // also number its submit row).
+    const multiple = pending.questionSelectionModes?.[0] === "multiple";
+    const minimumOptionCount = labels.length + (multiple ? 1 : 2);
+    const maximumOptionCount = labels.length + 2;
     const compactScreen = text.replace(/\s+/gu, "");
     for (const selection of action.menuSelections) {
       const label = labels[selection - 1];
@@ -962,7 +967,7 @@ export function remoteMenuMismatch(
         visibleLabels !== null &&
         visibleLabels !== undefined &&
         (!visibleLabel ||
-          !normalizedMenuLabel(visibleLabel).includes(normalizedMenuLabel(label)))
+          !menuLabelMatches(label, visibleLabel))
       ) {
         return `终端当前的问题菜单第 ${selection} 项与通知中的文字“${label}”不一致`;
       }
@@ -978,9 +983,10 @@ export function remoteMenuMismatch(
     if (
       visibleLabels !== null &&
       visibleLabels !== undefined &&
-      visibleLabels.length !== expectedOptionCount
+      (visibleLabels.length < minimumOptionCount ||
+        visibleLabels.length > maximumOptionCount)
     ) {
-      return `终端当前的问题菜单有 ${visibleLabels.length} 个选项，与通知中的 ${expectedOptionCount} 个选项不一致`;
+      return `终端当前的问题菜单有 ${visibleLabels.length} 个选项，与通知中的 ${minimumOptionCount} 个选项不一致`;
     }
   }
   return null;

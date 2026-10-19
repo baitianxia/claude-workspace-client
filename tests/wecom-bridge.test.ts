@@ -383,6 +383,73 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
+  it("waits for the dialog drawn after a permission Hook instead of using older rows", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => pty.process) as PtySpawner,
+      "win32",
+      [],
+      (_id, currentLaunchId) => {
+        launchId = currentLaunchId;
+        return { args: [] };
+      },
+    );
+    const session = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const client = new FakeWeComClient();
+    const bridge = new WeComBridge(manager, () => [], undefined, () => client);
+    bridge.configure({
+      enabled: true,
+      botId: "bot-id",
+      targetUserId: "zhangsan",
+      secret: "secret",
+      hasSecret: true,
+    });
+    client.emit("authenticated");
+    // The screen before the dialog: an earlier permission menu is still in
+    // the reported rows, but newer output has not been laid out yet.
+    pty.emitData("❯ 1. Yes\r\n  2. No\r\n");
+    manager.setTerminalVisibleLines({
+      sessionId: session.id,
+      sequence: 1,
+      lines: ["❯ 1. Yes", "  2. No"],
+      viewportY: 0,
+      rows: 2,
+      columns: 120,
+    });
+    pty.emitData("⏺ Bash(npm test)\r\n");
+    bridge.handleClaudeHook(hook(session.id, launchId, "npm test"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(client.sent).toHaveLength(0);
+
+    // Claude Code draws the dialog for this Hook.
+    pty.emitData("❯ 1. Yes\r\n  2. Yes, and don't ask again for npm test commands\r\n  3. No\r\n");
+    manager.setTerminalVisibleLines({
+      sessionId: session.id,
+      sequence: 3,
+      lines: [
+        "⏺ Bash(npm test)",
+        "❯ 1. Yes",
+        "  2. Yes, and don't ask again for npm test commands",
+        "  3. No",
+      ],
+      viewportY: 0,
+      rows: 4,
+      columns: 120,
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const content = markdownContent(client.sent[0].body);
+    expect(content).toContain("2. Yes, and don't ask again for npm test commands");
+    expect(content).toContain("3. No");
+
+    // Answering by position now matches the screen.
+    const code = routeCode(content);
+    client.emit("message", incomingMessage("rendered-menu", `${code} 1`));
+    await vi.waitFor(() => expect(pty.writes.length).toBeGreaterThan(0));
+    bridge.dispose();
+  });
+
   it("only pushes completion notices while the owner is away from the computer", async () => {
     const pty = fakePty(1);
     let launchId = "";

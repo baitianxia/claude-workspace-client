@@ -20,6 +20,24 @@ function controlledTarget() {
 }
 
 describe("TerminalOutputScheduler", () => {
+  it("reports each write as parsed only after the target processed it", () => {
+    const { completions, target, writes } = controlledTarget();
+    const scheduler = new TerminalOutputScheduler(target, vi.fn(), () => false);
+    const parsed: string[] = [];
+
+    scheduler.write("first", () => parsed.push("first"));
+    scheduler.write(" second", () => parsed.push("second"));
+    // "first" is being written; " second" is still queued.
+    expect(parsed).toEqual([]);
+
+    completions.shift()?.();
+    expect(parsed).toEqual(["first"]);
+    expect(writes).toEqual(["first", " second"]);
+
+    completions.shift()?.();
+    expect(parsed).toEqual(["first", "second"]);
+  });
+
   it("forwards ordinary output without a frame delay", () => {
     const { completions, target, writes } = controlledTarget();
     const scheduleFrame = vi.fn();

@@ -183,6 +183,8 @@ function turnStatusLabel(turn: AssistantTurnRecord | undefined): string {
 
 export class AssistantService extends EventEmitter<AssistantServiceEvents> {
   private readonly workers = new Map<string, Promise<void>>();
+  /** In-flight WeCom mirrors of desktop requests, by turn ID. */
+  private readonly desktopRequestMirrors = new Map<string, Promise<void>>();
   private initialized = false;
   private shuttingDown = false;
   private disposePromise: Promise<void> | null = null;
@@ -687,21 +689,23 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
       !mirrorToWeCom,
     );
     if (mirrorToWeCom && profile.wecomBotProfileId) {
-      // Queue the mirrored user message before starting Claude so the remote
-      // conversation cannot show the assistant reply first.
-      void this.mirrorDesktopRequest(
+      // Start Claude right away: a slow or disconnected WeCom bot must not
+      // hold up the desktop turn. The reply mirror waits for this request
+      // mirror instead, so WeCom still shows the question first.
+      const requestMirror = this.mirrorDesktopRequest(
         turn,
         profile.wecomBotProfileId,
         profile.ownerWeComUserId,
-      )
-        .catch((error: unknown) =>
-          console.error("Failed to mirror desktop assistant request", error),
-        )
-        // The request must reach the owner's WeCom chat before Claude can
-        // finish and mirror its response. The bot manager serializes sends
-        // per connection, but starting the worker here would still allow a
-        // fast response to overtake the in-flight request.
-        .finally(() => this.startWorker(profile.id));
+      ).catch((error: unknown) =>
+        console.error("Failed to mirror desktop assistant request", error),
+      );
+      this.desktopRequestMirrors.set(turn.id, requestMirror);
+      void requestMirror.finally(() => {
+        if (this.desktopRequestMirrors.get(turn.id) === requestMirror) {
+          this.desktopRequestMirrors.delete(turn.id);
+        }
+      });
+      this.startWorker(profile.id);
     }
     return turn;
   }
@@ -1418,6 +1422,8 @@ export class AssistantService extends EventEmitter<AssistantServiceEvents> {
     targetId: string,
     response: string,
   ): Promise<void> {
+    // Keep WeCom in conversation order: the mirrored question goes first.
+    await this.desktopRequestMirrors.get(turn.id);
     const deliveryErrors = await this.deliverWeComMessages(
       botProfileId,
       targetId,

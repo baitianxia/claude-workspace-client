@@ -263,27 +263,15 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
         mode: 0o600,
       });
     } catch (error) {
-      // A failed settings write must not leave a listening loopback server or
-      // temporary directory behind.
-      const serverToClose = this.server;
-      const directoryToRemove = this.settingsDirectory;
-      this.server = null;
-      this.port = null;
-      this.settingsDirectory = null;
+      // Only this launch failed. The server and the settings directory are
+      // shared by every running Claude Code session, so keep them; just make
+      // sure no partial file of this launch is left behind.
       try {
-        serverToClose?.close();
-      } catch (cleanupError) {
-        console.error("Failed to close Claude Code Hook server after settings failure", cleanupError);
-      }
-      if (directoryToRemove) {
-        try {
-          rmSync(directoryToRemove, { recursive: true, force: true });
-        } catch (cleanupError) {
-          console.error(
-            "Failed to remove Claude Code Hook settings after write failure",
-            cleanupError,
-          );
+        if ((error as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") {
+          rmSync(settingsPath, { force: true });
         }
+      } catch (cleanupError) {
+        console.error("Failed to remove partial Claude Code Hook settings", cleanupError);
       }
       throw new Error(
         `无法写入 Claude Code Hook 配置：${

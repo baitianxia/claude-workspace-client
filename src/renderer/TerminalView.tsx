@@ -75,7 +75,10 @@ function visibleTerminalLines(
     return null;
   }
   const buffer = terminal.buffer.active;
-  const viewportY = Math.max(0, buffer.viewportY);
+  // Read the bottom screen (where Claude Code draws its prompts), not the
+  // rows the user happens to have scrolled to: a terminal left scrolled up
+  // must not report history as the current menu.
+  const viewportY = Math.max(0, buffer.baseY);
   const lines = Array.from({ length: terminal.rows }, (_, offset) =>
     buffer.getLine(viewportY + offset)?.translateToString(true) ?? "",
   );
@@ -143,6 +146,9 @@ export function TerminalView({
     let disposed = false;
     let initialized = false;
     let lastSequence = 0;
+    // Highest PTY sequence xterm has actually parsed. lastSequence counts
+    // received output, which may still be queued in the output scheduler.
+    let parsedSequence = 0;
     const pendingEvents: TerminalDataEvent[] = [];
     let lastVisibleSignature = "";
 
@@ -156,7 +162,7 @@ export function TerminalView({
         return;
       }
       const signature = [
-        lastSequence,
+        parsedSequence,
         snapshot.viewportY,
         snapshot.rows,
         snapshot.columns,
@@ -168,13 +174,22 @@ export function TerminalView({
       lastVisibleSignature = signature;
       window.claudeWorkspace.syncTerminalVisibleLines({
         ...snapshot,
-        sequence: lastSequence,
+        sequence: parsedSequence,
       });
     };
     const writeParsedDisposable = terminal.onWriteParsed(syncVisibleLines);
     const renderDisposable = terminal.onRender(syncVisibleLines);
     const scrollDisposable = terminal.onScroll(syncVisibleLines);
     const resizeDisposable = terminal.onResize(syncVisibleLines);
+
+    const writeOutput = (event: TerminalDataEvent) => {
+      outputScheduler.write(event.data, () => {
+        if (event.sequence > parsedSequence) {
+          parsedSequence = event.sequence;
+          syncVisibleLines();
+        }
+      });
+    };
 
     const unsubscribe = window.claudeWorkspace.onTerminalData((event) => {
       if (event.sessionId !== session.id || event.sequence <= lastSequence) {
@@ -185,7 +200,7 @@ export function TerminalView({
         return;
       }
       lastSequence = event.sequence;
-      outputScheduler.write(event.data);
+      writeOutput(event);
     });
 
     const initializeLiveOutput = (snapshotSequence: number) => {
@@ -193,13 +208,15 @@ export function TerminalView({
         return;
       }
       lastSequence = snapshotSequence;
+      // The snapshot has been written to xterm before this runs.
+      parsedSequence = Math.max(parsedSequence, snapshotSequence);
       initialized = true;
       pendingEvents
         .sort((left, right) => left.sequence - right.sequence)
         .forEach((event) => {
           if (event.sequence > lastSequence) {
             lastSequence = event.sequence;
-            outputScheduler.write(event.data);
+            writeOutput(event);
           }
         });
       pendingEvents.length = 0;

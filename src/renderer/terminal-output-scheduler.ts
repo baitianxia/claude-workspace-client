@@ -28,6 +28,9 @@ function trailingMarkerPrefixLength(data: string): number {
  */
 export class TerminalOutputScheduler {
   private pending = "";
+  private queuedLength = 0;
+  private writtenLength = 0;
+  private readonly completions: Array<{ end: number; callback: () => void }> = [];
   private writing = false;
   private waitingForFrame = false;
   private disposed = false;
@@ -38,17 +41,44 @@ export class TerminalOutputScheduler {
     private readonly shouldWaitForFrame: () => boolean,
   ) {}
 
-  write(data: string): void {
-    if (this.disposed || !data) {
+  /**
+   * Queue output. `onParsed` runs once the target has processed this data
+   * (and everything queued before it), which may be later than the call when
+   * a frame boundary or a split marker holds data back.
+   */
+  write(data: string, onParsed?: () => void): void {
+    if (this.disposed) {
+      return;
+    }
+    if (!data) {
+      if (onParsed) {
+        this.completions.push({ end: this.queuedLength, callback: onParsed });
+        this.runCompletions();
+      }
       return;
     }
     this.pending += data;
+    this.queuedLength += data.length;
+    if (onParsed) {
+      this.completions.push({ end: this.queuedLength, callback: onParsed });
+    }
     this.flush();
   }
 
   dispose(): void {
     this.disposed = true;
     this.pending = "";
+    this.completions.length = 0;
+  }
+
+  private runCompletions(): void {
+    while (
+      !this.disposed &&
+      this.completions.length > 0 &&
+      this.completions[0].end <= this.writtenLength
+    ) {
+      this.completions.shift()?.callback();
+    }
   }
 
   private flush(): void {
@@ -89,6 +119,8 @@ export class TerminalOutputScheduler {
         if (this.disposed) {
           return;
         }
+        this.writtenLength += data.length;
+        this.runCompletions();
         if (endsSynchronizedFrame && this.shouldWaitForFrame()) {
           this.waitingForFrame = true;
           this.scheduleFrame(() => {

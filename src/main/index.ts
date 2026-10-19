@@ -65,6 +65,10 @@ function createWindow(backgroundColor = "#12110f"): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Remote WeCom replies are checked against the menu xterm has laid
+      // out. Keep terminal parsing timely while the window is minimized or
+      // hidden, which is exactly when the owner answers from WeCom.
+      backgroundThrottling: false,
     },
   });
 

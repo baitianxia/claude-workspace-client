@@ -855,6 +855,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     });
   }
 
+  /** Sequence number of the latest PTY output, without joining the buffer. */
+  getTerminalSequence(sessionId: string): number {
+    return this.sessions.get(sessionId)?.sequence ?? 0;
+  }
+
   getTerminalVisibleLines(
     sessionId: string,
   ): TerminalVisibleLinesRequest | undefined {
@@ -869,9 +874,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     sessionId: string,
     minimumSequence: number,
     timeoutMs: number,
+    accept: (request: TerminalVisibleLinesRequest) => boolean = () => true,
   ): Promise<TerminalVisibleLinesRequest | null> {
     const current = this.getTerminalVisibleLines(sessionId);
-    if (current && current.sequence >= minimumSequence) {
+    if (current && current.sequence >= minimumSequence && accept(current)) {
       return Promise.resolve(current);
     }
     return new Promise((resolve) => {
@@ -888,7 +894,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       const onReport = (request: TerminalVisibleLinesRequest) => {
         if (
           request.sessionId === sessionId &&
-          request.sequence >= minimumSequence
+          request.sequence >= minimumSequence &&
+          accept(request)
         ) {
           finish(request);
         }

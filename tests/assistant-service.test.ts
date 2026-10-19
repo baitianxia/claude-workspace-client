@@ -483,7 +483,7 @@ describe("AssistantService", () => {
     expect(turn.status).toBe("queued");
   });
 
-  it("does not start the assistant before the desktop request mirror is delivered", async () => {
+  it("starts the assistant at once but mirrors its reply after the request", async () => {
     let releaseRequest!: () => void;
     const requestDelivered = new Promise<void>((resolve) => {
       releaseRequest = resolve;
@@ -496,12 +496,22 @@ describe("AssistantService", () => {
       assistantId: profile.id,
       text: "先同步后处理",
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(runner.inputs).toHaveLength(0);
+    // A slow or disconnected WeCom bot must not delay the desktop turn.
+    await waitFor(() => runner.inputs.length === 1);
+    await waitFor(
+      () => service.getSnapshot().turns.at(-1)?.status === "succeeded",
+    );
+    // Later sends are not gated, yet the reply waits for the request.
+    gateway.sendGate = null;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(gateway.sent).toHaveLength(0);
 
     releaseRequest();
-    await waitFor(() => runner.inputs.length === 1);
-    expect(gateway.sent[0]?.content).toBe("你（来自客户端）：先同步后处理");
+    await waitFor(() => gateway.sent.length === 2);
+    expect(gateway.sent.map((message) => message.content)).toEqual([
+      "你（来自客户端）：先同步后处理",
+      "助理：回复 1",
+    ]);
   });
 
   it("records desktop mirror delivery failures on the completed turn", async () => {
