@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  latestMenuOptions,
   latestMenuOptionCount,
   remoteMenuMismatch,
   RemoteReplyRouter,
@@ -345,6 +346,27 @@ describe("RemoteReplyRouter", () => {
         "1",
       ),
     ).toEqual({ input: "1\r" });
+
+    const multiPending = router.register(
+      "zhangsan",
+      attention("session-multi", "launch-multi", {
+        kind: "question",
+        inputMode: "menu",
+        supportsMultipleSelection: true,
+        questionSelectionModes: ["multiple"],
+        questionOptionLabels: [["日志", "指标"]],
+      }),
+    ).pending;
+    expect(terminalInputForRemoteReply(multiPending, "1,2")).toBe(
+      ` ${DOWN} \r`,
+    );
+    expect(terminalActionForRemoteReply(multiPending, "3")).toMatchObject({
+      input: `${DOWN}${DOWN}\r`,
+      nextStage: "question-custom-answer",
+    });
+    expect(() => terminalInputForRemoteReply(multiPending, "Chat about this")).toThrow(
+      "多选问题回复无效",
+    );
   });
 
   it("requires a unique exact option-text match and gives numbers priority", () => {
@@ -419,6 +441,24 @@ describe("RemoteReplyRouter", () => {
     ).toThrow("权限选项文字存在歧义");
     expect(terminalInputForRemoteReply(ambiguousPermission, "2")).toBe(
       `${DOWN}\r`,
+    );
+
+    const aggregatedPermission = router.register(
+      "zhangsan",
+      attention("session-aggregated", "launch-aggregated", {
+        kind: "permission",
+        inputMode: "menu",
+        // Labels describe the one persistent row shown to the user; the
+        // stale count models a legacy pending notification.
+        permissionSuggestionCount: 3,
+        permissionOptionLabels: ["允许", "允许并保存建议", "拒绝"],
+      }),
+    ).pending;
+    expect(terminalInputForRemoteReply(aggregatedPermission, "拒绝")).toBe(
+      `${DOWN}${DOWN}\r`,
+    );
+    expect(() => terminalInputForRemoteReply(aggregatedPermission, "4")).toThrow(
+      "1-3",
     );
   });
 
@@ -575,6 +615,33 @@ describe("RemoteReplyRouter", () => {
     ).toBe("说明[31m 继续 不能提交 制表\r");
   });
 
+  it("routes the reported merged directory permission menu as three rows", () => {
+    const router = new RemoteReplyRouter(codeGenerator("SCREEN"));
+    const pending = router.register(
+      "zhangsan",
+      attention("session-screen", "launch-screen", {
+        kind: "permission",
+        inputMode: "menu",
+        // The old hook count was two (setMode + addDirectories), while the
+        // Claude Code menu renders one persistent directory row.
+        permissionSuggestionCount: 2,
+        permissionOptionLabels: [
+          "允许：仅执行本次操作",
+          "允许：本次操作，并将 “C:\\Users\\tianxiabai\\.claude\\skills\\dpms-interface-entry” 添加为本会话工作目录",
+          "拒绝：不执行本次操作，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+        ],
+      }),
+    ).pending;
+
+    expect(terminalInputForRemoteReply(pending, "3")).toBe(
+      `${DOWN}${DOWN}\r`,
+    );
+    expect(terminalInputForRemoteReply(pending, "拒绝")).toBe(
+      `${DOWN}${DOWN}\r`,
+    );
+    expect(() => terminalInputForRemoteReply(pending, "4")).toThrow("1-3");
+  });
+
   it("preserves numeric replies in Claude text-input prompts", () => {
     const router = new RemoteReplyRouter(
       codeGenerator("TEXTA", "TEXTB", "TEXTC", "TEXTD"),
@@ -673,6 +740,20 @@ describe("remote menu screen check", () => {
     expect(latestMenuOptionCount("没有菜单的普通输出 1.5")).toBeNull();
   });
 
+  it("reads the labels from the latest rendered Claude permission menu", () => {
+    const screen = permissionMenu([
+      "Yes",
+      "Yes, and always allow access to dpms-interface-entry from this project",
+      "No",
+    ]);
+    expect(latestMenuOptions(screen)).toEqual([
+      "Yes",
+      "Yes, and always allow access to dpms-interface-entry from this project",
+      "No",
+    ]);
+    expect(latestMenuOptionCount(screen)).toBe(3);
+  });
+
   it("refuses permission keys when the menu has a different number of options", () => {
     const router = new RemoteReplyRouter(() => "PERMIT");
     const pending = router.register(
@@ -700,6 +781,35 @@ describe("remote menu screen check", () => {
     expect(remoteMenuMismatch(pending, deny, "")).toBeNull();
   });
 
+  it("refuses a permission key when the selected rendered label changed", () => {
+    const router = new RemoteReplyRouter(() => "LABELAB");
+    const pending = router.register(
+      "zhangsan",
+      attention("session-label", "launch-label", {
+        kind: "permission",
+        inputMode: "menu",
+        permissionOptionLabels: ["Yes", "Yes, and always allow access", "No"],
+        permissionMenuSource: "rendered",
+      }),
+    ).pending;
+    const allowAlways = terminalActionForRemoteReply(pending, "2");
+
+    expect(
+      remoteMenuMismatch(
+        pending,
+        allowAlways,
+        permissionMenu(["Yes", "Yes, and always allow access", "No"]),
+      ),
+    ).toBeNull();
+    expect(
+      remoteMenuMismatch(
+        pending,
+        allowAlways,
+        permissionMenu(["Yes", "Yes, and always allow access to another project", "No"]),
+      ),
+    ).toContain("第 2 项");
+  });
+
   it("refuses a question answer whose option is not on screen", () => {
     const router = new RemoteReplyRouter(() => "ASKKK");
     const pending = router.register(
@@ -717,7 +827,15 @@ describe("remote menu screen check", () => {
       remoteMenuMismatch(
         pending,
         action,
-        "❯ 1. 方案 A：直接发布\r\n  2. 方案 B：先灰度\r\n  3. Type something.\r\n",
+        "❯ 1. 方案 A：直接发布\r\n  2. 方案 B：先灰度\r\n  3. Type something.\r\n  4. Chat about this\r\n",
+      ),
+    ).toBeNull();
+    expect(
+      remoteMenuMismatch(
+        pending,
+        action,
+        "",
+        ["方案 A：直接发布", "方案 B：先灰度", "Type something.", "Chat about this"],
       ),
     ).toBeNull();
     expect(

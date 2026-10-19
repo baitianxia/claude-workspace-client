@@ -247,6 +247,21 @@ export interface TerminalSnapshot {
   lastSequence: number;
 }
 
+/**
+ * Text currently visible in an xterm instance.  This is deliberately a
+ * renderer-originated snapshot: the PTY byte stream is not the same thing as
+ * the rows Claude Code has rendered after ANSI control sequences are applied.
+ */
+export interface TerminalVisibleLinesRequest {
+  sessionId: string;
+  /** PTY data sequence that has been parsed into these rows. */
+  sequence: number;
+  lines: string[];
+  viewportY: number;
+  rows: number;
+  columns: number;
+}
+
 export type WorkspaceFileStatus =
   | "modified"
   | "added"
@@ -456,6 +471,7 @@ export interface DesktopApi {
   writeTerminal(request: WriteTerminalRequest): void;
   resizeTerminal(request: ResizeTerminalRequest): void;
   getTerminalSnapshot(sessionId: string): Promise<TerminalSnapshot>;
+  syncTerminalVisibleLines(request: TerminalVisibleLinesRequest): void;
   listWorkspaceChanges(projectId: string): Promise<WorkspaceChangesSnapshot>;
   readWorkspaceFile(
     request: ReadWorkspaceFileRequest,

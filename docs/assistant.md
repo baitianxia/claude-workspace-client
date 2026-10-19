@@ -79,9 +79,11 @@ Claude Workspace 只提供一套 Agent 产品：私人助理。对外可见的�
 
 开发工作台的每次交互式 Claude Code 启动（新建或重启）都在本机 Hook 服务可用时注入带会话与启动代次的 Hook 配置，和企业微信是否已启用相互独立；配置同时接收权限请求、问题/计划、完成、失败和全部通知事件，以覆盖 Claude Code 新增的通知类型（例如 `permission_prompt`）。Hook 事件到达后，`WeComBridge` 再依据当前连接配置决定是否投递。正在运行的 Claude Code 进程不能在启动后接收新的 CLI 设置，因此在本版本修复前启动的会话需要重启一次。终端控制机器人卡片在尚无 Hook 时明确提示“尚未收到 Claude Code 事件”，收到后显示最近一次 Hook 和主动推送诊断；“企业微信已确认接收”表示 WebSocket 回执成功，不等同于客户端已经展示消息；连接状态本身只表示企业微信长连接已认证。
 
+每个 `TerminalView` 都从自身 xterm 的 `buffer.active`、`viewportY` 和可见行读取当前活动视口，并通过 `syncTerminalVisibleLines` IPC 上报会话 ID、PTY sequence、行文本和视口尺寸；主进程按 sequence 丢弃旧报告，并在权限通知、单选问题回复校验和企业微信回复校验中使用这份 renderer 快照。单选问题仍保留 Claude Code 的 `Chat about this`，多选问题不添加这行。PTY 原始回放只保留给兼容性诊断，不作为企业微信菜单的权威来源。
+
 开发工作台会在首次启动前生成合法的 Claude Code `session_id`，通过 `--session-id` 传入并立即保存到 `workspace.json`；Hook 同时监听 `SessionStart`，但该事件使用跨平台命令 Hook 从 stdin 转发到本机服务，因为 Claude Code 不支持把 `SessionStart` 配置为 HTTP Hook。如果 Claude Code 返回了不同的 ID，再按当前会话和启动代次校正绑定。客户端退出前会等待排队的工作台写入完成。客户端关闭后再次点击“重启会话”会为同一工作目录传入 `--resume <session-id>`；旧进程的迟到 Hook 不能覆盖新启动的绑定。升级前没有绑定 ID 的旧记录首次重启时会生成新的 `session_id` 并启动新的 Claude Code 会话，不会使用 `--continue` 自动选择当前目录最近的对话；如果要恢复旧记录，需在 Claude Code 中使用 `/resume` 手动选择，选择后会通过新的 `SessionStart` Hook 更新绑定。
 
-`Notification.permission_prompt` 只提供通知摘要，不提供可信的菜单选项；这类事件必须推送提示，但不得猜测选项位置或生成远程权限按键。已有同一启动代次的详细权限、提问或计划通知时保留原通知和回复码；仅收到通用通知时引导用户回到工作台确认，后续收到详细请求再提供远程回复。排队的工作台推送在实际发送前必须重新校验连接认证、启动代次和回复码有效性；重连期间未发送的消息不能按成功清除。
+`PermissionRequest.permission_suggestions` 是权限更新候选，不是终端当前可见选项的完整列表；Claude Code 会按工具和上下文过滤、合并，并可能额外加入模式选项。终端控制机器人收到权限 Hook 后优先读取 renderer 的 xterm 活动视口上报的编号菜单，并用实际选项文字生成企业微信通知；若 renderer 尚未上报当前菜单，才把可确认的 `addRules`、`addDirectories`（`allow`，保存到 `session` 或 `localSettings`）合并成一个保守的语义说明行。`setMode` 等候选不能因为出现在 Hook 中就单独变成菜单项。回复编号按通知行发送；路由器以通知中生成的行数为准，并在回复前检查 renderer 当前菜单的行数，使用终端文字生成的通知还会校验被选中的选项文字，发现 CLI 已变化就拒绝发送按键并引导主人回到工作台。无法从 Hook 安全推断菜单的通知不提供远程按键。`Notification.permission_prompt` 只提供通知摘要，不提供可信的菜单选项；这类事件必须推送提示，但不得猜测选项位置或生成远程权限按键。已有同一启动代次的详细权限、提问或计划通知时保留原通知和回复码；仅收到通用通知时引导用户回到工作台确认，后续收到详细请求再提供远程回复。排队的工作台推送在实际发送前必须重新校验连接认证、启动代次和回复码有效性；重连期间未发送的消息不能按成功清除。
 
 企业微信 Secret 必须经 Electron `safeStorage` 加密后写入 `assistant.json`，不能进入渲染进程或日志。对话及任务运行可能包含个人数据，README 必须说明本机保存范围。
 
@@ -237,7 +239,7 @@ scheduled overlap -> skipped
 - 共享运行环境卡片提供“背景”切换（暗色/白色）；主题写入 `workspace.json.settings.theme`，并同时更新终端 ANSI 调色板和所有客户端表面。白色主题的终端启用最低对比度保护，Claude Code 使用的高亮白色或其他低对比度 ANSI 文本会按当前背景自动调整，避免文字实际存在但不可见。
 - 终端复制支持 `Ctrl/Cmd+C`、右键，粘贴支持 `Ctrl/Cmd+V`、`Ctrl+Shift+V` 和原生多行粘贴；复制写入与读取必须串行，避免异步剪贴板竞态。进入 PTY 的大段粘贴必须保留 bracketed-paste 标记、按 UTF-8 代码点分块并串行节流，避免 Windows ConPTY/node-pty 输入缓冲丢块；普通按键不得因此延迟。
 - Claude Code 对超过约 800 个字符或超过三行的粘贴会在输入框折叠成 `[Pasted text #N +… lines]` 占位符，普通提示的完整内容仍在提交时发送并暂存于其 paste cache；Shell 模式或 `/` 命令在移除占位符会改变命令时会取消提交并保留原输入。客户端不得把这种显示折叠误报为数据丢失。若没有占位符且提交后确实缺字，应记录为终端/CLI 传输问题并建议文件化输入。
-- Claude Code 终端控制机器人收到多问题回复时，格式为 `回复码 1;2,3`（分号/换行分隔问题，逗号分隔多选项）。多问题向导的单选答案使用数字键逐题选择并自动进入下一题，多选答案使用数字键逐项切换后用 Tab 进入下一题；路由器必须把每个按键作为独立 PTY 写入，并在最后一个答案后额外发送一次 Enter 激活并提交 `Submit`。权限和单问题菜单也必须把导航按键与 Enter 分开写入，避免 Windows ConPTY 或 Ink 菜单合并按键后提交错误选项。不能只处理第一题，也不能要求主人再发送隐藏的提交命令。
+- Claude Code 终端控制机器人收到多问题回复时，格式为 `回复码 1;2,3`（分号/换行分隔问题，逗号分隔多选项）。多问题向导的单选答案使用数字键逐题选择并自动进入下一题，多选答案使用数字键逐项切换后用 Tab 进入下一题；多选题只提供 `Other`，不会提供单选题才有的 `Chat about this`。路由器必须把每个按键作为独立 PTY 写入，并在最后一个答案后额外发送一次 Enter 激活并提交 `Submit`。权限和单问题菜单也必须把导航按键与 Enter 分开写入，避免 Windows ConPTY 或 Ink 菜单合并按键后提交错误选项。不能只处理第一题，也不能要求主人再发送隐藏的提交命令。
 
 ## 关闭、删除与验证
 

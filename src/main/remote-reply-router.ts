@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { stripAnsi } from "./claude-session-files";
+import { extractNumberedMenuOptions } from "../shared/terminal-menu";
 
 const DEFAULT_PENDING_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -37,6 +38,8 @@ export interface RemoteAttention {
   questionSelectionModes?: Array<"single" | "multiple">;
   questionOptionLabels?: string[][];
   permissionOptionLabels?: string[];
+  permissionMenuSource?: "hook" | "rendered";
+  permissionMenuSequence?: number;
   permissionSuggestionCount?: number;
 }
 
@@ -99,6 +102,7 @@ function attentionFingerprint(attention: RemoteAttention): string {
     JSON.stringify(attention.questionSelectionModes ?? []),
     JSON.stringify(attention.questionOptionLabels ?? []),
     JSON.stringify(attention.permissionOptionLabels ?? []),
+    attention.permissionMenuSource ?? "",
     attention.permissionSuggestionCount ?? 0,
   ].join("\u0000");
 }
@@ -108,6 +112,10 @@ function normalizedReplyText(value: string): string {
     .replace(/[\r\n\t]+/gu, " ")
     .replace(/\p{Cc}/gu, "")
     .trim();
+}
+
+function normalizedMenuLabel(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
 }
 
 function normalizedReplyForPending(
@@ -210,6 +218,27 @@ function menuAction(
     ...(inputChunks.length > 1 ? { inputChunks } : {}),
     ...extras,
   };
+}
+
+function permissionMenuShape(pending: PendingRemoteReply): {
+  optionCount: number;
+  suggestionCount: number;
+} {
+  // permissionOptionLabels is the menu shape represented in the notification.
+  // Keep the legacy count only for older pending entries that predate the
+  // labels field; raw permission_suggestions is not a menu shape.
+  const labels = pending.permissionOptionLabels;
+  if (labels && labels.length >= 2) {
+    return {
+      optionCount: labels.length,
+      suggestionCount: labels.length - 2,
+    };
+  }
+  const suggestionCount = Math.max(
+    0,
+    Math.floor(pending.permissionSuggestionCount ?? 0),
+  );
+  return { optionCount: suggestionCount + 2, suggestionCount };
 }
 
 function singleMenuAction(
@@ -588,12 +617,8 @@ export function terminalActionForRemoteReply(
   const normalizedAlias = normalizedChoiceText(normalized);
   let selection = normalized;
   if (pending.kind === "permission") {
-    const suggestionCount = Math.max(
-      0,
-      Math.floor(pending.permissionSuggestionCount ?? 0),
-    );
+    const { optionCount, suggestionCount } = permissionMenuShape(pending);
     const denySelection = String(suggestionCount + 2);
-    const optionCount = suggestionCount + 2;
     const directSelection = validNumberedSelection(
       normalizedAlias,
       optionCount,
@@ -643,7 +668,7 @@ export function terminalActionForRemoteReply(
     if (
       !Number.isInteger(numericSelection) ||
       numericSelection < 1 ||
-      numericSelection > suggestionCount + 2
+      numericSelection > optionCount
     ) {
       throw new Error(
         "权限回复无效，请回复通知中的选项编号、允许/拒绝或完整选项文字。",
@@ -680,6 +705,7 @@ export function terminalActionForRemoteReply(
       selection = String(firstOptionCount + 1);
     } else if (
       !matchesRegularOption &&
+      questionModes[0] === "single" &&
       QUESTION_CHAT_CHOICE_ALIASES.has(normalizedQuestionChoice)
     ) {
       selection = String(firstOptionCount + 2);
@@ -696,7 +722,10 @@ export function terminalActionForRemoteReply(
             "已选择“输入其他回答（Type something.）”。请继续回复你的具体答案。",
         });
       }
-      if (numericSelection === firstOptionCount + 2) {
+      if (
+        questionModes[0] === "single" &&
+        numericSelection === firstOptionCount + 2
+      ) {
         return singleMenuAction(numericSelection, {
           nextStage: "question-chat-message",
           followUpMessage:
@@ -818,11 +847,26 @@ const SCREEN_CHECK_TAIL_LENGTH = 12_000;
 const MENU_OPTION_PATTERN = /(?:^|[\s❯›>│|])(\d{1,2})\.[ \t\u00a0]*\p{L}/gu;
 
 /**
+ * Extract numbered options from PTY text for legacy callers and diagnostics.
+ * Live WeCom routing passes renderer xterm rows separately, because PTY text
+ * alone cannot reproduce the active viewport after ANSI cursor movement.
+ */
+export function latestMenuOptions(screen: string): string[] | null {
+  return extractNumberedMenuOptions(
+    stripAnsi(screen).replaceAll("\r", "").split("\n"),
+  );
+}
+
+/**
  * Count the options of the most recently rendered numbered menu, or return
  * null when no menu can be recognised. Ink redraws the whole menu on every
  * change, so the last "1." starts the menu that is currently on screen.
  */
 export function latestMenuOptionCount(screen: string): number | null {
+  const options = latestMenuOptions(screen);
+  if (options) {
+    return options.length;
+  }
   const matches = [...screen.matchAll(MENU_OPTION_PATTERN)].map((match) =>
     Number(match[1]),
   );
@@ -853,19 +897,47 @@ export function remoteMenuMismatch(
   pending: PendingRemoteReply,
   action: RemoteReplyAction,
   screen: string,
+  visibleMenu?: readonly string[] | null,
 ): string | null {
   if (pending.replyStage || !action.menuSelections?.length) {
     return null;
   }
   const text = stripAnsi(screen).slice(-SCREEN_CHECK_TAIL_LENGTH);
   if (pending.kind === "permission") {
-    // The notice lists allow-once, each "don't ask again" suggestion and
+    // The notice lists allow-once, an optional merged suggestion row, and
     // deny; the keystrokes assume exactly that many options on screen.
-    const expected =
-      Math.max(0, Math.floor(pending.permissionSuggestionCount ?? 0)) + 2;
-    const visible = latestMenuOptionCount(text);
+    const expected = permissionMenuShape(pending).optionCount;
+    const visibleLabels =
+      visibleMenu === undefined ? latestMenuOptions(text) : visibleMenu;
+    const visible =
+      visibleLabels === null
+        ? null
+        : visibleLabels === undefined
+          ? latestMenuOptionCount(text)
+          : visibleLabels.length;
     if (visible !== null && visible !== expected) {
       return `终端当前的权限菜单有 ${visible} 个选项，与通知中的 ${expected} 个选项不一致`;
+    }
+    const expectedLabels =
+      pending.permissionMenuSource === "rendered"
+        ? pending.permissionOptionLabels
+        : undefined;
+    if (
+      visibleLabels &&
+      expectedLabels &&
+      visibleLabels.length === expectedLabels.length
+    ) {
+      for (let index = 0; index < expectedLabels.length; index += 1) {
+        const expectedLabel = expectedLabels[index];
+        const visibleLabel = visibleLabels[index];
+        if (
+          expectedLabel &&
+          visibleLabel &&
+          normalizedMenuLabel(expectedLabel) !== normalizedMenuLabel(visibleLabel)
+        ) {
+          return `终端当前的权限菜单第 ${index + 1} 项与通知中的文字不一致`;
+        }
+      }
     }
     return null;
   }
@@ -874,6 +946,9 @@ export function remoteMenuMismatch(
     (pending.questionSelectionModes?.length ?? 0) === 1
   ) {
     const labels = pending.questionOptionLabels?.[0] ?? [];
+    const visibleLabels =
+      visibleMenu === undefined ? latestMenuOptions(text) : visibleMenu;
+    const expectedOptionCount = labels.length + 2;
     const compactScreen = text.replace(/\s+/gu, "");
     for (const selection of action.menuSelections) {
       const label = labels[selection - 1];
@@ -882,13 +957,30 @@ export function remoteMenuMismatch(
         continue;
       }
       const probe = [...label.replace(/\s+/gu, "")].slice(0, 12).join("");
+      const visibleLabel = visibleLabels?.[selection - 1];
       if (
+        visibleLabels !== null &&
+        visibleLabels !== undefined &&
+        (!visibleLabel ||
+          !normalizedMenuLabel(visibleLabel).includes(normalizedMenuLabel(label)))
+      ) {
+        return `终端当前的问题菜单第 ${selection} 项与通知中的文字“${label}”不一致`;
+      }
+      if (
+        visibleLabels === undefined &&
         probe &&
         latestMenuOptionCount(text) !== null &&
         !compactScreen.includes(probe)
       ) {
         return `终端当前的菜单中没有选项“${label}”`;
       }
+    }
+    if (
+      visibleLabels !== null &&
+      visibleLabels !== undefined &&
+      visibleLabels.length !== expectedOptionCount
+    ) {
+      return `终端当前的问题菜单有 ${visibleLabels.length} 个选项，与通知中的 ${expectedOptionCount} 个选项不一致`;
     }
   }
   return null;

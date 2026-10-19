@@ -597,6 +597,67 @@ describe("SessionManager", () => {
     expect(fake.writes).toEqual(["hello\r"]);
   });
 
+  it("stores renderer xterm visible rows separately from the PTY tail", () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      (() => fake.process) as PtySpawner,
+      "darwin",
+    );
+    const session = manager.createSession(project());
+
+    manager.setTerminalVisibleLines({
+      sessionId: session.id,
+      sequence: 0,
+      lines: ["❯ 1. Yes", "  2. No"],
+      viewportY: 12,
+      rows: 2,
+      columns: 80,
+    });
+    const snapshot = manager.getTerminalVisibleLines(session.id);
+
+    expect(snapshot).toEqual({
+      sessionId: session.id,
+      sequence: 0,
+      lines: ["❯ 1. Yes", "  2. No"],
+      viewportY: 12,
+      rows: 2,
+      columns: 80,
+    });
+    snapshot?.lines.push("mutated");
+    expect(manager.getTerminalVisibleLines(session.id)?.lines).toEqual([
+      "❯ 1. Yes",
+      "  2. No",
+    ]);
+  });
+
+  it("waits for visible rows at the current PTY sequence", async () => {
+    const fake = fakePty();
+    const manager = new SessionManager(
+      () => "/usr/local/bin/claude",
+      (() => fake.process) as PtySpawner,
+      "darwin",
+    );
+    const session = manager.createSession(project());
+    fake.emitData("menu output");
+
+    const waiting = manager.waitForTerminalVisibleLines(session.id, 1, 100);
+    manager.setTerminalVisibleLines({
+      sessionId: session.id,
+      sequence: 1,
+      lines: ["❯ 1. Yes", "  2. No"],
+      viewportY: 0,
+      rows: 2,
+      columns: 80,
+    });
+
+    await expect(waiting).resolves.toMatchObject({
+      sessionId: session.id,
+      sequence: 1,
+      lines: ["❯ 1. Yes", "  2. No"],
+    });
+  });
+
   it("restarts an exited session in place and ignores stale process events", () => {
     const first = fakePty();
     const second = fakePty();

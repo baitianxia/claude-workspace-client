@@ -11,10 +11,14 @@ import {
 import type {
   ProjectRecord,
   SessionRecord,
+  TerminalVisibleLinesRequest,
   WeComInboundStatus,
   WeComState,
 } from "../shared/contracts";
-import { attentionFromClaudeHook } from "./claude-attention";
+import {
+  attentionFromClaudeHook,
+  withRenderedPermissionMenu,
+} from "./claude-attention";
 import type { ClaudeHookEvent } from "./claude-hook-server";
 import {
   RemoteReplyRouter,
@@ -22,6 +26,7 @@ import {
   terminalActionForRemoteReply,
   type PendingRemoteReply,
 } from "./remote-reply-router";
+import { extractNumberedMenuOptions } from "../shared/terminal-menu";
 import type { SessionManager, SessionInputEvent } from "./session-manager";
 import { describeWeComError as readableError } from "./wecom-error";
 
@@ -99,8 +104,9 @@ function defaultClientFactory(options: {
   });
 }
 
-// Enough recent PTY output to contain the prompt currently on screen.
-const REMOTE_SCREEN_CHECK_LENGTH = 16_000;
+// Hook delivery can race xterm's parser. Give the renderer a short window to
+// report the rows it has actually laid out before falling back to Hook data.
+const REMOTE_MENU_SYNC_TIMEOUT_MS = 250;
 
 function copyState(state: WeComState): WeComState {
   return { ...state };
@@ -482,15 +488,67 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     ) {
       return;
     }
-    const attention = attentionFromClaudeHook(event);
-    this.recordClaudeHook(
-      attention
-        ? `已收到 Claude Code ${event.payload.hook_event_name} 事件，正在推送。`
-        : `已收到 Claude Code ${event.payload.hook_event_name} 事件，但没有可推送的消息内容。`,
-    );
-    if (!attention) {
+    const hookAttention = attentionFromClaudeHook(event);
+    if (!hookAttention) {
+      this.recordClaudeHook(
+        `已收到 Claude Code ${event.payload.hook_event_name} 事件，但没有可推送的消息内容。`,
+      );
       return;
     }
+    if (hookAttention.kind === "permission" && hookAttention.inputMode === "menu") {
+      void this.publishPermissionHook(event, hookAttention);
+      return;
+    }
+    this.publishClaudeAttention(event, hookAttention);
+  }
+
+  private async publishPermissionHook(
+    event: ClaudeHookEvent,
+    hookAttention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
+  ): Promise<void> {
+    let attention = hookAttention;
+    let visible: TerminalVisibleLinesRequest | null = null;
+    try {
+      const snapshot = this.sessionManager.getTerminalSnapshot(
+        event.workspaceSessionId,
+      );
+      visible = await this.sessionManager.waitForTerminalVisibleLines(
+        event.workspaceSessionId,
+        snapshot.lastSequence,
+        REMOTE_MENU_SYNC_TIMEOUT_MS,
+      );
+    } catch {
+      // The launch guard below handles a session that exits while waiting.
+    }
+    const options = visible
+      ? extractNumberedMenuOptions(visible.lines)
+      : null;
+    if (visible && options && options.length >= 2) {
+      attention = withRenderedPermissionMenu(
+        hookAttention,
+        options,
+        visible.sequence,
+      );
+    }
+    this.publishClaudeAttention(event, attention);
+  }
+
+  private publishClaudeAttention(
+    event: ClaudeHookEvent,
+    attention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
+  ): void {
+    if (
+      !this.isClaudePushEnabled() ||
+      !this.sessionManager.isCurrentLaunch(
+        event.workspaceSessionId,
+        event.launchId,
+      )
+    ) {
+      return;
+    }
+    this.recordClaudeHook(
+      `已收到 Claude Code ${event.payload.hook_event_name} 事件，正在推送。`,
+    );
     if (
       (attention.kind === "completion" || attention.kind === "idle") &&
       !this.ownerAway()
@@ -744,14 +802,22 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       );
       return;
     }
-    const mismatch = remoteMenuMismatch(
-      pending,
-      action,
-      this.sessionManager.getTerminalTail(
-        pending.workspaceSessionId,
-        REMOTE_SCREEN_CHECK_LENGTH,
-      ),
+    const visibleLines = this.sessionManager.getTerminalVisibleLines(
+      pending.workspaceSessionId,
     );
+    const visibleOptions = visibleLines
+      ? extractNumberedMenuOptions(visibleLines.lines)
+      : null;
+    const renderedMenuStale =
+      pending.kind === "permission" &&
+      pending.permissionMenuSource === "rendered" &&
+      (pending.permissionMenuSequence === undefined ||
+        !visibleLines ||
+        visibleLines.sequence < pending.permissionMenuSequence ||
+        !visibleOptions);
+    const mismatch = renderedMenuStale
+      ? "终端当前可见菜单尚未同步"
+      : remoteMenuMismatch(pending, action, "", visibleOptions);
     if (mismatch) {
       // Navigation keys select by position. Writing them into a different
       // menu could pick the wrong answer (e.g. allow instead of deny).

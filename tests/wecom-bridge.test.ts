@@ -302,6 +302,87 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
+  it("uses the currently rendered Claude permission labels when they are visible", async () => {
+    const pty = fakePty(1);
+    let launchId = "";
+    const manager = new SessionManager(
+      () => "C:\\Tools\\claude.exe",
+      (() => pty.process) as PtySpawner,
+      "win32",
+      [],
+      (_id, currentLaunchId) => {
+        launchId = currentLaunchId;
+        return { args: [] };
+      },
+    );
+    const session = manager.createSession({ projectId: null, cwd: "C:\\work" });
+    const client = new FakeWeComClient();
+    const bridge = new WeComBridge(manager, () => [], undefined, () => client);
+    bridge.configure({
+      enabled: true,
+      botId: "bot-id",
+      targetUserId: "zhangsan",
+      secret: "secret",
+      hasSecret: true,
+    });
+    client.emit("authenticated");
+    pty.emitData(
+      "Do you want to proceed?\r\n" +
+        "❯ 1. Yes\r\n" +
+        "  2. Yes, and always allow access to dpms-interface-entry from this project\r\n" +
+        "  3. No\r\n",
+    );
+    manager.setTerminalVisibleLines({
+      sessionId: session.id,
+      sequence: 1,
+      lines: [
+        "Do you want to proceed?",
+        "❯ 1. Yes",
+        "  2. Yes, and always allow access to dpms-interface-entry from this project",
+        "  3. No",
+      ],
+      viewportY: 0,
+      rows: 4,
+      columns: 120,
+    });
+    bridge.handleClaudeHook({
+      workspaceSessionId: session.id,
+      launchId,
+      payload: {
+        session_id: `claude-${session.id}`,
+        transcript_path: `C:\\transcripts\\${session.id}.jsonl`,
+        cwd: "C:\\work",
+        hook_event_name: "PermissionRequest",
+        tool_name: "Write",
+        tool_input: {
+          file_path: "C:\\Users\\tianxiabai\\.claude\\skills\\dpms-interface-entry\\q_f790.js",
+        },
+        permission_suggestions: [
+          {
+            type: "setMode",
+            mode: "acceptEdits",
+            destination: "session",
+          },
+          {
+            type: "addDirectories",
+            directories: [
+              "C:\\Users\\tianxiabai\\.claude\\skills\\dpms-interface-entry",
+            ],
+            destination: "session",
+          },
+        ],
+      },
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const content = markdownContent(client.sent[0].body);
+    expect(content).toContain(
+      "2. Yes, and always allow access to dpms-interface-entry from this project",
+    );
+    expect(content).toContain("3. No");
+    expect(content).not.toContain("自动接受文件编辑");
+    bridge.dispose();
+  });
+
   it("only pushes completion notices while the owner is away from the computer", async () => {
     const pty = fakePty(1);
     let launchId = "";
@@ -369,6 +450,18 @@ describe("WeComBridge", () => {
 
     // ...but the terminal shows three, so position 2 would mean something else.
     pty.emitData("\u001b[36m❯\u001b[39m 1. Yes\r\n  2. Yes, and don't ask again\r\n  3. No\r\n");
+    manager.setTerminalVisibleLines({
+      sessionId: session.id,
+      sequence: 1,
+      lines: [
+        "❯ 1. Yes",
+        "  2. Yes, and don't ask again",
+        "  3. No",
+      ],
+      viewportY: 0,
+      rows: 3,
+      columns: 120,
+    });
     client.emit("message", incomingMessage("menu-mismatch", `${code} 2`));
     await vi.waitFor(() =>
       expect(client.replies).toContainEqual(expect.stringContaining("未发送任何按键")),
@@ -377,6 +470,17 @@ describe("WeComBridge", () => {
 
     // Once the screen matches the notice, the same code is answered normally.
     pty.emitData("❯ 1. Yes\r\n  2. No, and tell Claude what to do differently\r\n");
+    manager.setTerminalVisibleLines({
+      sessionId: session.id,
+      sequence: 2,
+      lines: [
+        "❯ 1. Yes",
+        "  2. No, and tell Claude what to do differently",
+      ],
+      viewportY: 0,
+      rows: 2,
+      columns: 120,
+    });
     client.emit("message", incomingMessage("menu-match", `${code} 2`));
     await vi.waitFor(() => expect(pty.writes).toEqual([DOWN, "\r"]));
     bridge.dispose();

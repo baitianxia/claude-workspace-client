@@ -4,6 +4,7 @@ import type {
   DesktopApi,
   SessionChangedEvent,
   TerminalDataEvent,
+  TerminalVisibleLinesRequest,
   WeComStateChangedEvent,
 } from "../shared/contracts";
 
@@ -39,6 +40,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   writeTerminal: "workspace:write-terminal",
   resizeTerminal: "workspace:resize-terminal",
   getTerminalSnapshot: "workspace:get-terminal-snapshot",
+  syncTerminalVisibleLines: "workspace:sync-terminal-visible-lines",
   listWorkspaceChanges: "workspace:list-changes",
   readWorkspaceFile: "workspace:read-file",
   terminalData: "workspace:terminal-data",
@@ -110,6 +112,8 @@ const api: DesktopApi = {
     ipcRenderer.send(IPC_CHANNELS.resizeTerminal, request),
   getTerminalSnapshot: (sessionId) =>
     ipcRenderer.invoke(IPC_CHANNELS.getTerminalSnapshot, sessionId),
+  syncTerminalVisibleLines: (request: TerminalVisibleLinesRequest) =>
+    ipcRenderer.send(IPC_CHANNELS.syncTerminalVisibleLines, request),
   listWorkspaceChanges: (projectId) =>
     ipcRenderer.invoke(IPC_CHANNELS.listWorkspaceChanges, projectId),
   readWorkspaceFile: (request) =>

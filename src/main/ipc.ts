@@ -19,6 +19,7 @@ import type {
   SessionNotificationRequest,
   SessionRecord,
   TerminalDataEvent,
+  TerminalVisibleLinesRequest,
   UpsertAssistantProfileRequest,
   UpdateWeComConfigRequest,
   UpdateProjectRequest,
@@ -36,6 +37,9 @@ import { WorkspaceFiles } from "./workspace-files";
 
 const MAX_CLIPBOARD_PASTE_LENGTH = 100_000;
 const MAX_CLIPBOARD_COPY_LENGTH = 2_000_000;
+const MAX_TERMINAL_VISIBLE_LINES = 500;
+const MAX_TERMINAL_VISIBLE_LINE_LENGTH = 4_000;
+const MAX_TERMINAL_VISIBLE_TEXT_LENGTH = 100_000;
 
 function requireIdentifier(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 200) {
@@ -49,6 +53,56 @@ function requireTerminalData(value: unknown): string {
     throw new Error("Terminal data must be a string.");
   }
   return value;
+}
+
+function requireTerminalVisibleLines(value: unknown): TerminalVisibleLinesRequest {
+  if (!value || typeof value !== "object") {
+    throw new Error("Visible terminal rows are invalid.");
+  }
+  const request = value as Partial<TerminalVisibleLinesRequest>;
+  const sessionId = requireIdentifier(request.sessionId, "Session ID");
+  if (
+    typeof request.sequence !== "number" ||
+    !Number.isSafeInteger(request.sequence) ||
+    request.sequence < 0
+  ) {
+    throw new Error("Visible terminal sequence is invalid.");
+  }
+  if (!Array.isArray(request.lines) || request.lines.length > MAX_TERMINAL_VISIBLE_LINES) {
+    throw new Error("Visible terminal rows are invalid.");
+  }
+  const lines = request.lines.map((line) => {
+    if (typeof line !== "string" || line.length > MAX_TERMINAL_VISIBLE_LINE_LENGTH) {
+      throw new Error("Visible terminal rows are invalid.");
+    }
+    return line;
+  });
+  if (
+    lines.reduce((total, line) => total + line.length, 0) >
+    MAX_TERMINAL_VISIBLE_TEXT_LENGTH
+  ) {
+    throw new Error("Visible terminal rows are too large.");
+  }
+  const isDimension = (number: unknown): number is number =>
+    typeof number === "number" && Number.isInteger(number) && number > 0 && number <= 1_000;
+  if (!isDimension(request.rows) || !isDimension(request.columns)) {
+    throw new Error("Visible terminal dimensions are invalid.");
+  }
+  if (
+    typeof request.viewportY !== "number" ||
+    !Number.isInteger(request.viewportY) ||
+    request.viewportY < 0
+  ) {
+    throw new Error("Visible terminal viewport is invalid.");
+  }
+  return {
+    sessionId,
+    sequence: request.sequence,
+    lines,
+    viewportY: request.viewportY,
+    rows: request.rows,
+    columns: request.columns,
+  };
 }
 
 function requireClipboardText(value: unknown): string {
@@ -447,6 +501,21 @@ export function registerIpcHandlers(options: {
       sessionManager.getTerminalSnapshot(
         requireIdentifier(sessionId, "Session ID"),
       ),
+  );
+
+  ipcMain.on(
+    IPC_CHANNELS.syncTerminalVisibleLines,
+    (_event, request: unknown) => {
+      try {
+        sessionManager.setTerminalVisibleLines(
+          requireTerminalVisibleLines(request),
+        );
+      } catch {
+        // Renderer snapshots are best-effort. Ignore stale or malformed
+        // updates rather than allowing an IPC payload to terminate the main
+        // process or interrupt the PTY session.
+      }
+    },
   );
 
   ipcMain.handle(

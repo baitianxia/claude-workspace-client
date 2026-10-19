@@ -6,6 +6,7 @@ import type {
   SessionRecord,
   TerminalDataEvent,
   TerminalSnapshot,
+  TerminalVisibleLinesRequest,
 } from "../shared/contracts";
 import {
   TERMINAL_PASTE_CHUNK_DELAY_MS,
@@ -113,6 +114,7 @@ export interface SessionManagerEvents {
   data: [event: TerminalDataEvent];
   changed: [session: SessionRecord];
   input: [event: SessionInputEvent];
+  terminalVisibleLines: [request: TerminalVisibleLinesRequest];
 }
 
 export type PtySpawner = (
@@ -204,6 +206,14 @@ export function describeClaudeSpawnError(error: unknown): string {
 
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private readonly sessions = new Map<string, ManagedSession>();
+  /**
+   * Rows currently visible in each renderer xterm. The PTY buffer contains
+   * control sequences and cannot reliably reconstruct Claude Code's menu.
+   */
+  private readonly visibleTerminalLines = new Map<
+    string,
+    TerminalVisibleLinesRequest
+  >();
   /**
    * PTY input is serialized per session. A paste may take a few milliseconds
    * per chunk, and a later keystroke or remote reply must not overtake it.
@@ -347,6 +357,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
 
     this.cancelQueuedInput(sessionId);
+    this.visibleTerminalLines.delete(sessionId);
     session.process = null;
     session.launchId = null;
     session.record.status = "starting";
@@ -783,6 +794,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
     this.cancelQueuedInput(sessionId);
     this.sessions.delete(sessionId);
+    this.visibleTerminalLines.delete(sessionId);
     return { record: { ...session.record }, terminated };
   }
 
@@ -792,6 +804,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         this.stop(session.record.id);
         this.cancelQueuedInput(session.record.id);
         this.sessions.delete(session.record.id);
+        this.visibleTerminalLines.delete(session.record.id);
       }
     }
   }
@@ -804,10 +817,86 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     );
   }
 
-  /** Recent terminal output, for checking what a prompt currently shows. */
+  /** Recent PTY output for diagnostics and legacy compatibility callers. */
   getTerminalTail(sessionId: string, length: number): string {
     const session = this.sessions.get(sessionId);
     return session ? session.terminal.tail(length) : "";
+  }
+
+  setTerminalVisibleLines(request: TerminalVisibleLinesRequest): void {
+    const session = this.sessions.get(request.sessionId);
+    if (
+      !session ||
+      request.sequence > session.sequence ||
+      !Number.isSafeInteger(request.sequence) ||
+      request.sequence < 0
+    ) {
+      return;
+    }
+    const previous = this.visibleTerminalLines.get(request.sessionId);
+    if (previous && request.sequence < previous.sequence) {
+      return;
+    }
+    const normalized: TerminalVisibleLinesRequest = {
+      sessionId: request.sessionId,
+      sequence: request.sequence,
+      lines: request.lines.map((line) => line.trimEnd()),
+      viewportY: request.viewportY,
+      rows: request.rows,
+      columns: request.columns,
+    };
+    this.visibleTerminalLines.set(request.sessionId, {
+      ...normalized,
+      lines: [...normalized.lines],
+    });
+    this.emit("terminalVisibleLines", {
+      ...normalized,
+      lines: [...normalized.lines],
+    });
+  }
+
+  getTerminalVisibleLines(
+    sessionId: string,
+  ): TerminalVisibleLinesRequest | undefined {
+    const snapshot = this.visibleTerminalLines.get(sessionId);
+    return snapshot
+      ? { ...snapshot, lines: [...snapshot.lines] }
+      : undefined;
+  }
+
+  /** Wait briefly for xterm to render rows for the current PTY sequence. */
+  waitForTerminalVisibleLines(
+    sessionId: string,
+    minimumSequence: number,
+    timeoutMs: number,
+  ): Promise<TerminalVisibleLinesRequest | null> {
+    const current = this.getTerminalVisibleLines(sessionId);
+    if (current && current.sequence >= minimumSequence) {
+      return Promise.resolve(current);
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (request: TerminalVisibleLinesRequest | null) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.off("terminalVisibleLines", onReport);
+        resolve(request);
+      };
+      const onReport = (request: TerminalVisibleLinesRequest) => {
+        if (
+          request.sessionId === sessionId &&
+          request.sequence >= minimumSequence
+        ) {
+          finish(request);
+        }
+      };
+      const timer = setTimeout(() => finish(null), Math.max(0, timeoutMs));
+      timer.unref?.();
+      this.on("terminalVisibleLines", onReport);
+    });
   }
 
   getTerminalSnapshot(sessionId: string): TerminalSnapshot {
@@ -972,6 +1061,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     this.cancelQueuedInput(sessionId);
+    this.visibleTerminalLines.delete(sessionId);
     session.process = null;
     session.launchId = null;
     session.record.status = "exited";

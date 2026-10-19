@@ -776,6 +776,7 @@ export function installDevelopmentPreview(): void {
       data: `\u001b[38;2;218;130;96mClaude Code\u001b[0m  ${sessionId}\r\n\r\n  Development interface preview\r\n`,
       lastSequence: 0,
     }),
+    syncTerminalVisibleLines: () => undefined,
     listWorkspaceChanges: async (projectId) => ({
       isGitRepository: true,
       truncated: false,

@@ -5,6 +5,7 @@ import type {
   AppTheme,
   SessionRecord,
   TerminalDataEvent,
+  TerminalVisibleLinesRequest,
 } from "../shared/contracts";
 import { formatDroppedPaths } from "../shared/terminal-drop";
 import { consumeTerminalShortcut } from "../shared/terminal-shortcuts";
@@ -66,6 +67,28 @@ const TERMINAL_THEMES: Record<AppTheme, ITheme> = {
   },
 };
 
+function visibleTerminalLines(
+  terminal: Terminal,
+  sessionId: string,
+): TerminalVisibleLinesRequest | null {
+  if (terminal.rows < 1 || terminal.cols < 1) {
+    return null;
+  }
+  const buffer = terminal.buffer.active;
+  const viewportY = Math.max(0, buffer.viewportY);
+  const lines = Array.from({ length: terminal.rows }, (_, offset) =>
+    buffer.getLine(viewportY + offset)?.translateToString(true) ?? "",
+  );
+  return {
+    sessionId,
+    sequence: 0,
+    lines,
+    viewportY,
+    rows: terminal.rows,
+    columns: terminal.cols,
+  };
+}
+
 export function TerminalView({
   session,
   active,
@@ -121,6 +144,37 @@ export function TerminalView({
     let initialized = false;
     let lastSequence = 0;
     const pendingEvents: TerminalDataEvent[] = [];
+    let lastVisibleSignature = "";
+
+    // This snapshot is read from xterm's active buffer after parsing/rendering,
+    // so it reflects the same rows the user can currently see. The PTY stream
+    // cannot provide this because ANSI cursor movement and alternate buffers
+    // have already changed the final layout by this point.
+    const syncVisibleLines = () => {
+      const snapshot = visibleTerminalLines(terminal, session.id);
+      if (!snapshot) {
+        return;
+      }
+      const signature = [
+        lastSequence,
+        snapshot.viewportY,
+        snapshot.rows,
+        snapshot.columns,
+        snapshot.lines.join("\u0000"),
+      ].join("\u0001");
+      if (signature === lastVisibleSignature) {
+        return;
+      }
+      lastVisibleSignature = signature;
+      window.claudeWorkspace.syncTerminalVisibleLines({
+        ...snapshot,
+        sequence: lastSequence,
+      });
+    };
+    const writeParsedDisposable = terminal.onWriteParsed(syncVisibleLines);
+    const renderDisposable = terminal.onRender(syncVisibleLines);
+    const scrollDisposable = terminal.onScroll(syncVisibleLines);
+    const resizeDisposable = terminal.onResize(syncVisibleLines);
 
     const unsubscribe = window.claudeWorkspace.onTerminalData((event) => {
       if (event.sessionId !== session.id || event.sequence <= lastSequence) {
@@ -159,17 +213,22 @@ export function TerminalView({
         }
         if (!snapshot.data) {
           initializeLiveOutput(snapshot.lastSequence);
+          syncVisibleLines();
           return;
         }
         terminal.write(snapshot.data, () => {
           initializeLiveOutput(snapshot.lastSequence);
+          syncVisibleLines();
         });
       })
       .catch((error: unknown) => {
         if (!disposed) {
           terminal.writeln(
             `\r\n\x1b[31m无法读取终端内容：${String(error)}\x1b[0m`,
-            () => initializeLiveOutput(0),
+            () => {
+              initializeLiveOutput(0);
+              syncVisibleLines();
+            },
           );
         }
       });
@@ -287,6 +346,7 @@ export function TerminalView({
           columns: terminal.cols,
           rows: terminal.rows,
         });
+        syncVisibleLines();
         if (activeRef.current && focusPendingRef.current) {
           terminal.focus();
           focusPendingRef.current = false;
@@ -308,6 +368,10 @@ export function TerminalView({
       container.removeEventListener("drop", handleDrop);
       inputDisposable.dispose();
       unsubscribe();
+      writeParsedDisposable.dispose();
+      renderDisposable.dispose();
+      scrollDisposable.dispose();
+      resizeDisposable.dispose();
       outputScheduler.dispose();
       terminal.dispose();
       terminalRef.current = null;

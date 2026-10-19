@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { attentionFromClaudeHook } from "../src/main/claude-attention";
+import {
+  attentionFromClaudeHook,
+  withRenderedPermissionMenu,
+} from "../src/main/claude-attention";
 import type { ClaudeHookEvent } from "../src/main/claude-hook-server";
 
 function hook(
@@ -57,13 +60,14 @@ describe("attentionFromClaudeHook", () => {
     });
   });
 
-  it("distinguishes mode and working-directory permission suggestions", () => {
+  it("does not expose a setMode candidate that the reported menu omits", () => {
     const attention = attentionFromClaudeHook(
       hook({
         hook_event_name: "PermissionRequest",
         tool_name: "Write",
         tool_input: {
-          file_path: "C:\\Users\\alice\\.claude\\hooks\\notify.ps1",
+          file_path:
+            "C:\\Users\\tianxiabai\\.claude\\skills\\dpms-interface-entry\\q_f790.js",
           content: "Write-Output 'hook fired'",
         },
         permission_suggestions: [
@@ -74,7 +78,9 @@ describe("attentionFromClaudeHook", () => {
           },
           {
             type: "addDirectories",
-            directories: ["C:\\Users\\alice\\.claude"],
+            directories: [
+              "C:\\Users\\tianxiabai\\.claude\\skills\\dpms-interface-entry",
+            ],
             destination: "session",
           },
         ],
@@ -83,26 +89,62 @@ describe("attentionFromClaudeHook", () => {
 
     expect(attention).toMatchObject({
       kind: "permission",
-      permissionSuggestionCount: 2,
+      permissionSuggestionCount: 1,
       permissionOptionLabels: [
         "允许：仅执行本次操作",
-        "允许：本次操作，并在本会话内自动接受文件编辑",
-        "允许：本次操作，并将 “C:\\Users\\alice\\.claude” 添加为本会话工作目录",
+        "允许：本次操作，并将 “C:\\Users\\tianxiabai\\.claude\\skills\\dpms-interface-entry” 添加为本会话工作目录",
         "拒绝：不执行本次操作，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
       ],
     });
+    expect(attention?.permissionOptionLabels).toHaveLength(3);
     expect(attention?.body).toContain(
-      "2. 允许：本次操作，并在本会话内自动接受文件编辑",
+      "2. 允许：本次操作，并将 “C:\\Users\\tianxiabai\\.claude\\skills\\dpms-interface-entry” 添加为本会话工作目录",
     );
+    expect(attention?.body).not.toContain("3. 允许：");
+    expect(attention?.body).not.toContain("自动接受文件编辑");
     expect(attention?.body).toContain(
-      "3. 允许：本次操作，并将 “C:\\Users\\alice\\.claude” 添加为本会话工作目录",
+      "3. 拒绝：不执行本次操作，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
     );
     expect(
       new Set(attention?.permissionOptionLabels).size,
     ).toBe(attention?.permissionOptionLabels?.length);
   });
 
-  it("uses persistence scope to distinguish otherwise identical rules", () => {
+  it("uses the labels from the rendered Claude permission menu when available", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "Write",
+        tool_input: { file_path: "C:\\work\\file.txt", content: "test" },
+        permission_suggestions: [
+          {
+            type: "addDirectories",
+            directories: ["C:\\work"],
+            destination: "session",
+          },
+        ],
+      }),
+    );
+    if (!attention) {
+      throw new Error("Expected a permission attention.");
+    }
+
+    const rendered = withRenderedPermissionMenu(attention, [
+      "Yes",
+      "Yes, and always allow access to work from this project",
+      "No",
+    ]);
+
+    expect(rendered.permissionOptionLabels).toEqual([
+      "Yes",
+      "Yes, and always allow access to work from this project",
+      "No",
+    ]);
+    expect(rendered.permissionSuggestionCount).toBe(1);
+    expect(rendered.body).toMatch(/1\. Yes\n2\. Yes, and always allow access to work from this project\n3\. No$/u);
+  });
+
+  it("combines identical rules into one selectable permission row", () => {
     const attention = attentionFromClaudeHook(
       hook({
         hook_event_name: "PermissionRequest",
@@ -125,13 +167,17 @@ describe("attentionFromClaudeHook", () => {
       }),
     );
 
-    expect(attention?.permissionOptionLabels?.slice(1, 3)).toEqual([
-      "允许：以后运行符合“npm test”规则的命令时不再询问（权限保存范围：仅当前会话）",
-      "允许：以后运行符合“npm test”规则的命令时不再询问（权限保存范围：当前工程本地设置）",
-    ]);
+    expect(attention).toMatchObject({
+      permissionSuggestionCount: 1,
+      permissionOptionLabels: [
+        "允许：仅运行本次命令",
+        "允许：以后运行符合“npm test”规则的命令时不再询问",
+        "拒绝：不运行本次命令，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+      ],
+    });
   });
 
-  it("keeps opaque duplicate suggestions separately selectable", () => {
+  it("ignores opaque suggestions instead of inventing selectable rows", () => {
     const attention = attentionFromClaudeHook(
       hook({
         hook_event_name: "PermissionRequest",
@@ -141,13 +187,42 @@ describe("attentionFromClaudeHook", () => {
       }),
     );
 
-    expect(attention?.permissionOptionLabels?.slice(1, 3)).toEqual([
-      "允许：以后执行此类操作时不再询问（Claude Code 权限建议 1）",
-      "允许：以后执行此类操作时不再询问（Claude Code 权限建议 2）",
-    ]);
+    expect(attention).toMatchObject({
+      permissionSuggestionCount: 0,
+      permissionOptionLabels: [
+        "允许：仅执行本次操作",
+        "拒绝：不执行本次操作，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+      ],
+    });
   });
 
-  it("matches Claude Code's WebFetch permission dialog line for line", () => {
+  it("does not expose deny or ask updates as allow choices", () => {
+    const attention = attentionFromClaudeHook(
+      hook({
+        hook_event_name: "PermissionRequest",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf build" },
+        permission_suggestions: [
+          {
+            type: "addRules",
+            rules: [{ toolName: "Bash", ruleContent: "rm -rf *" }],
+            behavior: "deny",
+            destination: "session",
+          },
+        ],
+      }),
+    );
+
+    expect(attention).toMatchObject({
+      permissionSuggestionCount: 0,
+      permissionOptionLabels: [
+        "允许：仅运行本次命令",
+        "拒绝：不运行本次命令，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
+      ],
+    });
+  });
+
+  it("renders WebFetch permission semantics with one merged suggestion", () => {
     const attention = attentionFromClaudeHook(
       hook({
         hook_event_name: "PermissionRequest",
@@ -237,11 +312,9 @@ describe("attentionFromClaudeHook", () => {
     expect(permissionEventAttention?.body).not.toContain("允许本次");
     expect(permissionEventAttention?.body).not.toContain('"questions"');
     expect(permissionEventAttention?.body).toContain(
-      "3. 输入其他回答（Type something.）",
+      "3. 输入其他回答（Type something）",
     );
-    expect(permissionEventAttention?.body).toContain(
-      "4. 与 Claude 讨论这个问题（Chat about this）",
-    );
+    expect(permissionEventAttention?.body).not.toContain("Chat about this");
   });
 
   it("renders the reported single-choice PermissionRequest as a question", () => {

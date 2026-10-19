@@ -108,10 +108,96 @@ function toolInputDetails(payload: ClaudeHookPayload): string[] {
   return details;
 }
 
-function permissionSuggestions(payload: ClaudeHookPayload): unknown[] {
+function rawPermissionSuggestions(payload: ClaudeHookPayload): unknown[] {
   return Array.isArray(payload.permission_suggestions)
     ? payload.permission_suggestions
     : [];
+}
+
+interface PermissionRuleSuggestion {
+  toolName: string;
+  ruleContent?: string;
+}
+
+interface PermissionSuggestionSummary {
+  rules: PermissionRuleSuggestion[];
+  directories: string[];
+  destinations: Set<"session" | "localSettings">;
+}
+
+/**
+ * Claude Code treats permission_suggestions as update candidates, not as the
+ * menu itself. The interactive dialog only exposes allow rules/directories
+ * that can be saved to the session or local settings, and combines them into
+ * one consent row. The current Claude Code permission renderer does not expose
+ * mode updates as a separate row, so setMode is intentionally ignored here.
+ */
+function permissionSuggestionSummary(
+  payload: ClaudeHookPayload,
+): PermissionSuggestionSummary {
+  const rules: PermissionRuleSuggestion[] = [];
+  const directories: string[] = [];
+  const destinations = new Set<"session" | "localSettings">();
+  const seenRules = new Set<string>();
+  const seenDirectories = new Set<string>();
+
+  for (const value of rawPermissionSuggestions(payload)) {
+    const suggestion = asRecord(value);
+    if (!suggestion) {
+      continue;
+    }
+    const type = textValue(suggestion.type);
+    const behavior = textValue(suggestion.behavior);
+    if (type === "addDirectories") {
+      if (behavior && behavior !== "allow") {
+        continue;
+      }
+    } else if (behavior !== "allow") {
+      continue;
+    }
+    const destination = textValue(suggestion.destination);
+    if (destination !== "session" && destination !== "localSettings") {
+      continue;
+    }
+    if (type === "addRules" && Array.isArray(suggestion.rules)) {
+      for (const ruleValue of suggestion.rules) {
+        const rule = asRecord(ruleValue);
+        const toolName = textValue(rule?.toolName);
+        if (!toolName) {
+          continue;
+        }
+        let ruleContent: string | undefined;
+        if (rule?.ruleContent !== undefined) {
+          ruleContent = textValue(rule.ruleContent) ?? undefined;
+          if (!ruleContent) {
+            continue;
+          }
+        }
+        const key = `${toolName}\u0000${ruleContent ?? ""}`;
+        if (seenRules.has(key)) {
+          continue;
+        }
+        seenRules.add(key);
+        rules.push({ toolName, ...(ruleContent ? { ruleContent } : {}) });
+        destinations.add(destination);
+      }
+      continue;
+    }
+
+    if (type === "addDirectories" && Array.isArray(suggestion.directories)) {
+      for (const directoryValue of suggestion.directories) {
+        const directory = textValue(directoryValue);
+        if (!directory || seenDirectories.has(directory)) {
+          continue;
+        }
+        seenDirectories.add(directory);
+        directories.push(directory);
+        destinations.add(destination);
+      }
+    }
+  }
+
+  return { rules, directories, destinations };
 }
 
 interface PermissionCopy {
@@ -119,12 +205,12 @@ interface PermissionCopy {
   question: string;
   allowOnce: string;
   deny: string;
-  allowSimilar: string;
 }
 
 interface PermissionPrompt {
   body: string;
   optionLabels: string[];
+  suggestionCount: number;
 }
 
 function webFetchHost(payload: ClaudeHookPayload): string | null {
@@ -152,9 +238,6 @@ function permissionCopy(payload: ClaudeHookPayload): PermissionCopy {
       allowOnce: "允许：仅获取本次网页内容",
       deny:
         "拒绝：不获取本次网页内容，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
-      allowSimilar: host
-        ? `允许：以后从 ${host} 获取内容时不再询问`
-        : "允许：以后获取此类网页内容时不再询问",
     };
   }
   if (toolName === "Bash") {
@@ -164,7 +247,6 @@ function permissionCopy(payload: ClaudeHookPayload): PermissionCopy {
       allowOnce: "允许：仅运行本次命令",
       deny:
         "拒绝：不运行本次命令，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
-      allowSimilar: "允许：以后运行此类命令时不再询问",
     };
   }
   return {
@@ -173,7 +255,6 @@ function permissionCopy(payload: ClaudeHookPayload): PermissionCopy {
     allowOnce: "允许：仅执行本次操作",
     deny:
       "拒绝：不执行本次操作，并告诉 Claude Code 应如何调整（选择后还需要回复具体调整要求）",
-    allowSimilar: "允许：以后执行此类操作时不再询问",
   };
 }
 
@@ -200,180 +281,51 @@ function permissionRuleScope(ruleValue: unknown): string | null {
     : `使用 ${toolName}`;
 }
 
-function permissionModeAction(mode: string | null): string | null {
-  switch (mode) {
-    case "acceptEdits":
-      return "自动接受文件编辑";
-    case "default":
-    case "manual":
-      return "恢复逐项权限确认";
-    case "auto":
-      return "切换到自动模式";
-    case "dontAsk":
-      return "切换到不再询问模式";
-    case "bypassPermissions":
-      return "绕过权限检查";
-    case "plan":
-      return "切换到计划模式";
-    default:
-      return mode ? `切换到“${truncate(mode, 200)}”权限模式` : null;
-  }
-}
-
 function permissionSuggestionLabel(
-  payload: ClaudeHookPayload,
-  value: unknown,
-): string {
-  const suggestion = asRecord(value);
-  const type = textValue(suggestion?.type);
-  const destination = textValue(suggestion?.destination);
-
-  if (type === "setMode") {
-    const mode = textValue(suggestion?.mode);
-    const sessionPrefix = destination === "session" ? "在本会话内" : "以后";
-    const action = permissionModeAction(mode);
-    return action
-      ? `允许：本次操作，并${sessionPrefix}${action}`
-      : permissionCopy(payload).allowSimilar;
-  }
-
-  if (type === "addDirectories" || type === "removeDirectories") {
-    const directories = Array.isArray(suggestion?.directories)
-      ? suggestion.directories.flatMap((directoryValue) => {
-          const directory = textValue(directoryValue);
-          return directory ? [`“${truncate(directory, 500)}”`] : [];
-        })
-      : [];
-    if (directories.length > 0) {
-      const action = type === "addDirectories" ? "添加为" : "移出";
-      const scope = destination === "session" ? "本会话工作目录" : "工作目录";
-      return `允许：本次操作，并将 ${directories.join("、")} ${action}${scope}`;
-    }
-    return permissionCopy(payload).allowSimilar;
-  }
-
-  const rules = Array.isArray(suggestion?.rules) ? suggestion.rules : [];
-  const scopes = rules.flatMap((ruleValue) => {
-    const scope = permissionRuleScope(ruleValue);
+  summary: PermissionSuggestionSummary,
+): string | null {
+  const scopes = summary.rules.flatMap((rule) => {
+    const scope = permissionRuleScope(rule);
     return scope ? [scope] : [];
   });
-
-  if (
-    (type === "replaceRules" || type === "removeRules") &&
-    scopes.length > 0
-  ) {
-    const behavior = textValue(suggestion?.behavior);
-    const behaviorLabel =
-      behavior === "deny"
-        ? "拒绝"
-        : behavior === "ask"
-          ? "询问"
-          : "允许";
-    const action = type === "replaceRules" ? "替换" : "移除";
-    return `允许：本次操作，并${action}${behaviorLabel}权限规则：${scopes.join("，或")}`;
-  }
-
-  const scopeText =
-    scopes.length > 0
-      ? `允许：以后${scopes.join("，或")}时不再询问`
-      : type
-        ? `允许：本次操作，并应用 Claude Code 提供的“${truncate(type, 200)}”权限设置`
-        : permissionCopy(payload).allowSimilar;
-  return scopeText;
-}
-
-function permissionDestinationDescription(value: unknown): string | null {
-  const destination = textValue(asRecord(value)?.destination);
-  if (destination === "session") {
-    return "仅当前会话";
-  }
-  if (destination === "localSettings") {
-    return "当前工程本地设置";
-  }
-  if (destination === "projectSettings") {
-    return "当前工程共享设置";
-  }
-  if (destination === "userSettings") {
-    return "用户设置";
-  }
-  return destination ? truncate(destination, 200) : null;
-}
-
-function normalizedPermissionLabel(value: string): string {
-  return value
-    .normalize("NFKC")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .toLocaleLowerCase("en-US");
-}
-
-function duplicatePermissionLabels(labels: string[]): Set<string> {
-  const counts = new Map<string, number>();
-  for (const label of labels) {
-    const normalized = normalizedPermissionLabel(label);
-    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
-  }
-  return new Set(
-    [...counts.entries()].flatMap(([label, count]) =>
-      count > 1 ? [label] : [],
-    ),
+  const directories = summary.directories.map((directory) =>
+    `“${truncate(directory, 500)}”`,
   );
-}
+  if (scopes.length === 0 && directories.length === 0) {
+    return null;
+  }
 
-function disambiguatePermissionSuggestionLabels(
-  suggestions: unknown[],
-  labels: string[],
-): string[] {
-  const duplicateBaseLabels = duplicatePermissionLabels(labels);
-  const labelsWithDestinations = labels.map((label, index) => {
-    if (!duplicateBaseLabels.has(normalizedPermissionLabel(label))) {
-      return label;
-    }
-    const destination = permissionDestinationDescription(suggestions[index]);
-    return destination
-      ? `${label}（权限保存范围：${destination}）`
-      : label;
-  });
-  const remainingDuplicates = duplicatePermissionLabels(
-    labelsWithDestinations,
-  );
-  return labelsWithDestinations.map((label, index) =>
-    remainingDuplicates.has(normalizedPermissionLabel(label))
-      ? `${label}（Claude Code 权限建议 ${index + 1}）`
-      : label,
-  );
-}
+  if (scopes.length > 0 && directories.length > 0) {
+    return `允许：以后${scopes.join("，或")}时不再询问，并将 ${directories.join("、")} 添加为工作目录`;
+  }
+  if (scopes.length > 0) {
+    return `允许：以后${scopes.join("，或")}时不再询问`;
+  }
 
-function webFetchSuggestionHost(value: unknown): string | null {
-  const suggestion = asRecord(value);
-  const rules = Array.isArray(suggestion?.rules) ? suggestion.rules : [];
-  for (const ruleValue of rules) {
-    const rule = asRecord(ruleValue);
-    if (textValue(rule?.toolName) !== "WebFetch") {
-      continue;
-    }
-    const ruleContent = textValue(rule?.ruleContent);
-    const domain = ruleContent
-      ? /^domain:(.+)$/iu.exec(ruleContent)?.[1]?.trim()
-      : null;
-    if (domain) {
-      return truncate(domain, 500);
-    }
+  const sessionOnly =
+    summary.destinations.size === 1 && summary.destinations.has("session");
+  if (directories.length > 0) {
+    return `允许：本次操作，并将 ${directories.join("、")} 添加为${sessionOnly ? "本会话工作目录" : "工作目录"}`;
   }
   return null;
 }
 
 function webFetchSuggestionLabel(
   payload: ClaudeHookPayload,
-  value: unknown,
-): string {
-  const suggestion = asRecord(value);
-  const type = textValue(suggestion?.type);
-  const hasRules = Array.isArray(suggestion?.rules);
-  if (type !== "addRules" && !hasRules) {
-    return permissionSuggestionLabel(payload, value);
+  summary: PermissionSuggestionSummary,
+): string | null {
+  if (summary.rules.length === 0) {
+    const generic = permissionSuggestionLabel(summary);
+    return generic ? generic.replace(/^允许：/u, "是，") : null;
   }
-  const suggestionHost = webFetchSuggestionHost(value) ?? webFetchHost(payload);
+  const suggestionHost =
+    summary.rules
+      .map((rule) =>
+        rule.toolName === "WebFetch" && rule.ruleContent
+          ? /^domain:(.+)$/iu.exec(rule.ruleContent)?.[1]?.trim() ?? null
+          : null,
+      )
+      .find((value): value is string => Boolean(value)) ?? webFetchHost(payload);
   return suggestionHost
     ? `是，并且以后从 ${suggestionHost} 获取内容时不再询问`
     : "是，并且以后获取此类内容时不再询问";
@@ -385,16 +337,11 @@ function webFetchPermissionPrompt(
   const input = asRecord(payload.tool_input);
   const url = textValue(input?.url);
   const host = webFetchHost(payload);
-  const suggestions = permissionSuggestions(payload);
-  const suggestionLabels = disambiguatePermissionSuggestionLabels(
-    suggestions,
-    suggestions.map((suggestion) =>
-      webFetchSuggestionLabel(payload, suggestion),
-    ),
-  );
+  const summary = permissionSuggestionSummary(payload);
+  const suggestionLabel = webFetchSuggestionLabel(payload, summary);
   const optionLabels = [
     "是",
-    ...suggestionLabels,
+    ...(suggestionLabel ? [suggestionLabel] : []),
     "否，并告诉 Claude 应如何调整（Esc）",
   ];
   return {
@@ -408,6 +355,7 @@ function webFetchPermissionPrompt(
       ...optionLabels.map((label, index) => `${index + 1}. ${label}`),
     ].join("\n"),
     optionLabels,
+    suggestionCount: optionLabels.length - 2,
   };
 }
 
@@ -416,17 +364,12 @@ function permissionPrompt(payload: ClaudeHookPayload): PermissionPrompt {
     return webFetchPermissionPrompt(payload);
   }
   const details = toolInputDetails(payload);
-  const suggestions = permissionSuggestions(payload);
   const copy = permissionCopy(payload);
-  const suggestionLabels = disambiguatePermissionSuggestionLabels(
-    suggestions,
-    suggestions.map((suggestion) =>
-      permissionSuggestionLabel(payload, suggestion),
-    ),
-  );
+  const summary = permissionSuggestionSummary(payload);
+  const suggestionLabel = permissionSuggestionLabel(summary);
   const optionLabels = [
     copy.allowOnce,
-    ...suggestionLabels,
+    ...(suggestionLabel ? [suggestionLabel] : []),
     copy.deny,
   ];
   return {
@@ -442,6 +385,7 @@ function permissionPrompt(payload: ClaudeHookPayload): PermissionPrompt {
       ...optionLabels.map((label, index) => `${index + 1}. ${label}`),
     ].join("\n"),
     optionLabels,
+    suggestionCount: optionLabels.length - 2,
   };
 }
 
@@ -497,10 +441,14 @@ function questionBody(payload: ClaudeHookPayload): {
       "#### 回复选项",
       "",
       ...optionLines,
-      `${optionLabels.length + 1}. 输入其他回答（Type something.）`,
-      `${optionLabels.length + 2}. 与 Claude 讨论这个问题（Chat about this）`,
+      `${optionLabels.length + 1}. 输入其他回答（Type something${multiSelect ? "" : "."}）`,
+      ...(multiSelect
+        ? []
+        : [
+            `${optionLabels.length + 2}. 与 Claude 讨论这个问题（Chat about this）`,
+          ]),
       ...(multiSelect ? ["（可多选，使用逗号分隔编号）"] : []),
-      "（选择“输入其他回答”或“讨论这个问题”后，企业微信会继续提示你发送具体内容。）",
+      `（选择“输入其他回答”${multiSelect ? "" : "或“讨论这个问题”"}后，企业微信会继续提示你发送具体内容。）`,
       "",
     ];
   });
@@ -675,7 +623,8 @@ export function attentionFromClaudeHook(
         "menu",
       ),
       permissionOptionLabels: prompt.optionLabels,
-      permissionSuggestionCount: permissionSuggestions(payload).length,
+      permissionMenuSource: "hook",
+      permissionSuggestionCount: prompt.suggestionCount,
     };
   }
 
@@ -733,4 +682,46 @@ export function attentionFromClaudeHook(
     );
   }
   return null;
+}
+
+/**
+ * Replace the permission menu in a Hook-derived attention with labels read
+ * from Claude Code's current terminal render. Hook suggestions are only
+ * candidates, so this is the authoritative path whenever the screen can be
+ * read; callers may keep the original attention when no menu is visible yet.
+ */
+export function withRenderedPermissionMenu(
+  attention: RemoteAttention,
+  labels: string[],
+  sequence?: number,
+): RemoteAttention {
+  if (attention.kind !== "permission" || labels.length < 2) {
+    return attention;
+  }
+  const normalized = labels.map((label) => label.trim());
+  if (normalized.some((label) => !label)) {
+    return attention;
+  }
+  const lines = attention.body.split(/\r?\n/u);
+  let menuStart = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/^\s*1\.[ \t\u00a0]+\S/u.test(lines[index])) {
+      menuStart = index;
+      break;
+    }
+  }
+  if (menuStart < 0) {
+    return attention;
+  }
+  return {
+    ...attention,
+    body: [
+      ...lines.slice(0, menuStart),
+      ...normalized.map((label, index) => `${index + 1}. ${label}`),
+    ].join("\n"),
+    permissionOptionLabels: normalized,
+    permissionMenuSource: "rendered",
+    ...(sequence !== undefined ? { permissionMenuSequence: sequence } : {}),
+    permissionSuggestionCount: Math.max(0, normalized.length - 2),
+  };
 }
