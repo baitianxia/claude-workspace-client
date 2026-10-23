@@ -12,21 +12,55 @@ import type {
   ProjectRecord,
   SessionRecord,
   TerminalVisibleLinesRequest,
+  WeComHeldPrompt,
   WeComInboundStatus,
   WeComState,
 } from "../shared/contracts";
 import {
   attentionFromClaudeHook,
+  withRenderedMenuLabels,
   withRenderedPermissionMenu,
 } from "./claude-attention";
-import type { ClaudeHookEvent } from "./claude-hook-server";
+import type {
+  ClaudeHookDecision,
+  ClaudeHookEvent,
+} from "./claude-hook-server";
 import {
   RemoteReplyRouter,
-  remoteMenuMismatch,
   terminalActionForRemoteReply,
   type PendingRemoteReply,
+  type RemoteReplyStage,
 } from "./remote-reply-router";
-import { extractNumberedMenuOptions } from "../shared/terminal-menu";
+import {
+  hookOutputFor,
+  resolveHeldReply,
+  withHeldPlanOptions,
+} from "./remote-hook-decision";
+import {
+  bindConfirmedRow,
+  bindOutOfRangeSelection,
+  bindPermissionSelection,
+  bindPositionalSelection,
+  bindQuestionSelections,
+  bindRowByText,
+  describeVisibleMenu,
+  followUpMessageForStage,
+  isFreeTextRow,
+  looksLikeAllowRow,
+  looksLikeDenyRow,
+  MENU_RECOVERY_HINT,
+  screenShowsRequest,
+  stageForBoundRow,
+  type BoundMenuRow,
+  type MenuBinding,
+} from "./remote-menu-binding";
+import {
+  extractNumberedMenuOptions,
+  menuLabelMatches,
+  menuLabelsEqual,
+  parseVisibleMenu,
+  type VisibleMenu,
+} from "../shared/terminal-menu";
 import type { SessionManager, SessionInputEvent } from "./session-manager";
 import { describeWeComError as readableError } from "./wecom-error";
 
@@ -37,6 +71,11 @@ export interface WeComRuntimeConfiguration {
   secret?: string;
   hasSecret: boolean;
   configurationError?: string;
+  /**
+   * Hold permission/question/plan Hooks open while the owner is away so the
+   * WeCom reply answers them directly (default true).
+   */
+  holdPromptsWhileAway?: boolean;
 }
 
 interface WeComBridgeEvents {
@@ -110,6 +149,55 @@ function defaultClientFactory(options: {
 const REMOTE_MENU_SYNC_TIMEOUT_MS = 2_000;
 // Before writing reply keys, let the renderer catch up with recent output.
 const REMOTE_REPLY_SYNC_TIMEOUT_MS = 1_000;
+// After moving the focus pointer, how long to wait for the redrawn menu that
+// proves the pointer landed on the intended row before Enter is pressed.
+const REMOTE_MENU_VERIFY_TIMEOUT_MS = 1_500;
+// After choosing a row that opens a text field, how long to wait for the
+// field before typing text sent along with the choice.
+const REMOTE_FOLLOW_UP_DELAY_MS = 800;
+const TERMINAL_DOWN = "\x1b[B";
+const TERMINAL_UP = "\x1b[A";
+const TERMINAL_ENTER = "\r";
+const TERMINAL_TOGGLE = " ";
+// "菜单" re-sends the menu on screen; "确认 N" selects the N-th row on screen
+// after the user has seen it.
+const MENU_COMMAND = /^(?:菜单|刷新菜单|刷新|menu)$/iu;
+const CONFIRM_COMMAND = /^(?:确认|confirm)\s*([1-9][0-9]?)$/iu;
+
+interface RemoteReplyContext {
+  client: WeComClient;
+  frame: WsFrame<BaseMessage>;
+  pending: PendingRemoteReply;
+}
+
+/** A prompt whose Hook response is being withheld until WeCom answers. */
+interface HeldPrompt {
+  code: string;
+  sessionId: string;
+  launchId: string;
+  kind: "permission" | "question" | "plan";
+  title: string;
+  since: number;
+  event: ClaudeHookEvent;
+  decisions: Array<{ decision: ClaudeHookDecision; hookEventName: string }>;
+}
+
+type WeComStateInput = Omit<WeComState, "holdPromptsWhileAway" | "heldPrompts">;
+
+// How often, while prompts are held, to check whether the owner is back at
+// the computer (then the terminal dialog is the better place to answer).
+const PRESENCE_POLL_MS = 3_000;
+
+interface VisibleScreen {
+  lines: TerminalVisibleLinesRequest | undefined;
+  menu: VisibleMenu | null;
+}
+
+interface RemoteFollowUp {
+  nextStage?: RemoteReplyStage;
+  followUpMessage?: string;
+  inlineFollowUp?: string;
+}
 
 function copyState(state: WeComState): WeComState {
   return { ...state };
@@ -241,17 +329,17 @@ function notificationMarkdown(
         }
       : pending.kind === "permission"
         ? {
-            quoted: "发送上方选项编号、`允许`/`拒绝`或完整选项文字",
+            quoted: "发送上方选项编号、`允许`/`拒绝`或完整选项文字；发送「菜单」可查看终端当前的选项",
             directExample: "允许",
           }
         : pending.kind === "question" && pending.inputMode === "menu"
           ? pending.supportsMultipleSelection
             ? {
-                quoted: "发送 `1,3`，也可用逗号分隔完整选项文字",
+                quoted: "发送 `1,3`，也可用逗号分隔完整选项文字；自由回答发送「其他：内容」",
                 directExample: "1,3",
               }
             : {
-                quoted: "发送上方选项编号或完整选项文字，例如 `1`",
+                quoted: "发送上方选项编号或完整选项文字，例如 `1`；自由回答发送「其他：内容」，想和 Claude 讨论发送「讨论：内容」",
                 directExample: "1",
               }
           : pending.inputMode === "menu"
@@ -342,8 +430,13 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     hasSecret: false,
     botId: "",
     targetUserId: "",
+    holdPromptsWhileAway: true,
+    heldPrompts: [],
     status: "disabled",
   };
+  /** Prompts whose Hook is held open for a remote decision, by reply code. */
+  private readonly heldPrompts = new Map<string, HeldPrompt>();
+  private presenceTimer: NodeJS.Timeout | null = null;
   private readonly unsentCodes = new Set<string>();
   private readonly sendingCodes = new Set<string>();
   private readonly processedMessageIds = new Set<string>();
@@ -407,6 +500,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.supersededClient = null;
     this.clearRetry();
     this.configuration = { ...configuration, secret: undefined };
+    this.releaseAllHeldPrompts();
     this.router.clearAll();
     this.unsentCodes.clear();
     this.sendingCodes.clear();
@@ -498,45 +592,176 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       );
       return;
     }
-    if (hookAttention.kind === "permission" && hookAttention.inputMode === "menu") {
-      void this.publishPermissionHook(event, hookAttention);
+    if (this.shouldHoldPrompt(event, hookAttention)) {
+      // Decide synchronously: the Hook server answers "{}" as soon as this
+      // listener returns unless the request is held now.
+      event.decision!.hold();
+      this.publishHeldPrompt(event, hookAttention);
+      return;
+    }
+    if (
+      (hookAttention.kind === "permission" || hookAttention.kind === "plan") &&
+      hookAttention.inputMode === "menu"
+    ) {
+      void this.publishMenuHook(event, hookAttention);
       return;
     }
     this.publishClaudeAttention(event, hookAttention);
   }
 
-  private async publishPermissionHook(
+  /**
+   * Whether this prompt should be answered through the Hook response rather
+   * than the terminal menu: only while the owner is away (at the computer
+   * the dialog is the better place), only when the Hook can carry a decision,
+   * and only for prompt kinds whose answer the Hook protocol can express.
+   */
+  private shouldHoldPrompt(
+    event: ClaudeHookEvent,
+    attention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
+  ): boolean {
+    if (
+      !event.decision ||
+      event.decision.settled ||
+      this.configuration.holdPromptsWhileAway === false ||
+      attention.inputMode !== "menu" ||
+      // Without a live WeCom connection nobody could answer; let Claude Code
+      // draw its dialog instead of waiting on a notification that cannot
+      // be delivered.
+      !this.authenticatedClient
+    ) {
+      return false;
+    }
+    if (
+      attention.kind !== "permission" &&
+      attention.kind !== "question" &&
+      attention.kind !== "plan"
+    ) {
+      return false;
+    }
+    return this.ownerAway();
+  }
+
+  /**
+   * Push a notification for a prompt whose Hook is held. The notification is
+   * built from the Hook payload alone: Claude Code draws no dialog while the
+   * Hook is pending, so there is no screen to read, and none is needed since
+   * the reply becomes the Hook's response.
+   */
+  private publishHeldPrompt(
+    event: ClaudeHookEvent,
+    hookAttention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
+  ): void {
+    const decision = event.decision!;
+    const attention =
+      hookAttention.kind === "plan"
+        ? withHeldPlanOptions(hookAttention)
+        : hookAttention;
+    const pending = this.publishClaudeAttention(event, attention);
+    if (!pending) {
+      decision.release();
+      return;
+    }
+    const entry = { decision, hookEventName: event.payload.hook_event_name };
+    const existing = this.heldPrompts.get(pending.code);
+    if (existing) {
+      // The same prompt reported through a second Hook (PreToolUse and
+      // PermissionRequest both fire for AskUserQuestion): answer both later.
+      existing.decisions.push(entry);
+    } else {
+      this.heldPrompts.set(pending.code, {
+        code: pending.code,
+        sessionId: pending.workspaceSessionId,
+        launchId: pending.launchId,
+        kind: attention.kind as HeldPrompt["kind"],
+        title: attention.title,
+        since: Date.now(),
+        event,
+        decisions: [entry],
+      });
+    }
+    decision.onSettled((reason) => {
+      const held = this.heldPrompts.get(pending.code);
+      if (!held) {
+        return;
+      }
+      held.decisions = held.decisions.filter((candidate) => candidate.decision !== decision);
+      if (held.decisions.length === 0) {
+        // Responded, released, or Claude Code gave up and will now draw its
+        // dialog; in the last case the reply code stays valid for the
+        // terminal-menu path.
+        this.forgetHeldPrompt(held);
+        if (reason === "closed") {
+          this.recordClaudeHook(
+            `Claude Code 不再等待回复码 ${pending.code} 的 Hook 决定，后续回复将通过终端菜单执行。`,
+          );
+        }
+      }
+    });
+    this.recordClaudeHook(
+      `回复码 ${pending.code} 的提示已挂起，等待企业微信直接决定（你回到电脑旁或在终端输入时自动交还）。`,
+    );
+    this.syncPresencePolling();
+  }
+
+  /**
+   * Permission and plan prompts: attach the menu Claude Code actually draws
+   * when it can be read in time, so the notification numbers the same rows
+   * as the terminal. The Hook data stays the fallback.
+   */
+  private async publishMenuHook(
     event: ClaudeHookEvent,
     hookAttention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
   ): Promise<void> {
     let attention = hookAttention;
-    const rendered = await this.renderedPermissionMenu(event.workspaceSessionId);
+    const rendered = await this.renderedMenu(
+      event.workspaceSessionId,
+      hookAttention,
+    );
     if (rendered) {
-      attention = withRenderedPermissionMenu(
-        hookAttention,
-        rendered.options,
-        rendered.sequence,
-      );
+      attention =
+        hookAttention.kind === "permission"
+          ? withRenderedPermissionMenu(
+              hookAttention,
+              rendered.options,
+              rendered.sequence,
+            )
+          : withRenderedMenuLabels(hookAttention, rendered.options);
     }
     this.publishClaudeAttention(event, attention);
   }
 
   /**
-   * Read the permission menu Claude Code is showing for a PermissionRequest
-   * Hook. The Hook usually arrives before Claude Code draws the dialog, so
-   * rows already reported for older output (which may still show Claude's
-   * answer or an earlier dialog) are only used when nothing has been written
-   * since. Otherwise wait for the renderer to lay out newer output that
-   * contains a menu, and fall back to the Hook data when it does not appear.
+   * Read the menu Claude Code is showing for a Hook. The Hook usually arrives
+   * before Claude Code draws the dialog, so rows already reported for older
+   * output (which may still show Claude's answer or an earlier dialog) are
+   * only used when nothing has been written since and the menu looks like
+   * the dialog for this request: first row allow, last row deny, and the
+   * request's own text on screen. Otherwise wait for the renderer to lay out
+   * newer output that contains such a menu, and fall back to the Hook data
+   * when it does not appear.
    */
-  private async renderedPermissionMenu(
+  private async renderedMenu(
     sessionId: string,
+    attention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
   ): Promise<{ options: string[]; sequence: number } | null> {
     const menuOf = (request: TerminalVisibleLinesRequest | null | undefined) => {
       const options = request ? extractNumberedMenuOptions(request.lines) : null;
-      return request && options && options.length >= 2
-        ? { options, sequence: request.sequence }
-        : null;
+      if (!request || !options || options.length < 2) {
+        return null;
+      }
+      if (
+        !looksLikeAllowRow(options[0]) ||
+        !looksLikeDenyRow(options[options.length - 1])
+      ) {
+        return null;
+      }
+      if (
+        attention.kind === "permission" &&
+        screenShowsRequest(attention, request.lines) === false
+      ) {
+        return null;
+      }
+      return { options, sequence: request.sequence };
     };
     try {
       const current = this.sessionManager.getTerminalVisibleLines(sessionId);
@@ -566,21 +791,38 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     }
   }
 
-  /** Visible rows that include all PTY output written so far, if available. */
+  /**
+   * Visible rows that include all PTY output written so far, if available.
+   * Waits briefly for the renderer to catch up with the newest output; when
+   * no renderer has ever reported rows for this session there is nothing to
+   * wait for and the caller must treat the screen as unreadable.
+   */
   private async currentVisibleLines(
     sessionId: string,
   ): Promise<TerminalVisibleLinesRequest | undefined> {
+    const existing = this.sessionManager.getTerminalVisibleLines(sessionId);
+    if (!existing) {
+      return undefined;
+    }
     const sequence = this.sessionManager.getTerminalSequence(sessionId);
+    if (existing.sequence >= sequence) {
+      return existing;
+    }
     const latest = await this.sessionManager
       .waitForTerminalVisibleLines(sessionId, sequence, REMOTE_REPLY_SYNC_TIMEOUT_MS)
       .catch(() => null);
     return latest ?? this.sessionManager.getTerminalVisibleLines(sessionId);
   }
 
+  /**
+   * Register the prompt with the router and push it. Returns the pending
+   * reply the prompt is (now or already) registered under, or null when
+   * nothing was registered.
+   */
   private publishClaudeAttention(
     event: ClaudeHookEvent,
     attention: NonNullable<ReturnType<typeof attentionFromClaudeHook>>,
-  ): void {
+  ): PendingRemoteReply | null {
     if (
       !this.isClaudePushEnabled() ||
       !this.sessionManager.isCurrentLaunch(
@@ -588,7 +830,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         event.launchId,
       )
     ) {
-      return;
+      return null;
     }
     this.recordClaudeHook(
       `已收到 Claude Code ${event.payload.hook_event_name} 事件，正在推送。`,
@@ -602,7 +844,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       this.recordClaudeHook(
         "你正在使用电脑，本次完成提醒未推送到企业微信；需要你确认的权限、问题和计划仍会推送。",
       );
-      return;
+      return null;
     }
     const result = this.router.register(
       this.configuration.targetUserId,
@@ -611,10 +853,11 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.pruneDeliveryState();
     if (!result.shouldSend) {
       this.recordClaudeHook("已收到 Claude Code 事件，该会话已有对应通知，本次未重复推送。");
-      return;
+      return result.pending;
     }
     this.unsentCodes.add(result.pending.code);
     void this.sendPending(result.pending);
+    return result.pending;
   }
 
   dispose(): void {
@@ -625,6 +868,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.authenticatedClient = null;
     this.supersededClient = null;
     this.clearRetry();
+    this.releaseAllHeldPrompts();
     this.router.clearAll();
     this.unsentCodes.clear();
     this.sendingCodes.clear();
@@ -636,6 +880,9 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       event.source === "local" &&
       localInputInvalidatesPendingReply(event.data)
     ) {
+      // The owner is typing into this terminal: hand the prompt back to the
+      // local dialog and forget the remote route.
+      this.releaseHeldPromptsForSession(event.sessionId);
       const code = this.router.clearWorkspaceSession(event.sessionId);
       if (code) {
         this.unsentCodes.delete(code);
@@ -645,12 +892,77 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
 
   private readonly handleSessionChanged = (session: SessionRecord) => {
     if (session.status !== "running") {
+      this.releaseHeldPromptsForSession(session.id);
       const code = this.router.clearWorkspaceSession(session.id);
       if (code) {
         this.unsentCodes.delete(code);
       }
     }
   };
+
+  /**
+   * Let Claude Code show its own dialog for the held prompts of a session
+   * (the owner wants to answer locally). Returns the new state.
+   */
+  releaseHeldPrompts(sessionId: string): WeComState {
+    this.releaseHeldPromptsForSession(sessionId);
+    return this.getState();
+  }
+
+  private releaseHeldPromptsForSession(sessionId: string): void {
+    for (const held of [...this.heldPrompts.values()]) {
+      if (held.sessionId === sessionId) {
+        this.releaseHeldPrompt(held, "本机接管");
+      }
+    }
+  }
+
+  private releaseAllHeldPrompts(): void {
+    for (const held of [...this.heldPrompts.values()]) {
+      this.releaseHeldPrompt(held, "连接重置");
+    }
+  }
+
+  private releaseHeldPrompt(held: HeldPrompt, reason: string): void {
+    this.heldPrompts.delete(held.code);
+    for (const { decision } of held.decisions) {
+      decision.release();
+    }
+    this.recordClaudeHook(
+      `已将回复码 ${held.code} 对应的提示交还给终端对话框（${reason}）。`,
+    );
+    this.syncPresencePolling();
+  }
+
+  private forgetHeldPrompt(held: HeldPrompt): void {
+    this.heldPrompts.delete(held.code);
+    this.syncPresencePolling();
+    this.updateState({ ...this.state });
+  }
+
+  /** Poll presence only while something is held. */
+  private syncPresencePolling(): void {
+    if (this.heldPrompts.size === 0) {
+      if (this.presenceTimer) {
+        clearInterval(this.presenceTimer);
+        this.presenceTimer = null;
+      }
+      this.updateState({ ...this.state });
+      return;
+    }
+    if (!this.presenceTimer) {
+      this.presenceTimer = setInterval(() => {
+        if (!this.ownerAway()) {
+          // The owner is back: the terminal dialog is where they will look.
+          for (const held of [...this.heldPrompts.values()]) {
+            this.releaseHeldPrompt(held, "你已回到电脑旁");
+          }
+        }
+      }, PRESENCE_POLL_MS);
+      this.presenceTimer.unref?.();
+    }
+    this.updateState({ ...this.state });
+  }
 
   private attachClient(client: WeComClient): void {
     client.on("connected", () => {
@@ -832,23 +1144,83 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       return;
     }
 
-    let action: ReturnType<typeof terminalActionForRemoteReply>;
-    try {
-      action = terminalActionForRemoteReply(pending, resolved.reply);
-    } catch (error) {
-      const detail =
-        error instanceof Error ? error.message : "远程回复格式无效。";
-      this.recordInbound("rejected", detail);
-      await this.replyToMessage(
-        client,
-        frame,
-        detail,
+    const reply = resolved.reply;
+    const context: RemoteReplyContext = { client, frame, pending };
+
+    // A prompt whose Hook is held is answered through the Hook response; no
+    // dialog exists in the terminal for it.
+    const held = this.heldPrompts.get(pending.code);
+    if (held && held.decisions.length > 0) {
+      const answered = await this.answerHeldPrompt(context, held, reply);
+      if (answered) {
+        return;
+      }
+      // Claude Code stopped waiting in the meantime; its dialog is (or will
+      // be) on screen, so fall through to the terminal-menu path.
+    }
+
+    // Commands that never write to the terminal.
+    if (MENU_COMMAND.test(reply)) {
+      const screen = await this.readVisibleMenu(pending.workspaceSessionId);
+      const detail = `${describeVisibleMenu(screen.menu)}\n${MENU_RECOVERY_HINT}`;
+      this.recordInbound("received", "已按要求重新发送终端当前菜单。");
+      await this.replyToMessage(client, frame, detail);
+      return;
+    }
+
+    // Text replies (free-text prompts and the second stage of a staged menu
+    // reply) are written as they are.
+    if (pending.replyStage || pending.inputMode !== "menu") {
+      let action: ReturnType<typeof terminalActionForRemoteReply>;
+      try {
+        action = terminalActionForRemoteReply(pending, reply);
+      } catch (error) {
+        await this.rejectReply(
+          context,
+          error instanceof Error ? error.message : "远程回复格式无效。",
+        );
+        return;
+      }
+      const written = this.sessionManager.writeRemoteReply(
+        pending.workspaceSessionId,
+        action.input,
+      );
+      if (!written) {
+        await this.failReplyProcessGone(context);
+        return;
+      }
+      await this.completeReply(context, "回复文字");
+      return;
+    }
+
+    // Menu replies are bound to the menu on screen when the reply arrives.
+    const confirmed = CONFIRM_COMMAND.exec(reply);
+    if (confirmed) {
+      const screen = await this.readVisibleMenu(pending.workspaceSessionId);
+      if (!screen.menu) {
+        await this.rejectReply(
+          context,
+          `${describeVisibleMenu(null)}可能已在本机处理。`,
+        );
+        return;
+      }
+      await this.executeBinding(
+        context,
+        bindConfirmedRow(Number(confirmed[1]), screen.menu),
+        screen,
+        {},
       );
       return;
     }
-    const visibleLines = await this.currentVisibleLines(
-      pending.workspaceSessionId,
-    );
+
+    let action: ReturnType<typeof terminalActionForRemoteReply> | null = null;
+    let actionError: string | null = null;
+    try {
+      action = terminalActionForRemoteReply(pending, reply);
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : "远程回复格式无效。";
+    }
+    const screen = await this.readVisibleMenu(pending.workspaceSessionId);
     if (
       !this.sessionManager.isCurrentLaunch(
         pending.workspaceSessionId,
@@ -856,88 +1228,430 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       )
     ) {
       this.router.complete(pending.code);
-      const detail = `回复码 ${pending.code} 对应的 Claude Code 进程已经退出或重启，未发送任何输入。`;
-      this.recordInbound("rejected", detail);
-      await this.replyToMessage(client, frame, detail);
-      return;
-    }
-    const visibleOptions = visibleLines
-      ? extractNumberedMenuOptions(visibleLines.lines)
-      : null;
-    const renderedMenuStale =
-      pending.kind === "permission" &&
-      pending.permissionMenuSource === "rendered" &&
-      (pending.permissionMenuSequence === undefined ||
-        !visibleLines ||
-        visibleLines.sequence < pending.permissionMenuSequence ||
-        !visibleOptions);
-    const mismatch = renderedMenuStale
-      ? "终端当前可见菜单尚未同步"
-      : remoteMenuMismatch(pending, action, "", visibleOptions);
-    if (mismatch) {
-      // Navigation keys select by position. Writing them into a different
-      // menu could pick the wrong answer (e.g. allow instead of deny).
-      const detail =
-        `${mismatch}。可能已在本机处理，或 Claude Code 的界面已变化；` +
-        `为避免选错，回复码 ${pending.code} 未发送任何按键，请回到开发工作台查看。`;
-      this.recordInbound("rejected", detail);
-      await this.replyToMessage(client, frame, detail);
-      return;
-    }
-    if (
-      action.nextStage &&
-      !this.router.setReplyStage(pending.code, action.nextStage)
-    ) {
-      const detail = `回复码 ${pending.code} 已失效，未发送任何输入。`;
-      this.recordInbound("rejected", detail);
-      await this.replyToMessage(client, frame, detail);
-      return;
-    }
-    const written = action.inputChunks
-      ? await this.sessionManager.writeRemoteReplySequence(
-          pending.workspaceSessionId,
-          action.inputChunks,
-        )
-      : this.sessionManager.writeRemoteReply(
-          pending.workspaceSessionId,
-          action.input,
-        );
-    if (!written) {
-      this.router.complete(pending.code);
-      const detail = `回复码 ${pending.code} 对应的 Claude Code 进程已不可用，未发送任何输入。`;
-      this.recordInbound("failed", detail);
-      await this.replyToMessage(
-        client,
-        frame,
-        detail,
+      await this.rejectReply(
+        context,
+        `回复码 ${pending.code} 对应的 Claude Code 进程已经退出或重启，未发送任何输入。`,
       );
       return;
     }
 
-    if (action.nextStage) {
-      const detail =
-        `${action.followUpMessage ?? "请继续回复具体内容。"}\n` +
-        `回复码：\`${pending.code}\`。该回复码仍对应当前 Claude Code 会话。`;
-      this.recordInbound("routed", detail);
-      await this.replyToMessage(client, frame, detail);
+    // A permission dialog with the same shape may belong to another queued
+    // request; the request's own text must be on screen before any row of
+    // it is taken, whichever way the row was chosen.
+    const wrongDialog: MenuBinding | null =
+      pending.kind === "permission" &&
+      screen.lines &&
+      screen.menu &&
+      screenShowsRequest(pending, screen.lines.lines) === false
+        ? {
+            status: "confirm",
+            reason: `终端当前的对话框中没有找到这条请求的内容（${(pending.identityProbes ?? [])
+              .slice(0, 2)
+              .map((probe) => `“${probe}”`)
+              .join("、")}），它可能属于另一条权限请求`,
+          }
+        : null;
+
+    if (!action) {
+      // The notification did not offer this answer. A bare number may still
+      // name a row Claude Code added on its own; the text of a visible row
+      // is accepted as well. Anything else is a formatting error.
+      const bareNumber = /^([1-9][0-9]?)$/u.exec(reply.trim());
+      if (bareNumber) {
+        await this.executeBinding(
+          context,
+          wrongDialog ?? bindOutOfRangeSelection(Number(bareNumber[1]), screen.menu),
+          screen,
+          {},
+        );
+        return;
+      }
+      if (screen.menu) {
+        const byText = bindRowByText(reply, screen.menu);
+        if (byText.status === "bound") {
+          await this.executeBinding(context, wrongDialog ?? byText, screen, {});
+          return;
+        }
+      }
+      await this.rejectReply(context, actionError ?? "远程回复格式无效。");
       return;
     }
 
+    if (!screen.lines) {
+      await this.rejectReply(
+        context,
+        "无法读取终端当前画面，为避免选错，未发送任何按键。请回到开发工作台处理。",
+      );
+      return;
+    }
+    if (!screen.menu) {
+      await this.rejectReply(
+        context,
+        "终端当前没有可识别的菜单，可能已在本机处理或 Claude Code 的界面已变化；未发送任何按键。",
+      );
+      return;
+    }
+
+    const questionModes = pending.questionSelectionModes ?? [];
+    if (pending.kind === "question" && questionModes.length > 1) {
+      // The multi-question wizard is answered with digits, which select by
+      // displayed number rather than by position. Only check that the first
+      // question is the one on screen.
+      const firstLabels = pending.questionOptionLabels?.[0] ?? [];
+      const missing = firstLabels.find(
+        (label) =>
+          !screen.menu!.options.some((option) =>
+            menuLabelMatches(label, option.label),
+          ),
+      );
+      if (missing !== undefined) {
+        await this.rejectReply(
+          context,
+          `终端当前菜单中没有通知里的选项“${missing}”，这条通知可能已失效。${describeVisibleMenu(screen.menu)}`,
+        );
+        return;
+      }
+      const written = action.inputChunks
+        ? await this.sessionManager.writeRemoteReplySequence(
+            pending.workspaceSessionId,
+            action.inputChunks,
+          )
+        : this.sessionManager.writeRemoteReply(
+            pending.workspaceSessionId,
+            action.input,
+          );
+      if (!written) {
+        await this.failReplyProcessGone(context);
+        return;
+      }
+      await this.completeReply(context, "菜单操作");
+      return;
+    }
+
+    const selections = action.menuSelections ?? [];
+    if (selections.length === 0) {
+      await this.rejectReply(context, "菜单回复无效，请回复通知中的选项编号或支持的完整选项文字。");
+      return;
+    }
+    const followUp = {
+      ...(action.nextStage ? { nextStage: action.nextStage } : {}),
+      ...(action.followUpMessage ? { followUpMessage: action.followUpMessage } : {}),
+      ...(action.inlineFollowUp ? { inlineFollowUp: action.inlineFollowUp } : {}),
+    };
+    if (pending.kind === "permission") {
+      await this.executeBinding(
+        context,
+        wrongDialog ?? bindPermissionSelection(pending, selections[0], screen.menu),
+        screen,
+        followUp,
+      );
+      return;
+    }
+    if (pending.kind === "question") {
+      await this.executeBinding(
+        context,
+        bindQuestionSelections(pending, selections, screen.menu),
+        screen,
+        followUp,
+      );
+      return;
+    }
+    await this.executeBinding(
+      context,
+      bindPositionalSelection(pending, selections[0], screen.menu),
+      screen,
+      followUp,
+    );
+  }
+
+  /**
+   * Answer a held prompt through its Hook response. Returns false when no
+   * Hook could be answered any more (Claude Code gave up waiting), in which
+   * case the caller continues with the terminal menu.
+   */
+  private async answerHeldPrompt(
+    context: RemoteReplyContext,
+    held: HeldPrompt,
+    reply: string,
+  ): Promise<boolean> {
+    const { pending } = context;
+    if (MENU_COMMAND.test(reply)) {
+      await this.replyToMessage(
+        context.client,
+        context.frame,
+        "这条提示正由企业微信直接代答，终端上没有菜单；可用的回复见通知内容。",
+      );
+      return true;
+    }
+    const resolution = resolveHeldReply(pending, held.event.payload, reply);
+    if (resolution.status === "reject") {
+      await this.rejectReply(context, resolution.message);
+      return true;
+    }
+    if (resolution.status === "stage") {
+      if (!this.router.setReplyStage(pending.code, resolution.stage)) {
+        await this.rejectReply(context, `回复码 ${pending.code} 已失效。`);
+        return true;
+      }
+      const detail =
+        `${resolution.message}\n回复码：\`${pending.code}\`。该回复码仍对应当前 Claude Code 会话。`;
+      this.recordInbound("routed", detail);
+      await this.replyToMessage(context.client, context.frame, detail);
+      return true;
+    }
+    let delivered = 0;
+    for (const { decision, hookEventName } of held.decisions) {
+      if (decision.respond(hookOutputFor(hookEventName, resolution.verdict))) {
+        delivered += 1;
+      }
+    }
+    if (delivered === 0) {
+      this.forgetHeldPrompt(held);
+      return false;
+    }
+    this.heldPrompts.delete(held.code);
+    this.syncPresencePolling();
     this.router.complete(pending.code);
     this.unsentCodes.delete(pending.code);
-    const inputDescription =
-      pending.replyStage || pending.inputMode === "text"
-        ? "回复文字"
-        : "菜单操作";
+    const detail =
+      `已通过 Hook 直接回复 Claude Code（${resolution.summary}），未经过终端菜单；回复码 ${pending.code} 已完成。`;
+    this.recordInbound("routed", detail);
+    await this.replyToMessage(context.client, context.frame, detail);
+    return true;
+  }
+
+  /** The visible rows and the menu parsed from them, if the renderer reported any. */
+  private async readVisibleMenu(sessionId: string): Promise<VisibleScreen> {
+    const lines = await this.currentVisibleLines(sessionId);
+    return {
+      lines,
+      menu: lines ? parseVisibleMenu(lines.lines) : null,
+    };
+  }
+
+  /**
+   * Carry out a menu binding: move the focus pointer to each bound row,
+   * confirm on screen that it arrived there, and only then press Enter (or
+   * Space for the rows of a multi-select answer). Any doubt leaves the
+   * terminal untouched apart from the pointer position and tells the user
+   * what the terminal shows instead.
+   */
+  private async executeBinding(
+    context: RemoteReplyContext,
+    binding: MenuBinding,
+    screen: VisibleScreen,
+    followUp: RemoteFollowUp,
+  ): Promise<void> {
+    const { pending } = context;
+    if (binding.status === "reject") {
+      await this.rejectReply(
+        context,
+        `${binding.reason}。未发送任何按键。\n${describeVisibleMenu(screen.menu)}\n${MENU_RECOVERY_HINT}`,
+      );
+      return;
+    }
+    if (binding.status === "confirm") {
+      await this.rejectReply(
+        context,
+        `${binding.reason}。为避免选错，未发送任何按键。\n${describeVisibleMenu(screen.menu)}\n${MENU_RECOVERY_HINT}`,
+      );
+      return;
+    }
+    if (binding.status === "text-hint") {
+      await this.rejectReply(context, `${binding.reason}。未发送任何按键。`);
+      return;
+    }
+    const menu = screen.menu;
+    if (!menu) {
+      await this.rejectReply(context, "终端当前没有可识别的菜单，未发送任何按键。");
+      return;
+    }
+    const sessionId = pending.workspaceSessionId;
+    const multiple =
+      pending.kind === "question" &&
+      pending.questionSelectionModes?.[0] === "multiple" &&
+      binding.status === "bound" &&
+      binding.rows.length >= 1 &&
+      !binding.rows.some((row) => isFreeTextRow(row.label));
+
+    let pointer = menu.pointerIndex;
+    let current = menu;
+    const moveTo = async (
+      targetIndex: number,
+      accept: (candidate: VisibleMenu) => boolean,
+    ): Promise<VisibleMenu | null> => {
+      const delta = targetIndex - pointer;
+      if (delta === 0) {
+        return accept(current) ? current : null;
+      }
+      const keys = Array.from({ length: Math.abs(delta) }, () =>
+        delta > 0 ? TERMINAL_DOWN : TERMINAL_UP,
+      );
+      const sequenceBefore = this.sessionManager.getTerminalSequence(sessionId);
+      const written = await this.sessionManager.writeRemoteReplySequence(
+        sessionId,
+        keys,
+      );
+      if (!written) {
+        return null;
+      }
+      const updated = await this.sessionManager.waitForTerminalVisibleLines(
+        sessionId,
+        sequenceBefore + 1,
+        REMOTE_MENU_VERIFY_TIMEOUT_MS,
+        (request) => {
+          const candidate = parseVisibleMenu(request.lines);
+          return candidate !== null && accept(candidate);
+        },
+      );
+      if (!updated) {
+        return null;
+      }
+      const parsed = parseVisibleMenu(updated.lines);
+      if (!parsed) {
+        return null;
+      }
+      pointer = parsed.pointerIndex;
+      current = parsed;
+      return parsed;
+    };
+
+    const abortAfterMove = async (wanted: string) => {
+      const latest = this.sessionManager.getTerminalVisibleLines(sessionId);
+      await this.rejectReply(
+        context,
+        `已移动光标，但未能确认它落在“${wanted}”上，未发送 Enter。\n${describeVisibleMenu(
+          latest ? parseVisibleMenu(latest.lines) : null,
+        )}\n${MENU_RECOVERY_HINT}`,
+      );
+    };
+
+    const rowsToSelect: BoundMenuRow[] = [];
+    if (binding.status === "probe") {
+      // Try the row Claude Code may draw without a number below the list.
+      const landed = await moveTo(
+        binding.fromIndex + 1,
+        (candidate) =>
+          candidate.pointerIndex === candidate.options.length - 1 &&
+          candidate.options[candidate.pointerIndex].number === null &&
+          binding.acceptLabels.some((label) =>
+            menuLabelMatches(label, candidate.options[candidate.pointerIndex].label),
+          ),
+      );
+      if (!landed) {
+        await this.rejectReply(
+          context,
+          "终端当前的问题没有“与 Claude 讨论这个问题”项，未发送 Enter。可改用「其他：你的内容」作为自由回答。",
+        );
+        return;
+      }
+      rowsToSelect.push({
+        index: landed.pointerIndex,
+        label: landed.options[landed.pointerIndex].label,
+      });
+    } else {
+      rowsToSelect.push(
+        ...[...binding.rows].sort((left, right) => left.index - right.index),
+      );
+    }
+
+    for (const target of rowsToSelect) {
+      const landed = await moveTo(
+        target.index,
+        (candidate) =>
+          candidate.pointerIndex === target.index &&
+          candidate.options[target.index] !== undefined &&
+          menuLabelsEqual(candidate.options[target.index].label, target.label),
+      );
+      if (!landed) {
+        await abortAfterMove(target.label);
+        return;
+      }
+      if (multiple) {
+        if (!this.sessionManager.writeRemoteReply(sessionId, TERMINAL_TOGGLE)) {
+          await this.failReplyProcessGone(context);
+          return;
+        }
+      }
+    }
+
+    const chosen = rowsToSelect[rowsToSelect.length - 1];
+    const stage =
+      followUp.nextStage ??
+      (binding.status === "bound" && binding.rows.length === 1
+        ? stageForBoundRow(pending, chosen, current)
+        : binding.status === "probe"
+          ? "question-chat-message"
+          : null);
+    if (stage && !this.router.setReplyStage(pending.code, stage)) {
+      await this.rejectReply(context, `回复码 ${pending.code} 已失效，未发送任何输入。`);
+      return;
+    }
+    const sequenceBeforeEnter = this.sessionManager.getTerminalSequence(sessionId);
+    if (!this.sessionManager.writeRemoteReply(sessionId, TERMINAL_ENTER)) {
+      await this.failReplyProcessGone(context);
+      return;
+    }
+
+    if (stage && followUp.inlineFollowUp) {
+      // Give Claude Code a moment to open the text field, then type the text
+      // the user already sent with the choice.
+      await this.sessionManager.waitForTerminalVisibleLines(
+        sessionId,
+        sequenceBeforeEnter + 1,
+        REMOTE_FOLLOW_UP_DELAY_MS,
+      );
+      if (
+        !this.sessionManager.writeRemoteReply(
+          sessionId,
+          `${followUp.inlineFollowUp}${TERMINAL_ENTER}`,
+        )
+      ) {
+        await this.failReplyProcessGone(context);
+        return;
+      }
+      await this.completeReply(context, "菜单操作和回复文字");
+      return;
+    }
+
+    if (stage) {
+      const detail =
+        `${followUp.followUpMessage ?? followUpMessageForStage(stage)}\n` +
+        `回复码：\`${pending.code}\`。该回复码仍对应当前 Claude Code 会话。`;
+      this.recordInbound("routed", detail);
+      await this.replyToMessage(context.client, context.frame, detail);
+      return;
+    }
+    await this.completeReply(context, "菜单操作");
+  }
+
+  private async rejectReply(
+    context: RemoteReplyContext,
+    detail: string,
+  ): Promise<void> {
+    this.recordInbound("rejected", detail);
+    await this.replyToMessage(context.client, context.frame, detail);
+  }
+
+  private async failReplyProcessGone(context: RemoteReplyContext): Promise<void> {
+    this.router.complete(context.pending.code);
+    const detail = `回复码 ${context.pending.code} 对应的 Claude Code 进程已不可用，未发送任何输入。`;
+    this.recordInbound("failed", detail);
+    await this.replyToMessage(context.client, context.frame, detail);
+  }
+
+  private async completeReply(
+    context: RemoteReplyContext,
+    inputDescription: string,
+  ): Promise<void> {
+    const { pending } = context;
+    this.router.complete(pending.code);
+    this.unsentCodes.delete(pending.code);
     const detail =
       `已将回复码 ${pending.code} 对应的${inputDescription}写入 Claude Code 终端，` +
       "正在等待 Claude Code 处理。";
     this.recordInbound("routed", detail);
-    const confirmed = await this.replyToMessage(
-      client,
-      frame,
-      detail,
-    );
+    const confirmed = await this.replyToMessage(context.client, context.frame, detail);
     if (!confirmed) {
       this.recordInbound(
         "routed",
@@ -1146,14 +1860,28 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     this.updateState({ ...this.state, status: "error", error });
   }
 
-  private updateState(state: WeComState): void {
+  private updateState(state: WeComStateInput): void {
     this.state = {
       ...state,
+      holdPromptsWhileAway: this.configuration.holdPromptsWhileAway ?? true,
+      heldPrompts: this.heldPromptSummaries(),
       ...(state.error ? { error: state.error } : {}),
     };
     if (!state.error) {
       delete this.state.error;
     }
     this.emit("stateChanged", this.getState());
+  }
+
+  private heldPromptSummaries(): WeComHeldPrompt[] {
+    return [...this.heldPrompts.values()]
+      .map((held) => ({
+        sessionId: held.sessionId,
+        code: held.code,
+        kind: held.kind,
+        title: held.title,
+        since: held.since,
+      }))
+      .sort((left, right) => left.since - right.since);
   }
 }

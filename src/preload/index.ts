@@ -22,6 +22,7 @@ const IPC_CHANNELS: IpcChannelMap = {
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
+  releaseHeldPrompts: "workspace:release-held-prompts",
   upsertAssistantProfile: "workspace:upsert-assistant-profile",
   deleteAssistantProfile: "workspace:delete-assistant-profile",
   sendAssistantMessage: "workspace:send-assistant-message",
@@ -66,6 +67,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke(IPC_CHANNELS.autoDetectClaudeExecutable),
   updateWeComConfig: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.updateWeComConfig, request),
+  releaseHeldPrompts: (sessionId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.releaseHeldPrompts, sessionId),
   upsertAssistantProfile: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.upsertAssistantProfile, request),
   deleteAssistantProfile: (assistantId) =>

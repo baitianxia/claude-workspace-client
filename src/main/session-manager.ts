@@ -22,6 +22,10 @@ import {
 import { terminateProcessTree } from "./process-tree";
 import { nextSessionTitle } from "./session-title";
 import { TerminalBuffer } from "./terminal-buffer";
+import {
+  TerminalScreenMirror,
+  type ScreenMirrorFactory,
+} from "./terminal-screen-mirror";
 
 const MAX_TERMINAL_BUFFER_LENGTH = 2_000_000;
 // Only the beginning of a resumed launch can contain Claude's "No
@@ -36,6 +40,8 @@ const RESUME_FAILURE_EXIT_WINDOW_MS = 30_000;
 // Claude Code's Ink picker reads one keypress per PTY write. A short gap keeps
 // consecutive arrow/Enter events distinct on Windows ConPTY and Unix PTYs.
 const REMOTE_INPUT_KEY_DELAY_MS = 35;
+const INITIAL_TERMINAL_COLUMNS = 120;
+const INITIAL_TERMINAL_ROWS = 36;
 // Upper bound for waiting on a terminated PTY to report its exit.
 const PROCESS_EXIT_WAIT_MS = 3_000;
 
@@ -63,6 +69,11 @@ interface ManagedSession {
   launchId: string | null;
   terminal: TerminalBuffer;
   sequence: number;
+  /**
+   * Headless xterm fed with the same bytes as the renderer, when available.
+   * While it exists it is the authority on the rows the terminal shows.
+   */
+  mirror?: TerminalScreenMirror | null;
   /** How the current process was launched; used to detect a failed resume. */
   launchMode?: ClaudeSessionLaunchMode;
   launchStartedAt?: number;
@@ -236,6 +247,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     private readonly findTranscript: (
       claudeSessionId: string,
     ) => ClaudeTranscriptLookup = () => "unknown",
+    /**
+     * Creates the main-process screen mirror for a session (see
+     * terminal-screen-mirror.ts). Null keeps relying on renderer reports.
+     */
+    private readonly screenMirrorFactory: ScreenMirrorFactory | null = null,
   ) {
     super();
     this.terminateTree =
@@ -736,10 +752,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session || session.record.status !== "running") {
       return;
     }
-    session.process?.resize(
-      Math.min(Math.max(columns, 20), 500),
-      Math.min(Math.max(rows, 5), 200),
-    );
+    const boundedColumns = Math.min(Math.max(columns, 20), 500);
+    const boundedRows = Math.min(Math.max(rows, 5), 200);
+    session.process?.resize(boundedColumns, boundedRows);
+    session.mirror?.resize(boundedColumns, boundedRows);
   }
 
   stop(sessionId: string): void {
@@ -823,7 +839,24 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return session ? session.terminal.tail(length) : "";
   }
 
+  /**
+   * Rows reported by the renderer's xterm. Ignored while the session has a
+   * main-process screen mirror, which sees the same bytes without the IPC
+   * delay and regardless of window state.
+   */
   setTerminalVisibleLines(request: TerminalVisibleLinesRequest): void {
+    this.recordVisibleLines(request, "renderer");
+  }
+
+  /** Whether the session's visible rows come from the main-process mirror. */
+  hasScreenMirror(sessionId: string): boolean {
+    return Boolean(this.sessions.get(sessionId)?.mirror);
+  }
+
+  private recordVisibleLines(
+    request: TerminalVisibleLinesRequest,
+    source: "renderer" | "mirror",
+  ): void {
     const session = this.sessions.get(request.sessionId);
     if (
       !session ||
@@ -831,6 +864,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       !Number.isSafeInteger(request.sequence) ||
       request.sequence < 0
     ) {
+      return;
+    }
+    if (source === "renderer" && session.mirror) {
       return;
     }
     const previous = this.visibleTerminalLines.get(request.sessionId);
@@ -960,8 +996,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   ): IPty {
     return this.ptySpawner(launch.executable, launch.args, {
       name: "xterm-256color",
-      cols: 120,
-      rows: 36,
+      cols: INITIAL_TERMINAL_COLUMNS,
+      rows: INITIAL_TERMINAL_ROWS,
       cwd,
       env: stringEnvironment(launch.env),
     });
@@ -994,6 +1030,12 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     processHandle: IPty,
   ): void {
     session.process = processHandle;
+    session.mirror?.dispose();
+    session.mirror = this.createScreenMirror(
+      processHandle.cols || INITIAL_TERMINAL_COLUMNS,
+      processHandle.rows || INITIAL_TERMINAL_ROWS,
+    );
+    this.visibleTerminalLines.delete(sessionId);
     processHandle.onData((data) =>
       this.handleData(sessionId, processHandle, data),
     );
@@ -1051,11 +1093,43 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private appendTerminalData(session: ManagedSession, data: string): void {
     session.sequence += 1;
     session.terminal.append(data);
+    const sequence = session.sequence;
+    session.mirror?.write(data, (screen) => {
+      if (this.sessions.get(session.record.id) !== session) {
+        return;
+      }
+      this.recordVisibleLines(
+        {
+          sessionId: session.record.id,
+          sequence,
+          lines: screen.lines,
+          viewportY: screen.viewportY,
+          rows: screen.rows,
+          columns: screen.columns,
+        },
+        "mirror",
+      );
+    });
     this.emit("data", {
       sessionId: session.record.id,
       data,
-      sequence: session.sequence,
+      sequence,
     });
+  }
+
+  private createScreenMirror(
+    columns: number,
+    rows: number,
+  ): TerminalScreenMirror | null {
+    if (!this.screenMirrorFactory) {
+      return null;
+    }
+    try {
+      return new TerminalScreenMirror(this.screenMirrorFactory(columns, rows));
+    } catch (error) {
+      console.error("Failed to create terminal screen mirror", error);
+      return null;
+    }
   }
 
   private handleExit(
@@ -1069,6 +1143,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
     this.cancelQueuedInput(sessionId);
     this.visibleTerminalLines.delete(sessionId);
+    session.mirror?.dispose();
+    session.mirror = null;
     session.process = null;
     session.launchId = null;
     session.record.status = "exited";

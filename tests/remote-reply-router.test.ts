@@ -269,18 +269,29 @@ describe("RemoteReplyRouter", () => {
 
     expect(terminalInputForRemoteReply(customPending, "1")).toBe("\r");
     expect(terminalInputForRemoteReply(customPending, "收到了")).toBe("\r");
-    expect(terminalActionForRemoteReply(customPending, "3")).toEqual({
+    // The extra rows are no longer numbered in the notification, so a bare
+    // "3" is not an answer here (the bridge checks the terminal's row 3).
+    expect(() => terminalActionForRemoteReply(customPending, "3")).toThrow(
+      "请回复 1-2 的选项编号",
+    );
+    expect(
+      terminalActionForRemoteReply(customPending, "输入其他回答"),
+    ).toEqual({
       input: `${DOWN}${DOWN}\r`,
       inputChunks: [DOWN, DOWN, "\r"],
       nextStage: "question-custom-answer",
       followUpMessage: expect.stringContaining("Type something"),
       menuSelections: [3],
     });
+    // "其他：内容" chooses the row and carries the text in one message.
     expect(
-      terminalActionForRemoteReply(customPending, "输入其他回答"),
-    ).toMatchObject({
+      terminalActionForRemoteReply(customPending, "其他：我在手机端收到了"),
+    ).toEqual({
       input: `${DOWN}${DOWN}\r`,
+      inputChunks: [DOWN, DOWN, "\r"],
       nextStage: "question-custom-answer",
+      inlineFollowUp: "我在手机端收到了",
+      menuSelections: [3],
     });
     expect(
       terminalActionForRemoteReply(
@@ -318,7 +329,12 @@ describe("RemoteReplyRouter", () => {
         questionOptionLabels: [["收到了", "没收到"]],
       }),
     ).pending;
-    expect(terminalActionForRemoteReply(chatPending, "4")).toEqual({
+    expect(() => terminalActionForRemoteReply(chatPending, "4")).toThrow(
+      "请回复 1-2 的选项编号",
+    );
+    expect(
+      terminalActionForRemoteReply(chatPending, "Chat about this"),
+    ).toEqual({
       input: `${DOWN}${DOWN}${DOWN}\r`,
       inputChunks: [DOWN, DOWN, DOWN, "\r"],
       nextStage: "question-chat-message",
@@ -326,10 +342,13 @@ describe("RemoteReplyRouter", () => {
       menuSelections: [4],
     });
     expect(
-      terminalActionForRemoteReply(chatPending, "Chat about this"),
-    ).toMatchObject({
+      terminalActionForRemoteReply(chatPending, "讨论：能否改成 20%"),
+    ).toEqual({
       input: `${DOWN}${DOWN}${DOWN}\r`,
+      inputChunks: [DOWN, DOWN, DOWN, "\r"],
       nextStage: "question-chat-message",
+      inlineFollowUp: "能否改成 20%",
+      menuSelections: [4],
     });
     expect(
       terminalActionForRemoteReply(
@@ -360,9 +379,19 @@ describe("RemoteReplyRouter", () => {
     expect(terminalInputForRemoteReply(multiPending, "1,2")).toBe(
       ` ${DOWN} \r`,
     );
-    expect(terminalActionForRemoteReply(multiPending, "3")).toMatchObject({
+    expect(() => terminalActionForRemoteReply(multiPending, "3")).toThrow(
+      "请回复 1-2 的选项编号",
+    );
+    expect(terminalActionForRemoteReply(multiPending, "Type something")).toMatchObject({
       input: `${DOWN}${DOWN}\r`,
       nextStage: "question-custom-answer",
+    });
+    // A multi-select question has no chat row: discussion text becomes the
+    // free-text answer.
+    expect(terminalActionForRemoteReply(multiPending, "讨论：都要")).toMatchObject({
+      input: `${DOWN}${DOWN}\r`,
+      nextStage: "question-custom-answer",
+      inlineFollowUp: "都要",
     });
     expect(() => terminalInputForRemoteReply(multiPending, "Chat about this")).toThrow(
       "多选问题回复无效",

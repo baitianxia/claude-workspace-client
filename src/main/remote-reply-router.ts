@@ -28,7 +28,9 @@ export type RemoteInputMode = "menu" | "text" | "none";
 export type RemoteReplyStage =
   | "permission-denial-reason"
   | "question-custom-answer"
-  | "question-chat-message";
+  | "question-chat-message"
+  /** A plan was turned down through its Hook; the feedback text follows. */
+  | "plan-feedback";
 
 export interface RemoteAttention {
   workspaceSessionId: string;
@@ -45,6 +47,19 @@ export interface RemoteAttention {
   permissionMenuSource?: "hook" | "rendered";
   permissionMenuSequence?: number;
   permissionSuggestionCount?: number;
+  /**
+   * Short pieces of text Claude Code prints in the dialog for this request
+   * (the start of a command, a URL host, a file name). Before keys are
+   * written, the screen must show one of them: otherwise the dialog on
+   * screen belongs to a different request than the notification.
+   */
+  identityProbes?: string[];
+  /**
+   * Labels of a menu that was read from the screen when the notification
+   * was built, for prompts whose Hook payload does not describe the menu
+   * (plan approval). Replies are checked against them.
+   */
+  renderedMenuLabels?: string[];
 }
 
 export interface PendingRemoteReply extends RemoteAttention {
@@ -67,6 +82,38 @@ export interface RemoteReplyAction {
   followUpMessage?: string;
   /** 1-based menu options the keystrokes will select, for screen checks. */
   menuSelections?: number[];
+  /**
+   * Text the user supplied together with a choice that opens a text field
+   * ("其他：内容", "讨论：内容"). It is written after the field appears, so
+   * the user does not have to send a second message.
+   */
+  inlineFollowUp?: string;
+}
+
+const QUESTION_FREE_TEXT_KEYWORD =
+  /^(?:其他|其它|自由回答|其他回答|other|type\s*something)\s*[：:]\s*([\s\S]+)$/iu;
+const QUESTION_CHAT_KEYWORD =
+  /^(?:讨论|与\s*claude\s*讨论|chat|chat\s*about\s*this)\s*[：:]\s*([\s\S]+)$/iu;
+
+/**
+ * "其他：内容" / "讨论：内容" replies to a question: which extra row they
+ * mean and the text that follows the keyword.
+ */
+export function questionKeywordReply(
+  reply: string,
+): { row: "free-text" | "chat"; content: string } | null {
+  const trimmed = reply.trim();
+  const freeText = QUESTION_FREE_TEXT_KEYWORD.exec(trimmed);
+  if (freeText) {
+    const content = freeText[1].trim();
+    return content ? { row: "free-text", content } : null;
+  }
+  const chat = QUESTION_CHAT_KEYWORD.exec(trimmed);
+  if (chat) {
+    const content = chat[1].trim();
+    return content ? { row: "chat", content } : null;
+  }
+  return null;
 }
 
 export type RegisterPendingResult =
@@ -205,7 +252,7 @@ function multipleMenuSelectionChunks(selections: number[]): string[] {
 
 type MenuActionExtras = Pick<
   RemoteReplyAction,
-  "nextStage" | "followUpMessage"
+  "nextStage" | "followUpMessage" | "inlineFollowUp"
 >;
 
 function menuAction(
@@ -354,6 +401,17 @@ function validNumberedSelection(
   }
   const selection = Number(value);
   return selection <= optionCount ? selection : null;
+}
+
+/**
+ * The 1-based options an answer to one question names, by number or by
+ * label (comma-separated for several), or null when it names none.
+ */
+export function questionSelectionsForLabels(
+  answer: string,
+  labels: string[],
+): number[] | null {
+  return questionSelections(answer, labels);
 }
 
 function questionSelections(
@@ -687,6 +745,19 @@ export function terminalActionForRemoteReply(
   const questionModes = pending.questionSelectionModes ?? [];
   const questionLabels = pending.questionOptionLabels ?? [];
   const firstOptionCount = questionLabels[0]?.length ?? 0;
+  if (pending.kind === "question" && questionModes.length === 1) {
+    // "其他：内容" / "讨论：内容" choose the extra row and carry the text in
+    // the same message. A multi-select question has no chat row; its
+    // discussion text is sent as the free-text answer instead.
+    const keyword = questionKeywordReply(reply);
+    if (keyword) {
+      const chat = keyword.row === "chat" && questionModes[0] === "single";
+      return singleMenuAction(firstOptionCount + (chat ? 2 : 1), {
+        nextStage: chat ? "question-chat-message" : "question-custom-answer",
+        inlineFollowUp: keyword.content,
+      });
+    }
+  }
   if (pending.kind === "question" && questionModes.length > 0) {
     const normalizedQuestionChoice = normalizedChoiceText(normalized);
     const regularOptionMatch = /^[1-9][0-9]*$/u.test(
@@ -698,40 +769,40 @@ export function terminalActionForRemoteReply(
       throw new Error("问题选项文字存在歧义，请改用通知中的选项编号。");
     }
     const matchesRegularOption = regularOptionMatch.status === "matched";
+    // The extra rows ("Type something", "Chat about this") are not numbered
+    // in the notification because Claude Code only draws them in some
+    // layouts. They are chosen by their text (or the "其他："/"讨论："
+    // keywords); a bare number beyond Claude's options is left to the caller,
+    // which looks at the row the terminal actually shows under that number.
     if (
       !matchesRegularOption &&
       QUESTION_CUSTOM_CHOICE_ALIASES.has(normalizedQuestionChoice)
     ) {
-      selection = String(firstOptionCount + 1);
-    } else if (
+      return singleMenuAction(firstOptionCount + 1, {
+        nextStage: "question-custom-answer",
+        followUpMessage:
+          "已选择“输入其他回答（Type something.）”。请继续回复你的具体答案。",
+      });
+    }
+    if (
       !matchesRegularOption &&
       questionModes[0] === "single" &&
       QUESTION_CHAT_CHOICE_ALIASES.has(normalizedQuestionChoice)
     ) {
-      selection = String(firstOptionCount + 2);
+      return singleMenuAction(firstOptionCount + 2, {
+        nextStage: "question-chat-message",
+        followUpMessage:
+          "已选择“与 Claude 讨论这个问题（Chat about this）”。请继续回复你想讨论或补充的内容。",
+      });
     }
-    const normalizedSelection = normalizedChoiceText(selection);
-    const numericSelection = /^[1-9][0-9]*$/u.test(normalizedSelection)
-      ? Number(normalizedSelection)
-      : Number.NaN;
-    if (Number.isInteger(numericSelection)) {
-      if (numericSelection === firstOptionCount + 1) {
-        return singleMenuAction(numericSelection, {
-          nextStage: "question-custom-answer",
-          followUpMessage:
-            "已选择“输入其他回答（Type something.）”。请继续回复你的具体答案。",
-        });
-      }
-      if (
-        questionModes[0] === "single" &&
-        numericSelection === firstOptionCount + 2
-      ) {
-        return singleMenuAction(numericSelection, {
-          nextStage: "question-chat-message",
-          followUpMessage:
-            "已选择“与 Claude 讨论这个问题（Chat about this）”。请继续回复你想讨论或补充的内容。",
-        });
-      }
+    if (
+      questionModes.length === 1 &&
+      /^[1-9][0-9]*$/u.test(normalizedQuestionChoice) &&
+      Number(normalizedQuestionChoice) > firstOptionCount
+    ) {
+      throw new Error(
+        `问题回复无效。请回复 1-${firstOptionCount} 的选项编号或选项文字；自由回答请发送「其他：你的内容」。`,
+      );
     }
   }
 
@@ -796,7 +867,7 @@ export function terminalActionForRemoteReply(
         return singleMenuAction(answerSelections[0]);
       }
       throw new Error(
-        `问题回复无效。请回复 1-${labels.length + 2} 的选项编号，或直接回复选项文字。`,
+        `问题回复无效。请回复 1-${labels.length} 的选项编号或选项文字；自由回答请发送「其他：你的内容」。`,
       );
     }
     if (answerSelections && answerSelections.length > 0) {

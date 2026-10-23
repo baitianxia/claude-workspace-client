@@ -7,12 +7,36 @@ const BORDER_CHARACTERS = /^[\s│┃|]*$/u;
 const SOFT_LINE = /^[\s─━—\-═╌┄┈·.]*$/u;
 const CHECKBOX_PREFIX = /^(?:\[[ xX✓✔×*]\]|[☐☑☒◯◉●○])\s*/u;
 const MAX_SOFT_LINES = 2;
+const MAX_UNNUMBERED_ROWS = 2;
+// A focused row without a number. Claude Code draws "Chat about this" this
+// way when a question has option previews or a screen reader is active, so
+// the row can be reached with the arrow keys but never carries a number. A
+// plain ">" is left out here: "> text" is also the shape of the input prompt.
+const UNNUMBERED_POINTER_LINE = /^(\s*)([❯›])[ \t ]+(\S.*?)\s*$/u;
 
 interface ParsedOption {
-  number: number;
+  /** Displayed number, or null for a focused row drawn without one. */
+  number: number | null;
   label: string;
   labelColumn: number;
   pointer: boolean;
+}
+
+/** One navigable row of the menu Claude Code currently shows. */
+export interface VisibleMenuOption {
+  label: string;
+  /** The number printed in front of the row; null for an unnumbered row. */
+  number: number | null;
+}
+
+/**
+ * The menu on screen: every navigable row in order, plus the row Claude
+ * Code's focus pointer is on. Numbered rows always come first.
+ */
+export interface VisibleMenu {
+  options: VisibleMenuOption[];
+  /** 0-based index into options of the row carrying the focus pointer. */
+  pointerIndex: number;
 }
 
 /** Remove a dialog border on either side of a row, keeping inner indentation. */
@@ -47,25 +71,61 @@ function parseOption(line: string): ParsedOption | null {
   };
 }
 
+function parseUnnumberedPointerRow(line: string): ParsedOption | null {
+  const match = UNNUMBERED_POINTER_LINE.exec(line);
+  if (!match) {
+    return null;
+  }
+  const label = match[3].replace(CHECKBOX_PREFIX, "").trim();
+  // "❯ 1. Yes" is a numbered row; "❯ 12. x" too. Anything else after the
+  // pointer is a label without a number.
+  if (!label || /^\d{1,2}\./u.test(label)) {
+    return null;
+  }
+  return {
+    number: null,
+    label,
+    labelColumn: line.trimEnd().length - match[3].length,
+    pointer: true,
+  };
+}
+
 function indentation(line: string): number {
   return line.length - line.trimStart().length;
 }
 
-function menuStartingAt(rows: string[], start: number): string[] | null {
+function menuStartingAt(rows: string[], start: number): VisibleMenu | null {
   const first = parseOption(rows[start]);
   if (!first || first.number !== 1) {
     return null;
   }
   const options = [first];
   let softLines = 0;
+  let unnumberedRows = 0;
   for (let index = start + 1; index < rows.length; index += 1) {
     const row = rows[index];
     const option = parseOption(row);
     if (option) {
-      if (option.number !== options.length + 1) {
+      // Numbered rows must be consecutive and always precede unnumbered ones.
+      if (unnumberedRows > 0 || option.number !== options.length + 1) {
         break;
       }
       options.push(option);
+      softLines = 0;
+      continue;
+    }
+    const unnumbered = parseUnnumberedPointerRow(row);
+    if (unnumbered) {
+      if (
+        unnumberedRows >= MAX_UNNUMBERED_ROWS ||
+        options.some((candidate) => candidate.pointer)
+      ) {
+        // Two focus pointers cannot belong to one menu; this row starts
+        // something else (or is a stray prompt character).
+        break;
+      }
+      options.push(unnumbered);
+      unnumberedRows += 1;
       softLines = 0;
       continue;
     }
@@ -87,24 +147,31 @@ function menuStartingAt(rows: string[], start: number): string[] | null {
   }
   // Claude Code marks the focused option with a pointer. A numbered list in
   // Claude's answer has none, so it is never mistaken for a menu.
-  if (options.length < 2 || !options.some((option) => option.pointer)) {
+  const pointerIndex = options.findIndex((option) => option.pointer);
+  if (options.length < 2 || pointerIndex < 0) {
     return null;
   }
-  return options.map((option) => option.label);
+  return {
+    options: options.map((option) => ({
+      label: option.label,
+      number: option.number,
+    })),
+    pointerIndex,
+  };
 }
 
 /**
- * Extract the menu Claude Code currently shows from terminal rows (xterm
- * rows, or PTY text split into lines after ANSI removal).
+ * Parse the menu Claude Code currently shows from terminal rows (xterm rows,
+ * or PTY text split into lines after ANSI removal).
  *
  * The latest block that starts at option 1, numbers its options without gaps
- * and marks one of them with Claude Code's focus pointer wins. Wrapped labels
- * and option descriptions are joined to the option they belong to, so a
- * question whose options have descriptions still yields every option.
+ * and marks one row with Claude Code's focus pointer wins. Wrapped labels and
+ * option descriptions are joined to the option they belong to, so a question
+ * whose options have descriptions still yields every option. A focused row
+ * without a number directly after the numbered rows (Claude Code's "Chat
+ * about this" in some layouts) is included as an unnumbered option.
  */
-export function extractNumberedMenuOptions(
-  lines: readonly string[],
-): string[] | null {
+export function parseVisibleMenu(lines: readonly string[]): VisibleMenu | null {
   const rows = lines.map(withoutBorders);
   for (let start = rows.length - 1; start >= 0; start -= 1) {
     const menu = menuStartingAt(rows, start);
@@ -113,6 +180,23 @@ export function extractNumberedMenuOptions(
     }
   }
   return null;
+}
+
+/**
+ * Labels of the numbered options of the menu on screen, or null when no menu
+ * can be recognised. Unnumbered rows are left out so that option counts match
+ * the numbers Claude Code prints.
+ */
+export function extractNumberedMenuOptions(
+  lines: readonly string[],
+): string[] | null {
+  const menu = parseVisibleMenu(lines);
+  if (!menu) {
+    return null;
+  }
+  return menu.options
+    .filter((option) => option.number !== null)
+    .map((option) => option.label);
 }
 
 function compactLabel(value: string): string {

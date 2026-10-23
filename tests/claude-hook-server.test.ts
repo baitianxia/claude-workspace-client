@@ -18,6 +18,14 @@ function postJson(
   authorization: string,
   body: unknown,
 ): Promise<number> {
+  return postJsonWithBody(url, authorization, body).then((result) => result.status);
+}
+
+function postJsonWithBody(
+  url: string,
+  authorization: string,
+  body: unknown,
+): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const outgoing = request(
@@ -31,13 +39,47 @@ function postJson(
         },
       },
       (response) => {
-        response.resume();
-        response.once("end", () => resolve(response.statusCode ?? 0));
+        let data = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          data += chunk;
+        });
+        response.once("end", () =>
+          resolve({ status: response.statusCode ?? 0, body: data }),
+        );
       },
     );
     outgoing.once("error", reject);
     outgoing.end(payload);
   });
+}
+
+const permissionPayload = {
+  session_id: "claude-session",
+  transcript_path: "C:\\Claude\\transcript.jsonl",
+  cwd: "C:\\work\\mall",
+  hook_event_name: "PermissionRequest",
+  tool_name: "Bash",
+  tool_input: { command: "npm test" },
+};
+
+async function startedServerUrl(): Promise<{
+  server: ClaudeHookServer;
+  url: string;
+  token: string;
+}> {
+  const server = new ClaudeHookServer();
+  servers.push(server);
+  await server.start();
+  const launch = server.hookLaunchOptions("workspace-session", "launch-id");
+  const settings = JSON.parse(await readFile(launch.args[1], "utf8")) as {
+    hooks: { PermissionRequest: Array<{ hooks: Array<{ url: string }> }> };
+  };
+  return {
+    server,
+    url: settings.hooks.PermissionRequest[0].hooks[0].url,
+    token: `Bearer ${launch.env.CLAUDE_WORKSPACE_HOOK_TOKEN}`,
+  };
 }
 
 describe("ClaudeHookServer", () => {
@@ -123,6 +165,108 @@ describe("ClaudeHookServer", () => {
         }),
       }),
     ]);
+  });
+
+  it("lets a listener hold a decision Hook and answer it later", async () => {
+    const { server, url, token } = await startedServerUrl();
+    let held: ClaudeHookEvent | null = null;
+    server.once("hook", (event) => {
+      expect(event.decision).toBeDefined();
+      event.decision!.hold();
+      held = event;
+    });
+    const response = postJsonWithBody(url, token, permissionPayload);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(held).not.toBeNull();
+    expect(held!.decision!.held).toBe(true);
+    expect(held!.decision!.settled).toBe(false);
+
+    const settledReasons: string[] = [];
+    held!.decision!.onSettled((reason) => settledReasons.push(reason));
+    expect(
+      held!.decision!.respond({
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: "allow" },
+        },
+      }),
+    ).toBe(true);
+    const result = await response;
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "PermissionRequest",
+        decision: { behavior: "allow" },
+      },
+    });
+    expect(settledReasons).toEqual(["responded"]);
+    expect(held!.decision!.settled).toBe(true);
+    // Nothing can be sent twice.
+    expect(held!.decision!.release()).toBe(false);
+  });
+
+  it("answers {} at once when nobody holds the Hook, and releases on demand", async () => {
+    const { server, url, token } = await startedServerUrl();
+    // Not held: Claude Code gets "{}" right after the listeners ran.
+    const seen: ClaudeHookEvent[] = [];
+    server.once("hook", (event) => seen.push(event));
+    const immediate = await postJsonWithBody(url, token, permissionPayload);
+    expect(immediate.body).toBe("{}");
+    expect(seen[0].decision?.settled).toBe(true);
+
+    // Notification-style Hooks carry no decision handle at all.
+    server.once("hook", (event) => seen.push(event));
+    await postJson(url, token, {
+      ...permissionPayload,
+      hook_event_name: "Stop",
+      last_assistant_message: "done",
+    });
+    expect(seen[1].decision).toBeUndefined();
+
+    // Held, then released: still "{}", so Claude Code shows its own dialog.
+    let decision: ClaudeHookEvent["decision"];
+    server.once("hook", (event) => {
+      event.decision!.hold();
+      decision = event.decision;
+    });
+    const pendingResponse = postJsonWithBody(url, token, permissionPayload);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(decision?.held).toBe(true);
+    expect(decision!.release()).toBe(true);
+    const released = await pendingResponse;
+    expect(released.status).toBe(200);
+    expect(released.body).toBe("{}");
+    expect(decision?.settled).toBe(true);
+  });
+
+  it("reports a Hook Claude Code stopped waiting for as closed", async () => {
+    const { server, url, token } = await startedServerUrl();
+    const reasons: string[] = [];
+    let decision: ClaudeHookEvent["decision"];
+    server.once("hook", (event) => {
+      event.decision!.hold();
+      event.decision!.onSettled((reason) => reasons.push(reason));
+      decision = event.decision;
+    });
+    const payload = JSON.stringify(permissionPayload);
+    const outgoing = request(url, {
+      method: "POST",
+      headers: {
+        Authorization: token,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+    });
+    outgoing.on("error", () => undefined);
+    outgoing.end(payload);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(decision?.held).toBe(true);
+    // Claude Code gives up (timeout) and drops the connection.
+    outgoing.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(reasons).toEqual(["closed"]);
+    expect(decision?.settled).toBe(true);
+    expect(decision?.respond({})).toBe(false);
   });
 
   it("rejects callbacks without the per-application bearer token", async () => {

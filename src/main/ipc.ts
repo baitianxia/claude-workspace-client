@@ -270,6 +270,16 @@ export function registerIpcHandlers(options: {
   );
 
   ipcMain.handle(
+    IPC_CHANNELS.releaseHeldPrompts,
+    (_event, sessionId: string) => {
+      if (typeof sessionId !== "string" || !sessionId.trim()) {
+        throw new Error("会话标识无效。");
+      }
+      return wecomBridge.releaseHeldPrompts(sessionId);
+    },
+  );
+
+  ipcMain.handle(
     IPC_CHANNELS.upsertAssistantProfile,
     (_event, request: UpsertAssistantProfileRequest) =>
       assistantService.upsertProfile(request),

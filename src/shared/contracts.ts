@@ -52,12 +52,33 @@ export type WeComInboundStatus =
   | "ignored"
   | "failed";
 
+/**
+ * A Claude Code prompt (permission, question or plan approval) whose Hook is
+ * being held open so that a WeCom reply can answer it directly, without the
+ * terminal dialog being drawn. Shown in the session view so the owner can
+ * take over locally.
+ */
+export interface WeComHeldPrompt {
+  sessionId: string;
+  code: string;
+  kind: "permission" | "question" | "plan";
+  title: string;
+  since: number;
+}
+
 export interface WeComState {
   enabled: boolean;
   configured: boolean;
   hasSecret: boolean;
   botId: string;
   targetUserId: string;
+  /**
+   * While the owner is away, answer permission/question/plan prompts through
+   * the Hook response instead of the terminal menu. Defaults to true.
+   */
+  holdPromptsWhileAway: boolean;
+  /** Prompts currently held for a remote decision. */
+  heldPrompts: WeComHeldPrompt[];
   status: WeComConnectionStatus;
   error?: string;
   lastInboundAt?: number;
@@ -356,6 +377,8 @@ export interface UpdateWeComConfigRequest {
   targetUserId: string;
   /** Empty or omitted keeps the previously saved Secret. */
   secret?: string;
+  /** Omitted keeps the saved value (default true). */
+  holdPromptsWhileAway?: boolean;
 }
 
 export interface UpsertAssistantWeComBotRequest {
@@ -441,6 +464,11 @@ export interface DesktopApi {
   selectClaudeExecutable(): Promise<ClaudeExecutableState | null>;
   autoDetectClaudeExecutable(): Promise<ClaudeExecutableState>;
   updateWeComConfig(request: UpdateWeComConfigRequest): Promise<WeComState>;
+  /**
+   * Stop holding the prompts of a session for a remote decision and let
+   * Claude Code show its dialog in the terminal.
+   */
+  releaseHeldPrompts(sessionId: string): Promise<WeComState>;
   upsertAssistantProfile(
     request: UpsertAssistantProfileRequest,
   ): Promise<AssistantProfileRecord>;

@@ -311,10 +311,13 @@ describe("attentionFromClaudeHook", () => {
     expect(permissionEventAttention).toEqual(attention);
     expect(permissionEventAttention?.body).not.toContain("允许本次");
     expect(permissionEventAttention?.body).not.toContain('"questions"');
-    expect(permissionEventAttention?.body).toContain(
-      "3. 输入其他回答（Type something）",
-    );
-    expect(permissionEventAttention?.body).not.toContain("Chat about this");
+    // Only Claude's own options are numbered: whether the terminal shows
+    // "Type something" / "Chat about this" depends on the Claude Code version
+    // and layout, so they are offered as keywords instead of row numbers.
+    expect(permissionEventAttention?.body).not.toContain("3.");
+    expect(permissionEventAttention?.body).toContain("（可多选，使用逗号分隔编号）");
+    expect(permissionEventAttention?.body).toContain("自由回答：回复「其他：你的内容」");
+    expect(permissionEventAttention?.body).not.toContain("讨论");
   });
 
   it("renders the reported single-choice PermissionRequest as a question", () => {
@@ -344,9 +347,10 @@ describe("attentionFromClaudeHook", () => {
       questionSelectionModes: ["single"],
       questionOptionLabels: [["收到了", "没收到"]],
       body: expect.stringMatching(
-        /### 问题主题：Hook测试\n\n> 这是一条测试消息：你收到确认弹窗\/通知了吗？\n\n#### 回复选项\n\n1\. 收到了[\s\S]*2\. 没收到[\s\S]*3\. 输入其他回答（Type something\.）[\s\S]*4\. 与 Claude 讨论这个问题（Chat about this）/u,
+        /### 问题主题：Hook测试\n\n> 这是一条测试消息：你收到确认弹窗\/通知了吗？\n\n#### 回复选项\n\n1\. 收到了[\s\S]*2\. 没收到[\s\S]*自由回答：回复「其他：你的内容」\n想和 Claude 讨论：回复「讨论：你想说的内容」/u,
       ),
     });
+    expect(attention?.body).not.toContain("3.");
     expect(attention?.body).not.toContain("允许");
     expect(attention?.body).not.toContain('"questions"');
   });

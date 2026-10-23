@@ -2,7 +2,12 @@ import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,15 +33,60 @@ export interface ClaudeHookPayload {
   session_crons?: unknown;
 }
 
+/**
+ * Lets a 'hook' listener answer a Hook through its HTTP response instead of
+ * letting Claude Code fall through to its own dialog. PermissionRequest and
+ * PreToolUse hooks accept a decision this way, so a remote reply can allow,
+ * deny or answer a prompt without the terminal menu being drawn at all.
+ *
+ * `hold()` must be called synchronously while the 'hook' event is being
+ * emitted; otherwise the server answers `{}` right away (Claude Code then
+ * shows its dialog as usual).
+ */
+export interface ClaudeHookDecision {
+  /** Keep the request open; the caller promises to respond or release. */
+  hold(): void;
+  /** Whether the request is held and still open. */
+  readonly held: boolean;
+  /** Whether a response has been sent or the request is gone. */
+  readonly settled: boolean;
+  /** Send a hook output object as the response. False if already settled. */
+  respond(output: Record<string, unknown>): boolean;
+  /** Send `{}`: Claude Code proceeds as if the hook had nothing to say. */
+  release(): boolean;
+  /**
+   * Called once when the request can no longer be answered: Claude Code
+   * timed out, exited, or the response was sent.
+   */
+  onSettled(listener: (reason: "responded" | "released" | "closed") => void): void;
+}
+
 export interface ClaudeHookEvent {
   workspaceSessionId: string;
   launchId: string;
   payload: ClaudeHookPayload;
+  /**
+   * Present for Hooks whose response Claude Code reads as a decision
+   * (PermissionRequest, PreToolUse). Absent for notification-style Hooks.
+   */
+  decision?: ClaudeHookDecision;
 }
 
 interface ClaudeHookServerEvents {
   hook: [event: ClaudeHookEvent];
 }
+
+/** Hooks whose JSON response Claude Code reads as a decision. */
+const DECISION_HOOK_EVENTS = new Set(["PermissionRequest", "PreToolUse"]);
+
+/**
+ * How long Claude Code waits for a decision Hook before giving up and showing
+ * its own dialog. A held request is released long before that whenever the
+ * owner comes back to the computer; the limit only bounds the damage if this
+ * process hangs. A crash closes the connection and Claude Code continues at
+ * once.
+ */
+export const DECISION_HOOK_TIMEOUT_SECONDS = 3_600;
 
 function isNonEmptyString(value: unknown, maxLength: number): value is string {
   return (
@@ -93,6 +143,78 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
+interface DecisionHandleInternals {
+  handle: ClaudeHookDecision;
+  finish(reason: "responded" | "released" | "closed"): void;
+}
+
+function createDecisionHandle(
+  response: ServerResponse,
+  send: (status: number, body: string) => boolean,
+): DecisionHandleInternals {
+  let held = false;
+  let settled = false;
+  const listeners: Array<(reason: "responded" | "released" | "closed") => void> = [];
+  const finish = (reason: "responded" | "released" | "closed") => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    held = false;
+    for (const listener of listeners.splice(0)) {
+      try {
+        listener(reason);
+      } catch (error) {
+        console.error("Claude Code Hook decision listener failed", error);
+      }
+    }
+  };
+  // Claude Code gives up (timeout) or exits: the connection closes before a
+  // response was written. (IncomingMessage's own 'close' fires as soon as the
+  // body has been read, so it cannot be used for this.)
+  response.once("close", () => {
+    if (!settled && !response.writableEnded) {
+      finish("closed");
+    }
+  });
+  const handle: ClaudeHookDecision = {
+    hold() {
+      if (!settled) {
+        held = true;
+      }
+    },
+    get held() {
+      return held && !settled;
+    },
+    get settled() {
+      return settled;
+    },
+    respond(output) {
+      if (settled) {
+        return false;
+      }
+      const sent = send(200, JSON.stringify(output));
+      finish(sent ? "responded" : "closed");
+      return sent;
+    },
+    release() {
+      if (settled) {
+        return false;
+      }
+      const sent = send(200, "{}");
+      finish(sent ? "released" : "closed");
+      return sent;
+    },
+    onSettled(listener) {
+      if (settled) {
+        return;
+      }
+      listeners.push(listener);
+    },
+  };
+  return { handle, finish };
+}
+
 function shellLiteral(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -119,14 +241,33 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
     const server = createServer((request, response) => {
       void this.handleRequest(request)
         .then((event) => {
-          if (event) {
-            this.emit("hook", event);
+          const send = (status: number, body: string) => {
+            if (response.writableEnded || response.destroyed) {
+              return false;
+            }
+            response.writeHead(status, {
+              "Content-Type": "application/json; charset=utf-8",
+              "Cache-Control": "no-store",
+            });
+            response.end(body);
+            return true;
+          };
+          if (!event) {
+            send(404, "{}");
+            return;
           }
-          response.writeHead(event ? 200 : 404, {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-          });
-          response.end("{}");
+          const decision = DECISION_HOOK_EVENTS.has(event.payload.hook_event_name)
+            ? createDecisionHandle(response, send)
+            : null;
+          if (decision) {
+            event.decision = decision.handle;
+          }
+          this.emit("hook", event);
+          if (!decision || !decision.handle.held) {
+            // Nobody wants to decide: let Claude Code show its own dialog.
+            decision?.finish("released");
+            send(200, "{}");
+          }
         })
         .catch((error: unknown) => {
           const tooLarge =
@@ -196,6 +337,9 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
       },
       allowedEnvVars: ["CLAUDE_WORKSPACE_HOOK_TOKEN"],
     };
+    // Decision Hooks may be held open while a remote reply is awaited (see
+    // ClaudeHookDecision); Claude Code must not time them out meanwhile.
+    const decisionHandler = { ...handler, timeout: DECISION_HOOK_TIMEOUT_SECONDS };
     // Claude Code does not support HTTP hooks for SessionStart. Keep the
     // event on the same authenticated loopback channel by forwarding the
     // hook's stdin through the platform shell instead.
@@ -219,13 +363,13 @@ export class ClaudeHookServer extends EventEmitter<ClaudeHookServerEvents> {
         PermissionRequest: [
           {
             matcher: "",
-            hooks: [handler],
+            hooks: [decisionHandler],
           },
         ],
         PreToolUse: [
           {
             matcher: "AskUserQuestion|ExitPlanMode",
-            hooks: [handler],
+            hooks: [decisionHandler],
           },
         ],
         Stop: [

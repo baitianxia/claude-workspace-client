@@ -98,6 +98,8 @@ const previewSnapshot: AppSnapshot = {
     hasSecret: true,
     botId: "aibot-preview-claude-manager",
     targetUserId: "developer",
+    holdPromptsWhileAway: true,
+    heldPrompts: [],
     status: "connected",
   },
   assistant: {
@@ -424,7 +426,20 @@ export function installDevelopmentPreview(): void {
         hasSecret: Boolean(request.secret?.trim() || snapshot.wecom.hasSecret),
         botId: request.botId.trim(),
         targetUserId: request.targetUserId.trim(),
+        holdPromptsWhileAway:
+          request.holdPromptsWhileAway ?? snapshot.wecom.holdPromptsWhileAway,
+        heldPrompts: snapshot.wecom.heldPrompts,
         status: request.enabled ? "connected" : "disabled",
+      };
+      publishWeCom();
+      return { ...snapshot.wecom };
+    },
+    releaseHeldPrompts: async (sessionId) => {
+      snapshot.wecom = {
+        ...snapshot.wecom,
+        heldPrompts: snapshot.wecom.heldPrompts.filter(
+          (held) => held.sessionId !== sessionId,
+        ),
       };
       publishWeCom();
       return { ...snapshot.wecom };

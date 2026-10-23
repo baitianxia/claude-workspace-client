@@ -226,6 +226,7 @@ export function App() {
   const [wecomBotIdDraft, setWeComBotIdDraft] = useState("");
   const [wecomUserIdDraft, setWeComUserIdDraft] = useState("");
   const [wecomSecretDraft, setWeComSecretDraft] = useState("");
+  const [wecomHoldPromptsDraft, setWeComHoldPromptsDraft] = useState(true);
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -898,7 +899,17 @@ export function App() {
     setWeComBotIdDraft(snapshot?.wecom.botId ?? "");
     setWeComUserIdDraft(snapshot?.wecom.targetUserId ?? "");
     setWeComSecretDraft("");
+    setWeComHoldPromptsDraft(snapshot?.wecom.holdPromptsWhileAway ?? true);
     setWeComSettingsOpen(true);
+  };
+
+  const releaseHeldPrompts = (sessionId: string) => {
+    void runAction(async () => {
+      const state = await window.claudeWorkspace.releaseHeldPrompts(sessionId);
+      setSnapshot((current) =>
+        current ? { ...current, wecom: state } : current,
+      );
+    });
   };
 
   const openSidebarMode = (mode: SidebarMode) => {
@@ -927,6 +938,7 @@ export function App() {
         enabled: wecomEnabledDraft,
         botId: wecomBotIdDraft,
         targetUserId: wecomUserIdDraft,
+        holdPromptsWhileAway: wecomHoldPromptsDraft,
         ...(wecomSecretDraft ? { secret: wecomSecretDraft } : {}),
       });
       setSnapshot((current) =>
@@ -1727,6 +1739,29 @@ export function App() {
                 )}
               </div>
             </header>
+            {snapshot.wecom.heldPrompts
+              .filter((held) => held.sessionId === activeSession.id)
+              .map((held) => (
+                <div
+                  key={held.code}
+                  className="held-prompt-banner"
+                  role="status"
+                >
+                  <span>
+                    <strong>{held.title}</strong>
+                    ：已推送到企业微信等待直接回复，终端暂不显示对话框（回复码{" "}
+                    {held.code}）。
+                  </span>
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => releaseHeldPrompts(held.sessionId)}
+                    disabled={busy}
+                  >
+                    在本机处理
+                  </button>
+                </div>
+              ))}
             <div className="terminal-stack">
               {sessions.map((session) => (
                 <TerminalView
@@ -1927,6 +1962,22 @@ export function App() {
                 }
                 required={wecomEnabledDraft}
               />
+            </label>
+            <label className="settings-toggle">
+              <input
+                type="checkbox"
+                checked={wecomHoldPromptsDraft}
+                onChange={(event) =>
+                  setWeComHoldPromptsDraft(event.currentTarget.checked)
+                }
+              />
+              <span>
+                <strong>离开电脑时由企业微信直接代答</strong>
+                <small>
+                  权限、提问和计划确认通过 Claude Code Hook 直接回复，不经过终端菜单；
+                  你回到电脑旁或在终端输入时自动交还给终端对话框
+                </small>
+              </span>
             </label>
             <div className="settings-note">
               Secret 使用操作系统安全存储加密。这个机器人只负责 Claude Code

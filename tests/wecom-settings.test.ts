@@ -33,6 +33,8 @@ function fakeState(configuration: WeComRuntimeConfiguration): WeComState {
     hasSecret: configuration.hasSecret,
     botId: configuration.botId,
     targetUserId: configuration.targetUserId,
+    holdPromptsWhileAway: configuration.holdPromptsWhileAway ?? true,
+    heldPrompts: [],
     status: configuration.enabled && configured ? "connecting" : "disabled",
   };
 }

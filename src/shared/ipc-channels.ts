@@ -8,6 +8,7 @@ export const IPC_CHANNELS = {
   selectClaudeExecutable: "workspace:select-claude-executable",
   autoDetectClaudeExecutable: "workspace:auto-detect-claude-executable",
   updateWeComConfig: "workspace:update-wecom-config",
+  releaseHeldPrompts: "workspace:release-held-prompts",
   upsertAssistantProfile: "workspace:upsert-assistant-profile",
   deleteAssistantProfile: "workspace:delete-assistant-profile",
   sendAssistantMessage: "workspace:send-assistant-message",

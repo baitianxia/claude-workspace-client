@@ -3,6 +3,7 @@ import {
   extractNumberedMenuOptions,
   menuLabelMatches,
   menuLabelsEqual,
+  parseVisibleMenu,
 } from "../src/shared/terminal-menu";
 
 describe("extractNumberedMenuOptions", () => {
@@ -92,6 +93,88 @@ describe("extractNumberedMenuOptions", () => {
         "   2. No",
       ]),
     ).toEqual(["Yes", "No"]);
+  });
+});
+
+describe("parseVisibleMenu", () => {
+  it("reports which row carries the focus pointer", () => {
+    expect(
+      parseVisibleMenu([
+        " Do you want to proceed?",
+        "   1. Yes",
+        " ❯ 2. Yes, and don't ask again for npm test commands",
+        "   3. No, and tell Claude what to do differently (esc)",
+      ]),
+    ).toEqual({
+      options: [
+        { label: "Yes", number: 1 },
+        { label: "Yes, and don't ask again for npm test commands", number: 2 },
+        { label: "No, and tell Claude what to do differently (esc)", number: 3 },
+      ],
+      pointerIndex: 1,
+    });
+  });
+
+  it("includes an unnumbered focused row after the numbered options", () => {
+    // Claude Code's preview layout draws "Chat about this" without a number.
+    expect(
+      parseVisibleMenu([
+        "  1. 方案 A",
+        "  2. 方案 B",
+        "  3. Type something.",
+        "  ────────────────",
+        "❯ Chat about this",
+        "",
+        "Enter to select · ↑/↓ to navigate",
+      ]),
+    ).toEqual({
+      options: [
+        { label: "方案 A", number: 1 },
+        { label: "方案 B", number: 2 },
+        { label: "Type something.", number: 3 },
+        { label: "Chat about this", number: null },
+      ],
+      pointerIndex: 3,
+    });
+    // The same menu with the pointer on a numbered row hides that row's
+    // label (it is drawn without a pointer and without a number), and the
+    // numbered labels stay stable either way.
+    expect(
+      extractNumberedMenuOptions([
+        "❯ 1. 方案 A",
+        "  2. 方案 B",
+        "  3. Type something.",
+        "  ────────────────",
+        "  Chat about this",
+      ]),
+    ).toEqual(["方案 A", "方案 B", "Type something."]);
+  });
+
+  it("does not attach an unnumbered row to a menu that already has a pointer", () => {
+    expect(
+      parseVisibleMenu([
+        "❯ 1. Yes",
+        "  2. No",
+        "❯ some other prompt",
+      ]),
+    ).toEqual({
+      options: [
+        { label: "Yes", number: 1 },
+        { label: "No", number: 2 },
+      ],
+      pointerIndex: 0,
+    });
+  });
+
+  it("does not turn the input prompt into a menu row", () => {
+    expect(
+      parseVisibleMenu([
+        "⏺ 接下来的计划：",
+        "  1. 修改配置",
+        "  2. 运行测试",
+        "> 继续吧",
+      ]),
+    ).toBeNull();
   });
 });
 

@@ -6281,3 +6281,28 @@ button:disabled {
 .app-shell[data-theme="light"] .assistant-entry-list .assistant-entry-inbound-detail {
   color: #9b6d57;
 }
+
+/* A prompt held for a remote (WeCom) decision: shown above the terminal so
+   the owner knows why Claude Code is not drawing its dialog. */
+.held-prompt-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 16px 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(207, 118, 88, 0.55);
+  border-radius: 8px;
+  background: rgba(207, 118, 88, 0.12);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.held-prompt-banner strong {
+  font-weight: 600;
+}
+
+:root[data-theme="light"] .held-prompt-banner {
+  border-color: var(--light-accent);
+  background: var(--light-accent-soft);
+}

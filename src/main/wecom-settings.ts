@@ -100,11 +100,19 @@ export class WeComSettingsService {
       throw new Error("启用企业微信远程回复前必须填写 Secret。");
     }
 
+    if (
+      request.holdPromptsWhileAway !== undefined &&
+      typeof request.holdPromptsWhileAway !== "boolean"
+    ) {
+      throw new Error("企业微信代答设置无效。");
+    }
     const stored: StoredWeComSettings = {
       enabled: request.enabled,
       botId,
       targetUserId,
       encryptedSecret,
+      holdPromptsWhileAway:
+        request.holdPromptsWhileAway ?? existing?.holdPromptsWhileAway ?? true,
     };
     await this.projectStore.setWeComSettings(stored);
     const state = this.bridge.configure(this.runtimeConfiguration(stored));
@@ -121,6 +129,7 @@ export class WeComSettingsService {
         botId: "",
         targetUserId: "",
         hasSecret: false,
+        holdPromptsWhileAway: true,
       };
     }
 
@@ -129,6 +138,7 @@ export class WeComSettingsService {
       botId: stored.botId,
       targetUserId: stored.targetUserId,
       hasSecret: Boolean(stored.encryptedSecret),
+      holdPromptsWhileAway: stored.holdPromptsWhileAway ?? true,
     };
     if (!stored.enabled) {
       return base;

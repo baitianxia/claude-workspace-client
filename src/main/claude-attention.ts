@@ -108,6 +108,59 @@ function toolInputDetails(payload: ClaudeHookPayload): string[] {
   return details;
 }
 
+/**
+ * Short texts Claude Code prints in the permission dialog for this request.
+ * They let the remote reply path check that the dialog on screen belongs to
+ * this notification and not to another queued request with the same menu
+ * shape. Kept short so they survive wrapping and truncation in the dialog.
+ */
+export function permissionIdentityProbes(payload: ClaudeHookPayload): string[] {
+  const input = asRecord(payload.tool_input);
+  const probes: string[] = [];
+  const add = (value: string | null | undefined, length: number) => {
+    const text = value?.replace(/\s+/gu, " ").trim();
+    if (text) {
+      probes.push(text.slice(0, length));
+    }
+  };
+  const command = textValue(input?.command);
+  if (command) {
+    add(command.split(/\r?\n/u)[0], 24);
+  }
+  const url = textValue(input?.url);
+  if (url) {
+    try {
+      add(new URL(url).hostname, 64);
+    } catch {
+      add(url, 32);
+    }
+  }
+  for (const key of ["file_path", "notebook_path", "path", "planFilePath"]) {
+    const filePath = textValue(input?.[key]);
+    if (filePath) {
+      const baseName = filePath.split(/[\\/]/u).filter(Boolean).pop();
+      add(baseName ?? filePath, 48);
+    }
+  }
+  // The persistent-allow rows name the directories and rules Claude Code
+  // offers to remember, so they identify the dialog as well.
+  const summary = permissionSuggestionSummary(payload);
+  for (const directory of summary.directories) {
+    const baseName = directory.split(/[\\/]/u).filter(Boolean).pop();
+    add(baseName ?? directory, 48);
+  }
+  for (const rule of summary.rules) {
+    if (rule.ruleContent) {
+      add(rule.ruleContent.replace(/[:*]+$/u, ""), 32);
+    }
+  }
+  if (probes.length === 0 && payload.tool_name) {
+    // MCP tools and the like: the dialog names the tool.
+    add(payload.tool_name.replace(/^mcp__[^_]+__/u, ""), 48);
+  }
+  return [...new Set(probes)];
+}
+
 function rawPermissionSuggestions(payload: ClaudeHookPayload): unknown[] {
   return Array.isArray(payload.permission_suggestions)
     ? payload.permission_suggestions
@@ -433,6 +486,11 @@ function questionBody(payload: ClaudeHookPayload): {
       .split(/\r?\n/gu)
       .map((line) => `> ${line}`)
       .join("\n");
+    // Only Claude's own options get numbers: they are the only rows the Hook
+    // payload describes. Whether the terminal also shows "Type something" and
+    // "Chat about this" depends on the Claude Code version, the question type
+    // and its layout, so those are offered as keywords and resolved against
+    // the screen when the reply arrives.
     return [
       heading,
       "",
@@ -441,14 +499,15 @@ function questionBody(payload: ClaudeHookPayload): {
       "#### 回复选项",
       "",
       ...optionLines,
-      `${optionLabels.length + 1}. 输入其他回答（Type something${multiSelect ? "" : "."}）`,
-      ...(multiSelect
+      ...(multiSelect ? ["（可多选，使用逗号分隔编号）"] : []),
+      ...(questions.length > 1
         ? []
         : [
-            `${optionLabels.length + 2}. 与 Claude 讨论这个问题（Chat about this）`,
+            "",
+            "自由回答：回复「其他：你的内容」",
+            ...(multiSelect ? [] : ["想和 Claude 讨论：回复「讨论：你想说的内容」"]),
+            "（以上两项是否可用以终端为准，不可用时会提示你。）",
           ]),
-      ...(multiSelect ? ["（可多选，使用逗号分隔编号）"] : []),
-      `（选择“输入其他回答”${multiSelect ? "" : "或“讨论这个问题”"}后，企业微信会继续提示你发送具体内容。）`,
       "",
     ];
   });
@@ -625,6 +684,7 @@ export function attentionFromClaudeHook(
       permissionOptionLabels: prompt.optionLabels,
       permissionMenuSource: "hook",
       permissionSuggestionCount: prompt.suggestionCount,
+      identityProbes: permissionIdentityProbes(payload),
     };
   }
 
@@ -723,5 +783,34 @@ export function withRenderedPermissionMenu(
     permissionMenuSource: "rendered",
     ...(sequence !== undefined ? { permissionMenuSequence: sequence } : {}),
     permissionSuggestionCount: Math.max(0, normalized.length - 2),
+  };
+}
+
+/**
+ * Attach the menu Claude Code drew for a prompt whose Hook payload does not
+ * describe its rows (plan approval). The rows are appended to the body so
+ * the WeCom user can answer by number, and kept so the reply path can check
+ * that the terminal still shows the same menu.
+ */
+export function withRenderedMenuLabels(
+  attention: RemoteAttention,
+  labels: string[],
+): RemoteAttention {
+  if (attention.kind !== "plan" || labels.length < 2) {
+    return attention;
+  }
+  const normalized = labels.map((label) => label.trim());
+  if (normalized.some((label) => !label)) {
+    return attention;
+  }
+  return {
+    ...attention,
+    body: [
+      attention.body,
+      "",
+      "## 终端当前选项",
+      ...normalized.map((label, index) => `${index + 1}. ${label}`),
+    ].join("\n"),
+    renderedMenuLabels: normalized,
   };
 }

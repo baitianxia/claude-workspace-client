@@ -19,6 +19,7 @@ import { terminateTrackedClaudeProcesses } from "./claude-agent-sdk-process";
 import { ClaudeCodeAssistantRunner } from "./claude-code-assistant-runner";
 import { ClaudeCodeAssistantTaskRunner } from "./claude-code-assistant-task-runner";
 import { ClaudeHookServer } from "./claude-hook-server";
+import { loadHeadlessTerminalFactory } from "./terminal-screen-mirror";
 import {
   findClaudeTranscript,
   findClaudeTranscriptSync,
@@ -180,6 +181,12 @@ async function startApplication(): Promise<void> {
   const hookLaunchOptions = claudeHookServer?.hookLaunchOptions.bind(
     claudeHookServer,
   );
+  const screenMirrorFactory = loadHeadlessTerminalFactory();
+  if (!screenMirrorFactory) {
+    console.warn(
+      "@xterm/headless is not installed; remote menu checks fall back to renderer terminal reports.",
+    );
+  }
   sessionManager = new SessionManager(
     () => claudeLocator.requireExecutable(),
     undefined,
@@ -188,6 +195,7 @@ async function startApplication(): Promise<void> {
     hookLaunchOptions,
     undefined,
     (claudeSessionId) => findClaudeTranscriptSync(claudeSessionId),
+    screenMirrorFactory,
   );
   await projectStore.replaceSessions(sessionManager.listSessions());
 

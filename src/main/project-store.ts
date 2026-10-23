@@ -23,6 +23,8 @@ export interface StoredWeComSettings {
   botId: string;
   targetUserId: string;
   encryptedSecret: string;
+  /** Answer prompts through the Hook while the owner is away (default true). */
+  holdPromptsWhileAway?: boolean;
 }
 
 interface AppSettings {
@@ -179,7 +181,9 @@ function parseStore(raw: string): StoreData {
       typeof candidate.enabled !== "boolean" ||
       typeof candidate.botId !== "string" ||
       typeof candidate.targetUserId !== "string" ||
-      typeof candidate.encryptedSecret !== "string"
+      typeof candidate.encryptedSecret !== "string" ||
+      (candidate.holdPromptsWhileAway !== undefined &&
+        typeof candidate.holdPromptsWhileAway !== "boolean")
     ) {
       throw new Error("Workspace settings contain invalid WeCom settings.");
     }
@@ -188,6 +192,9 @@ function parseStore(raw: string): StoreData {
       botId: candidate.botId,
       targetUserId: candidate.targetUserId,
       encryptedSecret: candidate.encryptedSecret,
+      ...(candidate.holdPromptsWhileAway !== undefined
+        ? { holdPromptsWhileAway: candidate.holdPromptsWhileAway }
+        : {}),
     };
   }
 
