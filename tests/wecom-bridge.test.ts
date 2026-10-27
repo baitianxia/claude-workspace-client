@@ -1182,6 +1182,38 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
+  it("voids a staged Hook choice when the prompt is handed back to the terminal", async () => {
+    const { pty, manager, session, client, bridge, launchId } = heldBridge();
+    const handle = fakeDecision();
+    bridge.handleClaudeHook({ ...hook(session.id, launchId(), "rm -rf build"), decision: handle.decision });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const code = routeCode(markdownContent(client.sent[0].body));
+    client.emit("message", incomingMessage("deny", `${code} 拒绝`));
+    await vi.waitFor(() =>
+      expect(client.replies).toContainEqual(expect.stringContaining("已选择拒绝")),
+    );
+    // The owner takes over locally: the dialog appears from scratch.
+    bridge.releaseHeldPrompts(session.id);
+    expect(handle.releases).toHaveLength(1);
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    expect(markdownContent(client.sent[1].body)).toContain("之前通过企业微信做出的选择未生效");
+    const entry = bridge["router"].listForUser("zhangsan").find((item) => item.code === code);
+    expect(entry).toBeDefined();
+    expect(entry?.replyStage).toBeUndefined();
+    // The reason text is no longer typed blindly; it is treated as a menu
+    // reply against the dialog on screen.
+    simulateMenu(manager, session.id, pty, ["⏺ Bash(rm -rf build)"], ALLOW_DENY);
+    const writesBefore = pty.writes.length;
+    client.emit("message", incomingMessage("reason-late", `${code} 先列出会删除的文件`));
+    await vi.waitFor(() =>
+      expect(client.replies).toContainEqual(expect.stringContaining("权限回复无效")),
+    );
+    expect(pty.writes.slice(writesBefore)).toEqual([]);
+    client.emit("message", incomingMessage("deny-again", `${code} 拒绝`));
+    await vi.waitFor(() => expect(pty.writes.slice(writesBefore)).toEqual([DOWN, "\r"]));
+    bridge.dispose();
+  });
+
   it("does not hold prompts while the owner is at the computer or when disabled", async () => {
     const atComputer = heldBridge(() => false);
     const handle = fakeDecision();

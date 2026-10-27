@@ -126,13 +126,15 @@ export const MENU_RECOVERY_HINT =
  * of the command, a host, a file name) appears in the visible rows.
  */
 /**
- * A command is probed by its whole first line up to this length. Only a
- * command longer than this is cut, and then the dialog itself continues
- * after the probe, so no token boundary can be required for it.
+ * A command is probed by its whole first line (bounded only to keep the
+ * notification data small). The probe is matched as a whole token, so two
+ * commands that share a long prefix are never mistaken for each other; a
+ * dialog that shortens a very long command simply fails the check and the
+ * reply then needs an explicit confirmation.
  */
-export const IDENTITY_PROBE_PREFIX_LENGTH = 160;
+export const IDENTITY_PROBE_PREFIX_LENGTH = 1_000;
 // A wrapped command spans at most this many consecutive rows for matching.
-const MAX_WRAPPED_ROWS = 6;
+const MAX_WRAPPED_ROWS = 12;
 
 const PROBE_WORD = /[\p{L}\p{N}_.\-]/u;
 const BOX_DRAWING = /[\u2500-\u257f]/gu;
@@ -199,15 +201,7 @@ export function screenShowsRequest(
   if (probes.length === 0) {
     return null;
   }
-  return probes.some((probe) => {
-    if (probe.length >= IDENTITY_PROBE_PREFIX_LENGTH) {
-      // The start of a very long command: the text legitimately continues
-      // after it, so only its presence (ignoring wrapping) can be checked.
-      const screen = compact(lines.join("\n")).replace(BOX_DRAWING, "");
-      return screen.includes(compact(probe));
-    }
-    return rowsContainToken(lines, probe);
-  });
+  return probes.some((probe) => rowsContainToken(lines, probe));
 }
 
 function permissionOptionCount(

@@ -589,6 +589,17 @@ export class RemoteReplyRouter {
     return true;
   }
 
+  /** Forget a staged choice; returns the stage that was pending, if any. */
+  clearReplyStage(code: string): RemoteReplyStage | null {
+    const pending = this.pendingByCode.get(code.toUpperCase());
+    if (!pending?.replyStage) {
+      return null;
+    }
+    const stage = pending.replyStage;
+    delete pending.replyStage;
+    return stage;
+  }
+
   clearWorkspaceSession(workspaceSessionId: string): string | null {
     const code = this.codeByWorkspaceSession.get(workspaceSessionId);
     if (code) {

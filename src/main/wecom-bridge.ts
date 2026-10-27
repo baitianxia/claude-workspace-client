@@ -951,10 +951,42 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     for (const { decision } of held.decisions) {
       decision.release();
     }
+    // A choice made through the Hook ("deny, reason follows") is void once
+    // the terminal dialog takes over: the dialog starts from scratch, so the
+    // next message must choose again instead of being typed as the reason.
+    const stage = this.router.clearReplyStage(held.code);
     this.recordClaudeHook(
       `已将回复码 ${held.code} 对应的提示交还给终端对话框（${reason}）。`,
     );
+    if (stage) {
+      void this.notifyRecipient(
+        `回复码 ${held.code} 对应的提示已交还给终端对话框（${reason}），之前通过企业微信做出的选择未生效。` +
+          "如仍需远程处理，请重新回复允许/拒绝或选项编号。",
+      );
+    }
     this.syncPresencePolling();
+  }
+
+  /** Push a plain notice to the configured recipient, if connected. */
+  private async notifyRecipient(content: string): Promise<void> {
+    const client = this.authenticatedClient;
+    if (!client || this.client !== client) {
+      return;
+    }
+    try {
+      await this.enqueueOutboundSend(async () => {
+        if (this.authenticatedClient !== client) {
+          return false;
+        }
+        await client.sendMessage(this.configuration.targetUserId, {
+          msgtype: "markdown",
+          markdown: { content },
+        });
+        return true;
+      });
+    } catch (error) {
+      console.error("Failed to send WeCom notice", error);
+    }
   }
 
   private forgetHeldPrompt(held: HeldPrompt): void {

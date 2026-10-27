@@ -39,6 +39,7 @@ Hook 到达时并不知道 Claude Code 会画出什么菜单。源码（Claude C
   - 问题：选项 → `permissionDecision:"allow"` + `updatedInput:{…tool_input, answers:{[question]: label}}`，多选用 `", "` 连接；「其他：内容」→ 内容作为答案；「讨论：内容」→ `deny` + reason（等价于放弃选项、把话转给 Claude）；多问题向导逐题解析，无法匹配选项的回答作为自由文本提交（Hook 协议允许，终端向导不允许）。
   - 计划：`1`/批准 → allow；`2`/拒绝 → `plan-feedback` 阶段；「拒绝：意见」一步完成 deny + reason。
   - 输出形状：`PermissionRequest` 用 `hookSpecificOutput.decision`，`PreToolUse` 用 `permissionDecision` / `permissionDecisionReason` / `updatedInput`。
+- 交还终端时清除该回复码上已进入的分阶段选择（例如已选“拒绝”、等待原因），并向接收人推送一条提示，要求重新选择；否则下一条消息会被当作原因文本直接写进终端。
 - 交还终端：本地键盘输入该会话、会话退出、重新配置、企业微信连接断开/出错/被占用（没有连接就没人能回答）、owner 回到电脑旁（每 3 秒轮询一次 `isOwnerAway`）、或界面点击“在本机处理”（IPC `releaseHeldPrompts`）都会 `release()`，Claude Code 随即弹出对话框。回复码保留，后续回复走 B 层。Claude Code 自己放弃等待（连接关闭）时同样转入 B 层。
 - 界面：`WeComState.heldPrompts` 驱动会话上方的横幅；`WeComState.holdPromptsWhileAway` 对应设置中的开关，默认开启。
 
@@ -47,7 +48,7 @@ Hook 到达时并不知道 Claude Code 会画出什么菜单。源码（Claude C
 回复到达后才读取屏幕（`parseVisibleMenu`），并把通知中的选择绑定到屏幕上的行：
 
 - 权限：首行必须像允许（`Yes/Allow/是/允许/同意`）、末行必须像拒绝（`No/Deny/否/拒绝`），否则不是权限对话框。通知的第 1 项 → 屏幕首行，通知末项 → 屏幕末行，两者在任何布局下都成立；中间行只在两边项数一致（且来自屏幕的通知文字一致）时直接执行，否则返回 `confirm`。
-- 身份校验：`identityProbes`（命令首行全文、URL host、文件名、建议规则/目录名）至少一个要出现在屏幕上，否则视为排队中的另一条请求，返回 `confirm`。探针必须以整词出现在某一行或连续几行（换行处按空格和直接拼接两种方式复原）中，`npm test --foo` 不能匹配 `npm test --foobar`，共享长前缀的两条命令也不互相匹配；只有超过 160 字符被截断的命令才允许无边界的前缀匹配。
+- 身份校验：`identityProbes`（命令首行全文、URL host、文件名、建议规则/目录名）至少一个要出现在屏幕上，否则视为排队中的另一条请求，返回 `confirm`。探针必须以整词出现在某一行或连续几行（换行处按空格和直接拼接两种方式复原）中，`npm test --foo` 不能匹配 `npm test --foobar`，共享长前缀的两条命令也不互相匹配；不再有任何无边界的前缀匹配，对话框把超长命令缩略显示时校验失败，回复需经「确认 N」。
 - 问题：通知里 Claude 的每个选项都必须出现在屏幕上（身份）；选择按标签匹配；`Type something` / `Chat about this` 按别名识别；`Chat about this` 不可见时返回 `probe`，由执行层向下探一行并核对标签。
 - 计划及其他菜单：按位置，若通知记录了当时屏幕的标签则逐项核对。
 - 超出通知范围的编号：屏幕上该行若是自由回答/讨论行 → 提示改用关键字（不按键）；若是实质行 → `confirm`。
@@ -61,7 +62,7 @@ Hook 到达时并不知道 Claude Code 会画出什么菜单。源码（Claude C
 
 ### C 层：主进程屏幕镜像（`terminal-screen-mirror.ts`、`session-manager.ts`）
 
-- 安装 `@xterm/headless` 后，每个会话在主进程持有一个与 renderer 同尺寸、同配置（无 Unicode 11 addon、`convertEol: false`）的 headless Terminal，PTY 输出同步写入，`resize` 同步跟随。每块字节解析完成后立刻以该输出序号发布可见行；此时渲染进程的上报被忽略。
+- `@xterm/headless` 不在默认依赖中（避免在无法更新 lock 文件的环境里破坏 `npm ci`），用 `npm install @xterm/headless@^6.0.0` 一次性写入 package.json 与 lock 后启用。安装后，每个会话在主进程持有一个与 renderer 同尺寸、同配置（无 Unicode 11 addon、`convertEol: false`）的 headless Terminal，PTY 输出同步写入，`resize` 同步跟随。每块字节解析完成后立刻以该输出序号发布可见行；此时渲染进程的上报被忽略。
 - 未安装时 `loadHeadlessTerminalFactory()` 返回 null，行为退回渲染进程上报，启动日志给出提示。
 - 任何 xterm 升级必须同时升级 `@xterm/xterm` 与 `@xterm/headless` 并保持配置一致，否则两端换行可能不同。
 
