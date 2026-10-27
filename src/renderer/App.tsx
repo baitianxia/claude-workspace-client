@@ -122,6 +122,26 @@ function upsertSession(
 
 const COLLAPSED_PROJECTS_KEY = "claude-workspace.collapsed-projects.v1";
 const ACTIVE_SELECTION_KEY = "claude-workspace.active-selection.v1";
+const EXPANDED_SIDEBAR_CARDS_KEY = "claude-workspace.expanded-sidebar-cards.v1";
+
+type SidebarCard = "runtime" | "wecom";
+
+function loadExpandedSidebarCards(): Set<SidebarCard> {
+  try {
+    const stored = JSON.parse(
+      window.localStorage.getItem(EXPANDED_SIDEBAR_CARDS_KEY) ?? "[]",
+    ) as unknown;
+    return new Set(
+      Array.isArray(stored)
+        ? stored.filter(
+            (card): card is SidebarCard => card === "runtime" || card === "wecom",
+          )
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
 const TEMPORARY_GROUP_KEY = "__temporary-sessions__";
 
 type SidebarMode = "assistant" | "claude";
@@ -215,6 +235,30 @@ export function App() {
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [skipPermissions, setSkipPermissions] = useState(false);
+  // The runtime and bot cards fold to one status row by default so the
+  // project/session list keeps most of the sidebar.
+  const [expandedCards, setExpandedCards] = useState<Set<SidebarCard>>(
+    loadExpandedSidebarCards,
+  );
+  const toggleSidebarCard = (card: SidebarCard) => {
+    setExpandedCards((current) => {
+      const next = new Set(current);
+      if (next.has(card)) {
+        next.delete(card);
+      } else {
+        next.add(card);
+      }
+      try {
+        window.localStorage.setItem(
+          EXPANDED_SIDEBAR_CARDS_KEY,
+          JSON.stringify([...next]),
+        );
+      } catch {
+        // Persistence is a convenience only.
+      }
+      return next;
+    });
+  };
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
   const [projectAliasDraft, setProjectAliasDraft] = useState("");
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(
@@ -1085,14 +1129,11 @@ export function App() {
         <header className="sidebar-header">
           <div className="brand-row">
             <BrandMark small />
-            <div>
+            <div className="brand-copy">
               <h1>Claude Workspace</h1>
               <p>本地多工程控制台</p>
             </div>
-          </div>
-          <div className="appearance-control">
-            <span className="appearance-label">背景</span>
-            <div className="theme-switcher" role="group" aria-label="背景主题">
+            <div className="theme-switcher" role="group" aria-label="背景主题" title="背景主题">
               <button
                 className={`theme-choice ${theme === "dark" ? "theme-choice--active" : ""}`}
                 type="button"
@@ -1115,8 +1156,17 @@ export function App() {
           </div>
         </header>
 
-        <section className="claude-runtime-card sidebar-shared-runtime-card">
-          <div className="runtime-heading">
+        <section
+          className={`claude-runtime-card sidebar-shared-runtime-card ${expandedCards.has("runtime") ? "" : "claude-runtime-card--collapsed"}`}
+        >
+          <button
+            className="runtime-heading runtime-toggle"
+            type="button"
+            aria-expanded={expandedCards.has("runtime")}
+            aria-controls="sidebar-runtime-details"
+            title={expandedCards.has("runtime") ? "收起运行环境" : "展开运行环境"}
+            onClick={() => toggleSidebarCard("runtime")}
+          >
             <span
               className={`status-dot ${snapshot.claudeExecutable.path ? "status-dot--online" : "status-dot--offline"}`}
             />
@@ -1129,19 +1179,24 @@ export function App() {
                     : "自动发现"
                   : "无法启动会话"}
               </span>
+            </div>
+            <span className="runtime-chevron" aria-hidden="true">›</span>
+          </button>
+          {expandedCards.has("runtime") ? (
+            <div id="sidebar-runtime-details" className="runtime-details">
               <span className="runtime-description">
                 私人助理与开发工作台共用 Claude Code 运行环境
               </span>
+              <div className="runtime-actions">
+                <button type="button" onClick={detectClaudeExecutable} disabled={busy}>
+                  重新检测
+                </button>
+                <button type="button" onClick={chooseClaudeExecutable} disabled={busy}>
+                  选择文件
+                </button>
+              </div>
             </div>
-          </div>
-          <div className="runtime-actions">
-            <button type="button" onClick={detectClaudeExecutable} disabled={busy}>
-              重新检测
-            </button>
-            <button type="button" onClick={chooseClaudeExecutable} disabled={busy}>
-              选择文件
-            </button>
-          </div>
+          ) : null}
         </section>
 
         <nav className="sidebar-mode-tabs" role="tablist" aria-label="产品区域">
@@ -1283,9 +1338,17 @@ export function App() {
           hidden={sidebarMode !== "claude"}
         >
           <section className="sidebar-management-section">
-            <h3 className="sidebar-subsection-label">远程终端</h3>
-            <section className="claude-runtime-card wecom-runtime-card">
-              <div className="runtime-heading">
+            <section
+              className={`claude-runtime-card wecom-runtime-card ${expandedCards.has("wecom") ? "" : "claude-runtime-card--collapsed"}`}
+            >
+              <button
+                className="runtime-heading runtime-toggle"
+                type="button"
+                aria-expanded={expandedCards.has("wecom")}
+                aria-controls="sidebar-wecom-details"
+                title={expandedCards.has("wecom") ? "收起机器人详情" : "展开机器人详情"}
+                onClick={() => toggleSidebarCard("wecom")}
+              >
                 <span
                   className={`status-dot ${
                     snapshot.wecom.status === "connected"
@@ -1296,10 +1359,15 @@ export function App() {
                   }`}
                 />
                 <div>
-                  <strong>Claude Code 终端控制机器人</strong>
+                  <strong>终端控制机器人</strong>
                   <span title={snapshot.wecom.error}>
                     {wecomStatusLabel(snapshot.wecom)}
                   </span>
+                </div>
+                <span className="runtime-chevron" aria-hidden="true">›</span>
+              </button>
+              {expandedCards.has("wecom") ? (
+                <div id="sidebar-wecom-details" className="runtime-details">
                   <span className="runtime-description">
                     仅用于交互式终端的远程确认与通知
                   </span>
@@ -1319,20 +1387,19 @@ export function App() {
                       {wecomClaudeHookLabel(snapshot.wecom)}
                     </span>
                   ) : null}
+                  <div className="runtime-actions">
+                    <button type="button" onClick={openWeComSettings} disabled={busy}>
+                      {snapshot.wecom.configured ? "修改配置" : "开始配置"}
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <div className="runtime-actions">
-                <button type="button" onClick={openWeComSettings} disabled={busy}>
-                  {snapshot.wecom.configured ? "修改配置" : "开始配置"}
-                </button>
-              </div>
+              ) : null}
             </section>
           </section>
 
           <section className="sidebar-workspace-section">
-          <h3 className="sidebar-subsection-label">工作区</h3>
           <div className="session-launch-control">
-            <label htmlFor="session-launch-command">新会话启动命令</label>
+            <label htmlFor="session-launch-command">新会话</label>
             <select
               id="session-launch-command"
               value={skipPermissions ? "skip-permissions" : "default"}
@@ -1340,18 +1407,17 @@ export function App() {
                 setSkipPermissions(event.currentTarget.value === "skip-permissions")
               }
               disabled={busy}
-              aria-describedby="session-launch-description"
+              title={
+                skipPermissions
+                  ? "下一个新会话跳过权限确认，创建后恢复默认。"
+                  : "默认使用 claude，可选择跳过权限确认。"
+              }
             >
               <option value="default">claude（默认）</option>
               <option value="skip-permissions">
                 claude --dangerously-skip-permissions
               </option>
             </select>
-            <span id="session-launch-description">
-              {skipPermissions
-                ? "下一个新会话跳过权限确认，创建后恢复默认。"
-                : "默认使用 claude，可选择跳过权限确认。"}
-            </span>
           </div>
           <div className="section-heading">
             <span>工程与会话</span>

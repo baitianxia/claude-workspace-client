@@ -52,7 +52,52 @@ button:focus-visible {
 }
 
 .sidebar-header {
-  padding: 22px 18px 16px;
+  padding: 14px 14px 10px 18px;
+}
+
+.brand-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.brand-copy h1 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-toggle {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border: 1px solid #403a34;
+  border-radius: 7px;
+  color: #b9afa4;
+  background: #171512;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.theme-toggle:hover:not(:disabled) {
+  border-color: #5e5047;
+  color: #f2e9df;
+  background: #302b26;
+}
+
+.theme-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.app-shell[data-theme="light"] .theme-toggle {
+  border-color: var(--light-border);
+  color: var(--light-text-soft);
+  background: var(--light-surface);
+}
+
+.brand-row .theme-switcher {
+  flex: 0 0 auto;
 }
 
 .sidebar-tab-panel,
@@ -119,7 +164,10 @@ button:focus-visible {
 }
 
 .sidebar-claude-panel {
+  display: flex;
+  min-height: 0;
   flex: 1 1 auto;
+  flex-direction: column;
   border-top: 1px solid #3a342e;
   background: rgba(20, 19, 17, 0.3);
 }
@@ -140,7 +188,7 @@ button:focus-visible {
 
 .sidebar-management-section {
   flex: 0 0 auto;
-  padding: 8px 0 10px;
+  padding: 8px 0;
   border-bottom: 1px solid #302d29;
   background: rgba(24, 22, 19, 0.42);
 }
@@ -166,6 +214,84 @@ button:focus-visible {
 .sidebar-management-section > .claude-runtime-card {
   margin-top: 0;
   margin-bottom: 0;
+}
+
+/* The runtime and bot cards fold to one status row; the details only take
+   space when the user opens them. */
+.claude-runtime-card--collapsed {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.runtime-toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.runtime-toggle:focus-visible {
+  outline: 2px solid #cf7658;
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.runtime-chevron {
+  flex: 0 0 auto;
+  margin-top: 0 !important;
+  color: #7d756c;
+  font-size: 15px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.runtime-toggle[aria-expanded="true"] .runtime-chevron {
+  transform: rotate(90deg);
+}
+
+.runtime-details {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  padding-left: 16px;
+}
+
+.runtime-details .runtime-description {
+  color: #827a72;
+  font-size: 10px;
+  font-weight: 450;
+  line-height: 1.4;
+}
+
+.runtime-details .wecom-inbound-status {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #aaa29a;
+  font-size: 10px;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.runtime-details .wecom-inbound-status--routed {
+  color: #b7cc94;
+}
+
+.runtime-details .wecom-inbound-status--rejected,
+.runtime-details .wecom-inbound-status--ignored {
+  color: #e1b66f;
+}
+
+.runtime-details .wecom-inbound-status--failed {
+  color: #e08a7e;
+}
+
+.runtime-details .runtime-actions {
+  margin-top: 7px;
 }
 
 .sidebar-shared-runtime-card {
@@ -230,6 +356,17 @@ button:focus-visible {
   min-width: 0;
   flex: 1;
   flex-direction: column;
+}
+
+.claude-runtime-card--collapsed .runtime-heading > div {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.claude-runtime-card--collapsed .runtime-heading span:not(.status-dot):not(.runtime-chevron) {
+  margin-top: 0;
+  flex: 1;
 }
 
 .runtime-heading strong {
@@ -309,7 +446,7 @@ button:focus-visible {
 }
 
 .wecom-runtime-card {
-  margin-top: -7px;
+  margin-top: 0;
 }
 
 .runtime-actions {
@@ -454,20 +591,23 @@ button:focus-visible {
 .session-launch-control {
   display: grid;
   flex: 0 0 auto;
-  gap: 6px;
-  margin: 0 12px 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 6px;
 }
 
 .session-launch-control label {
   color: #b9afa4;
   font-size: 11px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .session-launch-control select {
   width: 100%;
   min-width: 0;
-  padding: 8px 6px;
+  padding: 5px 6px;
   border: 1px solid #48423c;
   border-radius: 7px;
   color: #e9e3da;
@@ -4929,20 +5069,6 @@ button:disabled {
  * so they can override the original dark-first component rules without
  * changing the geometry of either product area.
  */
-.appearance-control {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 15px;
-  gap: 10px;
-}
-
-.appearance-label {
-  color: #8f8980;
-  font-size: 10px;
-  font-weight: 600;
-}
-
 .theme-switcher {
   display: inline-flex;
   padding: 2px;
@@ -5034,7 +5160,6 @@ button:disabled {
   background: var(--light-surface-alt);
 }
 
-.app-shell[data-theme="light"] .appearance-label,
 .app-shell[data-theme="light"] .theme-choice {
   color: var(--light-muted);
 }
@@ -5064,6 +5189,11 @@ button:disabled {
   color: var(--light-text-soft);
 }
 
+.app-shell[data-theme="light"] .runtime-chevron {
+  color: var(--light-faint);
+}
+
+.app-shell[data-theme="light"] .runtime-details .runtime-description,
 .app-shell[data-theme="light"] .runtime-heading .runtime-description {
   color: var(--light-muted);
 }
