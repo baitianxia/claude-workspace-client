@@ -163,6 +163,9 @@ const TERMINAL_TOGGLE = " ";
 // after the user has seen it.
 const MENU_COMMAND = /^(?:菜单|刷新菜单|刷新|menu)$/iu;
 const CONFIRM_COMMAND = /^(?:确认|confirm)\s*([1-9][0-9]?)$/iu;
+// Claude Code's plan approval rows ("Yes, and auto-accept edits", "No, keep
+// planning", …) always mention the plan or edits.
+const PLAN_MENU_LABEL = /plan|edits|计划/iu;
 
 interface RemoteReplyContext {
   client: WeComClient;
@@ -761,6 +764,14 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
       ) {
         return null;
       }
+      if (
+        attention.kind === "plan" &&
+        !options.some((label) => PLAN_MENU_LABEL.test(label))
+      ) {
+        // An earlier permission dialog has the same allow/deny shape; only
+        // Claude Code's plan approval menu mentions the plan.
+        return null;
+      }
       return { options, sequence: request.sequence };
     };
     try {
@@ -811,7 +822,10 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     const latest = await this.sessionManager
       .waitForTerminalVisibleLines(sessionId, sequence, REMOTE_REPLY_SYNC_TIMEOUT_MS)
       .catch(() => null);
-    return latest ?? this.sessionManager.getTerminalVisibleLines(sessionId);
+    // Newer output exists that the screen has not caught up with: the old
+    // rows may show a menu that is already gone. Treat it as unreadable
+    // rather than acting on it.
+    return latest ?? undefined;
   }
 
   /**
@@ -917,9 +931,14 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     }
   }
 
-  private releaseAllHeldPrompts(): void {
+  /**
+   * Nobody can answer a held prompt without a live WeCom connection, so any
+   * loss of the connection hands every held prompt back to the terminal
+   * dialog at once instead of letting Claude Code wait for the Hook timeout.
+   */
+  private releaseAllHeldPrompts(reason = "连接重置"): void {
     for (const held of [...this.heldPrompts.values()]) {
-      this.releaseHeldPrompt(held, "连接重置");
+      this.releaseHeldPrompt(held, reason);
     }
   }
 
@@ -983,6 +1002,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     client.on("reconnecting", () => {
       if (this.client === client) {
         this.authenticatedClient = null;
+        this.releaseAllHeldPrompts("企业微信连接断开");
         this.clearRetry();
         this.updateState({ ...this.state, status: "connecting" });
       }
@@ -990,6 +1010,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     client.on("disconnected", (reason) => {
       if (this.client === client) {
         this.authenticatedClient = null;
+        this.releaseAllHeldPrompts("企业微信连接断开");
         this.clearRetry();
         if (
           this.supersededClient === client ||
@@ -1014,6 +1035,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     client.on("error", (error) => {
       if (this.client === client) {
         this.authenticatedClient = null;
+        this.releaseAllHeldPrompts("企业微信连接出错");
         this.clearRetry();
         this.fail(`企业微信连接错误：${readableError(error)}`);
       }
@@ -1021,6 +1043,7 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     client.on("event.disconnected_event", () => {
       if (this.client === client) {
         this.authenticatedClient = null;
+        this.releaseAllHeldPrompts("企业微信连接被其他客户端占用");
         this.supersededClient = client;
         this.clearRetry();
         this.updateState({

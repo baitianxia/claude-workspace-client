@@ -250,6 +250,11 @@ describe("resolveHeldReply", () => {
       },
     });
     expect(resolveHeldReply(wizard, wizardPayload, "1")).toMatchObject({ status: "reject" });
+    // A single-select question cannot take two options.
+    expect(resolveHeldReply(wizard, wizardPayload, "1,2;1")).toMatchObject({
+      status: "reject",
+      message: expect.stringContaining("单选题"),
+    });
   });
 
   it("approves or returns a plan", () => {

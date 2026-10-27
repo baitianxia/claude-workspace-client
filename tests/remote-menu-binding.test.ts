@@ -104,12 +104,33 @@ describe("permission binding", () => {
     expect(screenShowsRequest(hookPermission, ["⏺ Bash(npm test)", "❯ 1. Yes"])).toBe(true);
     expect(screenShowsRequest(hookPermission, ["⏺ Bash(rm -rf build)", "❯ 1. Yes"])).toBe(false);
     expect(screenShowsRequest(pending({}), ["anything"])).toBeNull();
-    // Wrapped command text still matches once whitespace is ignored.
+    // A long command is probed by its first 24 characters, which may wrap.
     expect(
       screenShowsRequest(pending({ identityProbes: ["npm run build -- --watch"] }), [
         "│ npm run build --",
-        "│ --watch",
+        "│ --watch --verbose --color",
       ]),
+    ).toBe(true);
+    // A complete short command must match as a whole token: another queued
+    // command that merely starts the same way is a different dialog.
+    expect(
+      screenShowsRequest(pending({ identityProbes: ["npm test --foo"] }), [
+        "⏺ Bash(npm test --foobar)",
+      ]),
+    ).toBe(false);
+    expect(
+      screenShowsRequest(pending({ identityProbes: ["npm test --foo"] }), [
+        "│ Bash command",
+        "│   npm test --foo",
+        "│   Run the unit tests",
+        "Do you want to proceed?",
+      ]),
+    ).toBe(true);
+    expect(
+      screenShowsRequest(pending({ identityProbes: ["q_f790.js"] }), ["Write(skills/q_f790.jsx)"]),
+    ).toBe(false);
+    expect(
+      screenShowsRequest(pending({ identityProbes: ["example.com"] }), ["Fetch https://example.com/docs"]),
     ).toBe(true);
   });
 

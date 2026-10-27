@@ -39,7 +39,7 @@ Hook 到达时并不知道 Claude Code 会画出什么菜单。源码（Claude C
   - 问题：选项 → `permissionDecision:"allow"` + `updatedInput:{…tool_input, answers:{[question]: label}}`，多选用 `", "` 连接；「其他：内容」→ 内容作为答案；「讨论：内容」→ `deny` + reason（等价于放弃选项、把话转给 Claude）；多问题向导逐题解析，无法匹配选项的回答作为自由文本提交（Hook 协议允许，终端向导不允许）。
   - 计划：`1`/批准 → allow；`2`/拒绝 → `plan-feedback` 阶段；「拒绝：意见」一步完成 deny + reason。
   - 输出形状：`PermissionRequest` 用 `hookSpecificOutput.decision`，`PreToolUse` 用 `permissionDecision` / `permissionDecisionReason` / `updatedInput`。
-- 交还终端：本地键盘输入该会话、会话退出、重新配置、owner 回到电脑旁（每 3 秒轮询一次 `isOwnerAway`）、或界面点击“在本机处理”（IPC `releaseHeldPrompts`）都会 `release()`，Claude Code 随即弹出对话框。回复码保留，后续回复走 B 层。Claude Code 自己放弃等待（连接关闭）时同样转入 B 层。
+- 交还终端：本地键盘输入该会话、会话退出、重新配置、企业微信连接断开/出错/被占用（没有连接就没人能回答）、owner 回到电脑旁（每 3 秒轮询一次 `isOwnerAway`）、或界面点击“在本机处理”（IPC `releaseHeldPrompts`）都会 `release()`，Claude Code 随即弹出对话框。回复码保留，后续回复走 B 层。Claude Code 自己放弃等待（连接关闭）时同样转入 B 层。
 - 界面：`WeComState.heldPrompts` 驱动会话上方的横幅；`WeComState.holdPromptsWhileAway` 对应设置中的开关，默认开启。
 
 ### B 层：按键晚绑定与两阶段提交（`remote-menu-binding.ts`、`wecom-bridge.ts`）
@@ -47,15 +47,15 @@ Hook 到达时并不知道 Claude Code 会画出什么菜单。源码（Claude C
 回复到达后才读取屏幕（`parseVisibleMenu`），并把通知中的选择绑定到屏幕上的行：
 
 - 权限：首行必须像允许（`Yes/Allow/是/允许/同意`）、末行必须像拒绝（`No/Deny/否/拒绝`），否则不是权限对话框。通知的第 1 项 → 屏幕首行，通知末项 → 屏幕末行，两者在任何布局下都成立；中间行只在两边项数一致（且来自屏幕的通知文字一致）时直接执行，否则返回 `confirm`。
-- 身份校验：`identityProbes`（命令前 24 字符、URL host、文件名、建议规则/目录名）至少一个要出现在屏幕上，否则视为排队中的另一条请求，返回 `confirm`。
+- 身份校验：`identityProbes`（命令前 24 字符、URL host、文件名、建议规则/目录名）至少一个要出现在屏幕上，否则视为排队中的另一条请求，返回 `confirm`。完整的短探针（不足 24 字符）必须在某一行中以整词出现（`npm test --foo` 不能匹配 `npm test --foobar`）；只有被截断的命令前缀才允许跨行、无边界的匹配。
 - 问题：通知里 Claude 的每个选项都必须出现在屏幕上（身份）；选择按标签匹配；`Type something` / `Chat about this` 按别名识别；`Chat about this` 不可见时返回 `probe`，由执行层向下探一行并核对标签。
 - 计划及其他菜单：按位置，若通知记录了当时屏幕的标签则逐项核对。
 - 超出通知范围的编号：屏幕上该行若是自由回答/讨论行 → 提示改用关键字（不按键）；若是实质行 → `confirm`。
 - 执行（`executeBinding`）：以解析到的光标行为原点计算 Down/Up 次数；写入导航键后等待屏幕更新（`waitForTerminalVisibleLines`，1.5 秒内），要求光标恰好落在目标行且标签相等，再写 Enter（多选为逐项 Space，最后 Enter）。确认失败不按任何键，回复用户终端当前菜单。随同选择发送的文本（`inlineFollowUp`）在 Enter 后等待一次屏幕更新再写入。
 - 命令：「菜单」重发终端当前菜单；「确认 N」选择终端第 N 项（仍经两阶段确认）。
-- 无屏幕可读（渲染进程从未上报且无镜像）时拒绝按键，而不是按通知形状盲发。
+- 无屏幕可读（渲染进程从未上报且无镜像），或已有新输出而屏幕在 1 秒内没有跟上时，一律拒绝按键，而不是按通知形状或旧画面盲发。
 
-通知侧只陈述确定的事：问题通知只给 Claude 自己的选项编号，自由回答与讨论以关键字提供；权限/计划通知在推送前尝试读取已画出的菜单，并要求首/末行语义正确、请求内容在屏幕上，否则等待新输出，超时回退 Hook 数据。
+通知侧只陈述确定的事：问题通知只给 Claude 自己的选项编号，自由回答与讨论以关键字提供；权限/计划通知在推送前尝试读取已画出的菜单，并要求首/末行语义正确、权限对话框含请求内容、计划菜单的行文提到 plan/edits/计划，否则等待新输出，超时回退 Hook 数据。
 
 ### C 层：主进程屏幕镜像（`terminal-screen-mirror.ts`、`session-manager.ts`）
 

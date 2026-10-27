@@ -125,20 +125,62 @@ export const MENU_RECOVERY_HINT =
  * carries nothing to check; otherwise true when at least one probe (the start
  * of the command, a host, a file name) appears in the visible rows.
  */
+/**
+ * Probes at least this long were cut from a longer text (see
+ * permissionIdentityProbes), so the dialog continues after them and no
+ * token boundary can be required.
+ */
+export const IDENTITY_PROBE_PREFIX_LENGTH = 24;
+
+const PROBE_WORD = /[\p{L}\p{N}_.\-]/u;
+const BOX_DRAWING = /[\u2500-\u257f]/gu;
+
+function normalizeProbeText(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+}
+
+function lineContainsToken(line: string, probe: string): boolean {
+  const haystack = normalizeProbeText(line.replace(BOX_DRAWING, " "));
+  const needle = normalizeProbeText(probe);
+  let from = 0;
+  for (;;) {
+    const index = haystack.indexOf(needle, from);
+    if (index < 0) {
+      return false;
+    }
+    const before = index > 0 ? haystack[index - 1] : "";
+    const after = haystack[index + needle.length] ?? "";
+    // "npm test --foo" must not pass for "npm test --foobar".
+    if (!PROBE_WORD.test(before) && !PROBE_WORD.test(after)) {
+      return true;
+    }
+    from = index + 1;
+  }
+}
+
 export function screenShowsRequest(
   pending: Pick<PendingRemoteReply, "identityProbes">,
   lines: readonly string[],
 ): boolean | null {
-  const probes = (pending.identityProbes ?? [])
-    .map((probe) => compact(probe))
-    .filter((probe) => probe.length >= 3);
+  const probes = (pending.identityProbes ?? []).filter(
+    (probe) => compact(probe).length >= 3,
+  );
   if (probes.length === 0) {
     return null;
   }
   // Dialog borders (box-drawing characters) sit between wrapped fragments
   // of long commands; drop them so a wrapped command still matches.
-  const screen = compact(lines.join("\n")).replace(/[─-╿]/gu, "");
-  return probes.some((probe) => screen.includes(probe));
+  const screen = compact(lines.join("\n")).replace(BOX_DRAWING, "");
+  return probes.some((probe) => {
+    if (probe.length >= IDENTITY_PROBE_PREFIX_LENGTH) {
+      // A prefix of a longer command: it may wrap across rows, and the
+      // text legitimately continues after it.
+      return screen.includes(compact(probe));
+    }
+    // A complete command, host or file name: it must appear as a whole
+    // token on one row.
+    return lines.some((line) => lineContainsToken(line, probe));
+  });
 }
 
 function permissionOptionCount(

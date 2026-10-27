@@ -1091,6 +1091,65 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
+  it("hands held prompts back to the terminal when the WeCom connection drops", async () => {
+    const { session, client, bridge, launchId } = heldBridge();
+    const handle = fakeDecision();
+    bridge.handleClaudeHook({ ...hook(session.id, launchId(), "npm test"), decision: handle.decision });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    expect(handle.decision.held).toBe(true);
+    client.emit("disconnected", "socket closed");
+    expect(handle.releases).toHaveLength(1);
+    expect(bridge.getState().heldPrompts).toEqual([]);
+    // Without a live connection no new prompt is held either.
+    const next = fakeDecision();
+    bridge.handleClaudeHook({ ...hook(session.id, launchId(), "npm run build"), decision: next.decision });
+    expect(next.decision.held).toBe(false);
+    bridge.dispose();
+  });
+
+  it("refuses to act on a screen that has not caught up with newer output", async () => {
+    const { pty, manager, session, client, bridge, launchId } = questionBridge();
+    simulateMenu(manager, session.id, pty, ["⏺ Bash(npm test)"], ALLOW_DENY);
+    bridge.handleClaudeHook(hook(session.id, launchId(), "npm test"));
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const code = routeCode(markdownContent(client.sent[0].body));
+    // Claude Code printed more (the dialog may be gone) but the renderer has
+    // not reported the new rows.
+    pty.emitData("⏺ Running npm test…\r\n");
+    const writesBefore = pty.writes.length;
+    client.emit("message", incomingMessage("stale", `${code} 允许`));
+    await vi.waitFor(
+      () => expect(client.replies).toContainEqual(expect.stringContaining("无法读取终端当前画面")),
+      { timeout: 3_000 },
+    );
+    expect(pty.writes.slice(writesBefore)).toEqual([]);
+    bridge.dispose();
+  });
+
+  it("does not attach an older permission menu to a plan notification", async () => {
+    const { pty, manager, session, client, bridge, launchId } = questionBridge();
+    // A finished permission dialog is still the newest screen when the plan
+    // Hook arrives.
+    simulateMenu(manager, session.id, pty, ["⏺ Bash(npm test)"], ["Yes", "Yes, and don't ask again", "No"]);
+    bridge.handleClaudeHook({
+      workspaceSessionId: session.id,
+      launchId: launchId(),
+      payload: {
+        session_id: `claude-${session.id}`,
+        transcript_path: "t.jsonl",
+        cwd: "C:\\work",
+        hook_event_name: "PreToolUse",
+        tool_name: "ExitPlanMode",
+        tool_input: { plan: "1. 补测试\n2. 重构" },
+      },
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1), { timeout: 4_000 });
+    const notice = markdownContent(client.sent[0].body);
+    expect(notice).not.toContain("don't ask again");
+    expect(notice).not.toContain("终端当前选项");
+    bridge.dispose();
+  });
+
   it("does not hold prompts while the owner is at the computer or when disabled", async () => {
     const atComputer = heldBridge(() => false);
     const handle = fakeDecision();

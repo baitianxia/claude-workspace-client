@@ -263,15 +263,21 @@ export function resolveHeldReply(
         };
       }
       const resolved: Record<string, string> = {};
-      answers.forEach((answer, index) => {
+      for (const [index, answer] of answers.entries()) {
         const options = labels[index] ?? [];
         const selections = questionSelectionsForLabels(answer, options);
+        if (modes[index] === "single" && selections && selections.length > 1) {
+          return {
+            status: "reject",
+            message: `第 ${index + 1} 个问题是单选题，只能选择一个选项。`,
+          };
+        }
         const value =
           selections && selections.length > 0
             ? selections.map((selection) => options[selection - 1]).join(", ")
             : answer;
         resolved[questions[index] ?? String(index)] = value;
-      });
+      }
       return {
         status: "respond",
         verdict: { behavior: "allow", updatedInput: answersInput(payload, resolved) },

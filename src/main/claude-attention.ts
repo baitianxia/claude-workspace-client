@@ -2,6 +2,7 @@ import type {
   ClaudeHookEvent,
   ClaudeHookPayload,
 } from "./claude-hook-server";
+import { IDENTITY_PROBE_PREFIX_LENGTH } from "./remote-menu-binding";
 import type {
   RemoteAttention,
   RemoteAttentionKind,
@@ -125,7 +126,7 @@ export function permissionIdentityProbes(payload: ClaudeHookPayload): string[] {
   };
   const command = textValue(input?.command);
   if (command) {
-    add(command.split(/\r?\n/u)[0], 24);
+    add(command.split(/\r?\n/u)[0], IDENTITY_PROBE_PREFIX_LENGTH);
   }
   const url = textValue(input?.url);
   if (url) {
