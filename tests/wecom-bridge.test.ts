@@ -1126,6 +1126,38 @@ describe("WeComBridge", () => {
     bridge.dispose();
   });
 
+  it("does not attach a plan menu that was on screen before the plan Hook", async () => {
+    const { pty, manager, session, client, bridge, launchId } = questionBridge();
+    // The previous plan's menu is still the newest screen (nothing printed
+    // since) when the next ExitPlanMode Hook arrives.
+    const menu = simulateMenu(manager, session.id, pty, ["Would you like to proceed?"], [
+      "Yes, and auto-accept edits",
+      "Yes, and manually approve edits",
+      "No, keep planning",
+    ]);
+    const planHook: ClaudeHookEvent = {
+      workspaceSessionId: session.id,
+      launchId: launchId(),
+      payload: {
+        session_id: `claude-${session.id}`,
+        transcript_path: "t.jsonl",
+        cwd: "C:\\work",
+        hook_event_name: "PreToolUse",
+        tool_name: "ExitPlanMode",
+        tool_input: { plan: "新计划" },
+      },
+    };
+    bridge.handleClaudeHook(planHook);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(client.sent).toHaveLength(0);
+    // Claude Code draws the new plan's menu: now it is attached.
+    menu.show(["Would you like to proceed?"], ["Yes, and auto-accept edits", "No, keep planning"]);
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1), { timeout: 4_000 });
+    expect(markdownContent(client.sent[0].body)).toContain("2. No, keep planning");
+    expect(markdownContent(client.sent[0].body)).not.toContain("manually approve");
+    bridge.dispose();
+  });
+
   it("does not attach an older permission menu to a plan notification", async () => {
     const { pty, manager, session, client, bridge, launchId } = questionBridge();
     // A finished permission dialog is still the newest screen when the plan
@@ -1319,7 +1351,7 @@ describe("WeComBridge", () => {
       lastClaudeHookAt: expect.any(Number),
       lastClaudeHookDetail: expect.stringContaining("接收人 zhangsan"),
     });
-    const callbackUserId = "wohR_KCgAAVrFf3pjqdWOLHCn12fH5nw";
+    const callbackUserId = "zhangsan";
 
     client.emit(
       "message",
@@ -1379,9 +1411,23 @@ describe("WeComBridge", () => {
     );
     await vi.waitFor(() => expect(client.sent).toHaveLength(3));
     const thirdCode = routeCode(markdownContent(client.sent[2].body));
+    // A different WeCom user with a valid code is ignored without a reply.
     client.emit(
       "message",
       incomingMessage("other-user", `${thirdCode} 1`, "lisi"),
+    );
+    await vi.waitFor(() =>
+      expect(bridge.getState()).toMatchObject({
+        lastInboundStatus: "ignored",
+        lastInboundDetail: expect.stringContaining("lisi"),
+      }),
+    );
+    expect(firstPty.writes).toEqual([DOWN, "\r", "请改用只读命令\r"]);
+    // ...and gets no reply that would confirm the code exists.
+    expect(client.replies).toHaveLength(3);
+    client.emit(
+      "message",
+      incomingMessage("owner-third", `${thirdCode} 1`, callbackUserId),
     );
     await vi.waitFor(() =>
       expect(firstPty.writes).toEqual([
@@ -1700,9 +1746,17 @@ describe("WeComBridge", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(firstPty.writes).toEqual([]);
     expect(bridge.getState()).toMatchObject({
-      lastInboundStatus: "rejected",
-      lastInboundDetail: expect.stringContaining("不存在或已过期"),
+      lastInboundStatus: "ignored",
+      lastInboundDetail: expect.stringContaining("非接收人"),
     });
+    expect(client.replies).toEqual([]);
+    client.emit("message", incomingMessage("unknown-code", "ZZZZZ 1"));
+    await vi.waitFor(() =>
+      expect(bridge.getState()).toMatchObject({
+        lastInboundStatus: "rejected",
+        lastInboundDetail: expect.stringContaining("不存在或已过期"),
+      }),
+    );
 
     firstPty.emitExit(0);
     manager.restartSession(session.id);

@@ -781,7 +781,11 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
         return null;
       }
       const hookSequence = this.sessionManager.getTerminalSequence(sessionId);
-      if (current.sequence >= hookSequence) {
+      // Rows already on screen are only trusted for a permission request,
+      // whose own text (command, path, host) proves they belong to it. A
+      // plan menu carries nothing to tell a new one from the previous one,
+      // so it must be drawn after the Hook arrived.
+      if (attention.kind !== "plan" && current.sequence >= hookSequence) {
         const menu = menuOf(current);
         if (menu) {
           return menu;
@@ -1131,6 +1135,18 @@ export class WeComBridge extends EventEmitter<WeComBridgeEvents> {
     }
     if (message.chattype !== "single") {
       this.recordInbound("ignored", "收到不支持的企业微信会话类型。");
+      return;
+    }
+    // Only the configured recipient may drive the terminal. The configured
+    // value must be the userid WeCom puts in `from.userid` (which can be an
+    // encrypted form; see README), so the two are compared verbatim. No
+    // reply goes back: a stranger gets no confirmation that a code exists.
+    const sender = trimmedInboundIdentifier(message.from?.userid);
+    if (!sender || sender !== this.configuration.targetUserId) {
+      this.recordInbound(
+        "ignored",
+        `已忽略来自非接收人（${sender || "未知 userid"}）的消息：只有配置的接收用户 userid 可以回复终端。`,
+      );
       return;
     }
     const quotedText = quoteText(message);

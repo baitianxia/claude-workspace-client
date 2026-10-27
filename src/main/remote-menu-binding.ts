@@ -126,22 +126,28 @@ export const MENU_RECOVERY_HINT =
  * of the command, a host, a file name) appears in the visible rows.
  */
 /**
- * Probes at least this long were cut from a longer text (see
- * permissionIdentityProbes), so the dialog continues after them and no
- * token boundary can be required.
+ * A command is probed by its whole first line up to this length. Only a
+ * command longer than this is cut, and then the dialog itself continues
+ * after the probe, so no token boundary can be required for it.
  */
-export const IDENTITY_PROBE_PREFIX_LENGTH = 24;
+export const IDENTITY_PROBE_PREFIX_LENGTH = 160;
+// A wrapped command spans at most this many consecutive rows for matching.
+const MAX_WRAPPED_ROWS = 6;
 
 const PROBE_WORD = /[\p{L}\p{N}_.\-]/u;
 const BOX_DRAWING = /[\u2500-\u257f]/gu;
 
 function normalizeProbeText(value: string): string {
-  return value.normalize("NFKC").replace(/\s+/gu, " ").toLocaleLowerCase("en-US");
+  return value
+    .replace(BOX_DRAWING, " ")
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLocaleLowerCase("en-US");
 }
 
-function lineContainsToken(line: string, probe: string): boolean {
-  const haystack = normalizeProbeText(line.replace(BOX_DRAWING, " "));
-  const needle = normalizeProbeText(probe);
+/** Whether `needle` occurs in `haystack` as a whole token. */
+function containsToken(haystack: string, needle: string): boolean {
   let from = 0;
   for (;;) {
     const index = haystack.indexOf(needle, from);
@@ -158,6 +164,31 @@ function lineContainsToken(line: string, probe: string): boolean {
   }
 }
 
+/**
+ * Whether the probe appears as a whole token on one row, or across a few
+ * consecutive rows (a wrapped command: the dialog breaks it at a space or
+ * mid-token, so both joins are tried).
+ */
+function rowsContainToken(lines: readonly string[], probe: string): boolean {
+  const needle = normalizeProbeText(probe);
+  if (!needle) {
+    return false;
+  }
+  const rows = lines.map(normalizeProbeText);
+  for (let start = 0; start < rows.length; start += 1) {
+    if (!rows[start]) {
+      continue;
+    }
+    for (let span = 1; span <= MAX_WRAPPED_ROWS && start + span <= rows.length; span += 1) {
+      const window = rows.slice(start, start + span);
+      if (containsToken(window.join(" "), needle) || containsToken(window.join(""), needle)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function screenShowsRequest(
   pending: Pick<PendingRemoteReply, "identityProbes">,
   lines: readonly string[],
@@ -168,18 +199,14 @@ export function screenShowsRequest(
   if (probes.length === 0) {
     return null;
   }
-  // Dialog borders (box-drawing characters) sit between wrapped fragments
-  // of long commands; drop them so a wrapped command still matches.
-  const screen = compact(lines.join("\n")).replace(BOX_DRAWING, "");
   return probes.some((probe) => {
     if (probe.length >= IDENTITY_PROBE_PREFIX_LENGTH) {
-      // A prefix of a longer command: it may wrap across rows, and the
-      // text legitimately continues after it.
+      // The start of a very long command: the text legitimately continues
+      // after it, so only its presence (ignoring wrapping) can be checked.
+      const screen = compact(lines.join("\n")).replace(BOX_DRAWING, "");
       return screen.includes(compact(probe));
     }
-    // A complete command, host or file name: it must appear as a whole
-    // token on one row.
-    return lines.some((line) => lineContainsToken(line, probe));
+    return rowsContainToken(lines, probe);
   });
 }
 

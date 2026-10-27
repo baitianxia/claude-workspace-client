@@ -129,6 +129,14 @@ describe("permission binding", () => {
     expect(
       screenShowsRequest(pending({ identityProbes: ["q_f790.js"] }), ["Write(skills/q_f790.jsx)"]),
     ).toBe(false);
+    // Two commands sharing a long prefix are still different commands.
+    const shared = "npm run build -- --config ./configs/production.mjs --target";
+    expect(
+      screenShowsRequest(pending({ identityProbes: [`${shared} web`] }), [`│ ${shared}`, "│ server"]),
+    ).toBe(false);
+    expect(
+      screenShowsRequest(pending({ identityProbes: [`${shared} web`] }), [`│ ${shared}`, "│ web", "│ Build the web bundle"]),
+    ).toBe(true);
     expect(
       screenShowsRequest(pending({ identityProbes: ["example.com"] }), ["Fetch https://example.com/docs"]),
     ).toBe(true);
